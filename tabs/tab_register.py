@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QTabWidget, QDateEdit
 )
-from PySide6.QtCore import QTime, QDate, Qt
+from PySide6.QtCore import QTime, QDate, Qt, Signal
 from PySide6.QtGui import QFont
 from db.database import get_connection
 from datetime import datetime
@@ -68,6 +68,8 @@ class DateEditWithShortcut(QDateEdit):
 
 
 class RegisterTab(QWidget):
+    case_saved = Signal()  # Signal emitted when a case is saved
+    
     def __init__(self):
         super().__init__()
 
@@ -97,13 +99,15 @@ class RegisterTab(QWidget):
 
         self.result_label = QLabel("—")
         self.result_label.setStyleSheet("""
-            font-size: 20px;
+            font-size: 13px;
             font-weight: bold;
             color: #4aa3ff;
             text-align: center;
         """)
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.result_label.setMinimumHeight(40)
+        self.result_label.setWordWrap(True)
+        self.result_label.setMinimumHeight(50)
+        self.result_label.setMaximumHeight(50)
         self.daily_production_label = QLabel("Daily Production: 0.00%")
         self.daily_production_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #2196F3;")
 
@@ -157,21 +161,8 @@ class RegisterTab(QWidget):
         result_layout = QVBoxLayout()
         result_layout.addWidget(self.result_label)
 
-        # Left side layout - formulario centrado
-        left_layout = QVBoxLayout()
-        left_layout.setSpacing(12)
-        left_layout.setContentsMargins(15, 15, 15, 15)
-        left_layout.addStretch()
-        form_widget = QWidget()
-        form_widget.setLayout(form)
-        left_layout.addWidget(card("Case Information", form_widget))
-        left_layout.addLayout(buttons_layout)
-        left_layout.addWidget(card("Calculation Result", result_layout))
-        left_layout.addSpacing(12)
-        
         # Progress bar section
         progress_layout = QVBoxLayout()
-        
         self.daily_production_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         progress_layout.addWidget(self.daily_production_label)
         
@@ -185,18 +176,33 @@ class RegisterTab(QWidget):
         progress_layout.addWidget(self.progress_bar)
         
         progress_group = card("Daily Production (6:00 AM - 3:00 PM)", progress_layout)
+
+        # Left side layout - Case Information y Calculation Result
+        left_layout = QVBoxLayout()
+        left_layout.setSpacing(12)
+        left_layout.setContentsMargins(15, 15, 15, 15)
         
-        left_layout.addWidget(progress_group)
+        form_widget = QWidget()
+        form_widget.setLayout(form)
+        case_info_card = card("Case Information", form_widget)
+        
+        left_layout.addWidget(case_info_card)
+        left_layout.addLayout(buttons_layout)
+        left_layout.addWidget(card("Calculation Result", result_layout))
         left_layout.addStretch()
         
-        # Right side layout - Downtime Manager
+        # Right side layout - Downtime arriba, Daily Production abajo
         right_layout = QVBoxLayout()
         right_layout.setSpacing(12)
         right_layout.setContentsMargins(15, 15, 15, 15)
-        downtime_widget = DowntimeManager(on_update_callback=self.load_daily_production)
-        right_layout.addWidget(downtime_widget)
         
-        # Main horizontal layout: Register left, Downtime right
+        downtime_widget = DowntimeManager(on_update_callback=self.load_daily_production)
+        downtime_card = card("Downtime Management", downtime_widget)
+        right_layout.addWidget(downtime_card)
+        
+        right_layout.addWidget(progress_group)
+        
+        # Main horizontal layout: Register left, Production+Downtime right
         main_layout = QHBoxLayout()
         main_layout.setSpacing(15)
         main_layout.setContentsMargins(10, 10, 10, 10)
@@ -286,10 +292,10 @@ class RegisterTab(QWidget):
             status = "✗ LOW"
             color = "#F44336"
 
-        # Display result with dynamic color
-        result_text = f"{efficiency:.1f}% – {status}"
+        # Display result with dynamic color showing efficiency and case value in two lines
+        result_text = f"{efficiency:.1f}% – {status}\nCase Value: {case_value:.3f}%"
         self.result_label.setText(result_text)
-        self.result_label.setStyleSheet(f"color: {color}; font-size: 20px; font-weight: bold; text-align: center;")
+        self.result_label.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold; text-align: center;")
 
     def load_daily_production(self):
         conn = get_connection()
@@ -403,7 +409,10 @@ class RegisterTab(QWidget):
 
         # Show success message with color
         self.result_label.setText("✓ Case Saved")
-        self.result_label.setStyleSheet("color: #4CAF50; font-size: 20px; font-weight: bold; text-align: center;")
+        self.result_label.setStyleSheet("color: #4CAF50; font-size: 13px; font-weight: bold; text-align: center;")
         self.load_daily_production()
         self.case_id.clear()
         self.doctor.clear()
+        
+        # Emit signal to notify other tabs
+        self.case_saved.emit()
