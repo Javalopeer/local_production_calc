@@ -1,0 +1,255 @@
+{
+    "Russia": {
+        "Aligners": {
+            "Primary": 32.93,
+            "Secondary": 24,
+            "CR": 10.78
+        }
+    },
+    "Slavic": {
+        "Aligners": {
+            "Primary": 30.79,
+            "Secondary": 20.43,
+            "CR": 10.78,
+            "Stage RX Primary": 39.09,
+            "Stage RX Secondary": 28.17,
+            "Stage RX CR": 13.92,
+            "Bite Sync Primary": 76.29,
+            "Bite Sync Secondary": 35.11,
+            "Bite Sync CR": 21.65
+        }
+    },
+    "Arabic": {
+        "Aligners": {
+            "Primary": 26.48,
+            "Secondary": 20.93,
+            "CR": 10.78
+        }
+    },
+    "Dachee": {
+        "Aligners": {
+            "Primary": 30,
+            "Secondary": 20.56,
+            "CR": 10.78,
+            "Stage RX Primary": 31.01,
+            "Stage RX Secondary": 23.97,
+            "Stage RX CR": 13.05,
+            "Bite Sync Primary": 68.48,
+            "Bite Sync Secondary": 52.46,
+            "Bite Sync CR": 21.26
+        }
+    },
+    "Africa": {
+        "Aligners": {
+            "Primary": 25.53,
+            "Secondary": 19.30,
+            "CR": 10.78,
+            "Stage RX Primary": 34.54,
+            "Stage RX Secondary": 26.96,
+            "Stage RX CR": 10.78
+        }
+    },
+    "Mediterranean": {
+        "Aligners": {
+            "Primary": 24.70,
+            "Secondary": 19.30,
+            "CR": 10.78
+        }
+    },
+    "Italy": {
+        "Aligners": {
+            "Primary": 25,
+            "Secondary": 19.30,
+            "CR": 10.78,
+            "Stage RX Primary": 32.72,
+            "Stage RX Secondary": 22.14,
+            "Stage RX CR": 10.78,
+            "Bite Sync Primary": 44.68,
+            "Bite Sync Secondary": 44.23,
+            "Bite Sync CR": 16.82
+        }
+    },
+    "France": {
+        "Aligners": {
+            "Primary": 26.70,
+            "Secondary": 20.27,
+            "CR": 10.78,
+            "Stage RX Primary": 33.57,
+            "Stage RX Secondary": 22.22,
+            "Stage RX CR": 11.23,
+            "Bite Sync Primary": 49.06,
+            "Bite Sync Secondary": 57.46,
+            "Bite Sync CR": 21.57
+        }
+    },
+    "France 1": {
+        "Aligners": {
+            "Primary": 27.89,
+            "Secondary": 20.74,
+            "CR": 10.78,
+            "Stage RX Primary": 31.94,
+            "Stage RX Secondary": 43.97,
+            "Stage RX CR": 11.98
+        }
+    },
+    "Benelux": {
+        "Aligners": {
+            "Primary": 28.98,
+            "Secondary": 19.86,
+            "CR": 10.78,
+            "Stage RX Primary": 39.21,
+            "Stage RX Secondary": 31.81,
+            "Stage RX CR": 14.27,
+            "Bite Sync Primary": 60.34,
+            "Bite Sync Secondary": 92.99,
+            "Bite Sync CR": 27.27
+        }
+    },
+    "POD Australia": {
+        "Aligners": {
+            "Primary": 31.84,
+            "Secondary": 21.19,
+            "CR": 10.78,
+            "Stage RX Primary": 50.30,
+            "Stage RX Secondary": 24.52,
+            "Stage RX CR": 12.76
+        }
+    },
+    "POD Iberia": {
+        "Aligners": {
+            "Primary": 29.85,
+            "Secondary": 22.78,
+            "CR": 10.78,
+            "Stage RX Primary": 37.06,
+            "Stage RX CR": 11.47
+        }
+    },
+    "Ukin": {
+        "Aligners": {
+            "Primary": 24.70,
+            "Secondary": 19.30,
+            "CR": 10.78,
+            "Stage RX Primary": 40.41,
+            "Stage RX Secondary": 17.58,
+            "Stage RX CR": 10.78,
+            "Bite Sync Primary": 49.67,
+            "Bite Sync Secondary": 55.79,
+            "Bite Sync CR": 25.24
+        }
+    },
+    "POD Ukin": {
+        "Aligners": {
+            "Primary": 24.70,
+            "Secondary": 19.30,
+            "CR": 10.78,
+            "Stage RX Primary": 29.93,
+            "Stage RX Secondary": 18.29,
+            "Stage RX CR": 10.78
+        }
+    },
+    "Clex France": {
+        "Aligners": {
+            "Primary": 24.70,
+            "Secondary": 19.30,
+            "CR": 10.78,
+            "Stage RX Primary": 43.08,
+            "Stage RX Secondary": 29.60,
+            "Stage RX CR": 10.78
+        }
+    },
+    "POD Sanitas": {
+        "Aligners": {
+            "Primary": 31.18,
+            "Secondary": 22.12,
+            "CR": 10.78
+        }
+    },
+    "Iberia": {
+        "Aligners": {
+            "Primary": 27.70,
+            "Secondary": 22.30,
+            "CR": 15.99,
+            "Stage RX Primary": 38.94,
+            "Stage RX Secondary": 32.97,
+            "Stage RX CR": 13.87,
+            "Bite Sync Primary": 59.15,
+            "Bite Sync Secondary": 45.38,
+            "Bite Sync CR": 22.09
+        }
+    },
+    "Latam": {
+        "Aligners": {
+            "Primary": 24.70,
+            "Secondary": 19.30,
+            "CR": 10.78,
+            "Stage RX Primary": 38.34,
+            "Stage RX Secondary": 31.72,
+            "Stage RX CR": 13.85
+        }
+    },
+    "Regions NA & Canada": {
+        "Aligners": {
+            "Primary": 25.65,
+            "Secondary": 19.30,
+            "CR": 10.78,
+            "Stage RX Primary": 34.63,
+            "Stage RX Secondary": 27.91,
+            "Stage RX CR": 10.78,
+            "Bite Sync Primary": 53.11,
+            "Bite Sync Secondary": 41.34,
+            "Bite Sync CR": 16.16
+        }
+    },
+    "Pod IDI": {
+        "Aligners": {
+            "Primary": 27.55,
+            "Secondary": 19.30,
+            "CR": 10.78,
+            "Stage RX Primary": 35.87,
+            "Stage RX Secondary": 28.65,
+            "Stage RX CR": 11.87,
+            "Bite Sync Primary": 53.11,
+            "Bite Sync Secondary": 41.34,
+            "Bite Sync CR": 16.16
+        }
+    },
+    "Portugal": {
+        "Aligners": {
+            "Primary": 27.55,
+            "Secondary": 20.90,
+            "CR": 15.20,
+            "Stage RX Primary": 35.87,
+            "Stage RX Secondary": 28.65,
+            "Stage RX CR": 11.87,
+            "Bite Sync Primary": 55.84,
+            "Bite Sync Secondary": 43.75,
+            "Bite Sync CR": 18.65
+        }
+    },
+    "ICON Warford": {
+        "Aligners": {
+            "Primary": 28.50,
+            "Secondary": 20.90,
+            "CR": 10.78,
+            "Stage RX Primary": 37.45,
+            "Stage RX Secondary": 28.65,
+            "Stage RX CR": 10.78,
+            "Bite Sync Primary": 55.84,
+            "Bite Sync Secondary": 43.75,
+            "Bite Sync CR": 18.64
+        }
+    },
+    "ICON": {
+        "Aligners": {
+            "Primary": 31.35,
+            "Secondary": 24.70,
+            "CR": 10.78,
+            "Stage RX Primary": 41.75,
+            "Stage RX Secondary": 33.39,
+            "Stage RX CR": 10.78,
+            "Bite Sync Primary": 55.84,
+            "Bite Sync Secondary": 43.75,
+            "Bite Sync CR": 18.64
+        }
+    }
+}

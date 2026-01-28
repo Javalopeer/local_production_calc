@@ -15,16 +15,27 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             case_id TEXT,
             region TEXT,
-            tipo_vaso TEXT,
             tipo_caso TEXT,
             doctor TEXT,
             fecha TEXT,
             hora_inicio TEXT,
             hora_fin TEXT,
             tiempo_real REAL,
-            std REAL,
-            porcentaje REAL,
-            estado TEXT
+            std_time REAL,
+            efficiency REAL,
+            estado TEXT,
+            case_value REAL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS downtimes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            hora_inicio TEXT,
+            hora_fin TEXT,
+            razon TEXT,
+            duracion REAL
         )
     """)
 
