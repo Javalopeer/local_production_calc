@@ -1,7 +1,7 @@
 import json
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
-    QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QTabWidget
+    QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QTabWidget, QDateEdit
 )
 from PySide6.QtCore import QTime, QDate, Qt
 from PySide6.QtGui import QFont
@@ -10,15 +10,61 @@ from datetime import datetime
 from .downtime_manager import DowntimeManager
 
 
+def card(title, widget):
+    """Helper function to create styled card/groupbox"""
+    box = QGroupBox(title)
+    layout = QVBoxLayout()
+    layout.addWidget(widget) if isinstance(widget, QWidget) else layout.addLayout(widget)
+    box.setLayout(layout)
+    return box
+
+
 class TimeEditWithShortcut(QTimeEdit):
-    """QTimeEdit con soporte para Ctrl+Shift+: para hora actual"""
+    """QTimeEdit con soporte para Ctrl+Shift+: para hora actual y edición directa"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDisplayFormat("HH:mm")
+        self.setCorrectionMode(QTimeEdit.CorrectToNearestValue)
+        self.setAcceptDrops(True)
+    
     def keyPressEvent(self, event):
         # Ctrl+Shift+:
         if event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
             if event.key() == Qt.Key.Key_Colon:
                 self.setTime(QTime.currentTime())
                 return
+        # Allow all text input
         super().keyPressEvent(event)
+    
+    def mouseDoubleClickEvent(self, event):
+        """Allow double-click to select all for editing"""
+        super().mouseDoubleClickEvent(event)
+        # Select all text when double-clicked
+        self.lineEdit().selectAll() if hasattr(self, 'lineEdit') and self.lineEdit() else None
+
+
+class DateEditWithShortcut(QDateEdit):
+    """QDateEdit con soporte para Ctrl+Shift+; para fecha actual y edición directa"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDisplayFormat("yyyy-MM-dd")
+        self.setCalendarPopup(True)
+        self.setAcceptDrops(True)
+    
+    def keyPressEvent(self, event):
+        # Ctrl+Shift+; (semicolon)
+        if event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+            if event.key() == Qt.Key.Key_Semicolon:
+                self.setDate(QDate.currentDate())
+                return
+        # Allow all text input
+        super().keyPressEvent(event)
+    
+    def mouseDoubleClickEvent(self, event):
+        """Allow double-click to select all for editing"""
+        super().mouseDoubleClickEvent(event)
+        # Select all text when double-clicked
+        self.lineEdit().selectAll() if hasattr(self, 'lineEdit') and self.lineEdit() else None
 
 
 class RegisterTab(QWidget):
@@ -28,25 +74,38 @@ class RegisterTab(QWidget):
         self.load_standards()
 
         self.case_id = QLineEdit()
-        self.case_id.setMaximumWidth(120)
+        self.case_id.setMaximumWidth(150)
+        self.case_id.setPlaceholderText("Enter Case ID")
         self.region = QComboBox()
-        self.region.setMaximumWidth(150)
+        self.region.setMaximumWidth(180)
         self.tipo = QComboBox()
-        self.tipo.setMaximumWidth(150)
+        self.tipo.setMaximumWidth(180)
         self.doctor = QLineEdit()
         self.doctor.setPlaceholderText("Optional")
-        self.doctor.setMaximumWidth(150)
+        self.doctor.setMaximumWidth(180)
 
         self.start_time = TimeEditWithShortcut()
-        self.start_time.setMaximumWidth(100)
+        self.start_time.setMaximumWidth(120)
         
         self.end_time = TimeEditWithShortcut()
-        self.end_time.setMaximumWidth(100)
+        self.end_time.setMaximumWidth(120)
+        self.end_time.timeChanged.connect(self.validate_end_time)
 
-        self.result_label = QLabel("Production: -")
-        self.result_label.setStyleSheet("font-size: 12px;")
+        self.case_date = DateEditWithShortcut()
+        self.case_date.setDate(QDate.currentDate())
+        self.case_date.setMaximumWidth(180)
+
+        self.result_label = QLabel("—")
+        self.result_label.setStyleSheet("""
+            font-size: 20px;
+            font-weight: bold;
+            color: #4aa3ff;
+            text-align: center;
+        """)
+        self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.result_label.setMinimumHeight(40)
         self.daily_production_label = QLabel("Daily Production: 0.00%")
-        self.daily_production_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #2196F3;")
+        self.daily_production_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #2196F3;")
 
         self.region.addItems(self.standards.keys())
         self.region.currentTextChanged.connect(self.update_case_types)
@@ -57,39 +116,60 @@ class RegisterTab(QWidget):
         self.end_time.setTime(QTime.currentTime())
 
         calc_btn = QPushButton("Calculate")
-        calc_btn.setMaximumWidth(100)
+        calc_btn.setMaximumWidth(120)
+        calc_btn.setMinimumHeight(26)
         save_btn = QPushButton("Save Case")
-        save_btn.setMaximumWidth(100)
+        save_btn.setMaximumWidth(120)
+        save_btn.setMinimumHeight(26)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #444;
+            }
+            QPushButton:hover {
+                background-color: #555;
+            }
+        """)
         save_btn.clicked.connect(self.save_case)
 
         calc_btn.clicked.connect(self.calculate)
 
-        # Form layout - mas compacto
+        # Form layout - centered
         form = QFormLayout()
-        form.setSpacing(10)
-        form.setContentsMargins(10, 10, 10, 10)
+        form.setSpacing(9)
+        form.setContentsMargins(11, 11, 11, 11)
+        form.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         form.addRow("Case ID:", self.case_id)
         form.addRow("Region:", self.region)
         form.addRow("Type:", self.tipo)
         form.addRow("Doctor:", self.doctor)
+        form.addRow("Date:", self.case_date)
         form.addRow("Start:", self.start_time)
         form.addRow("End:", self.end_time)
 
-        # Buttons layout
+        # Buttons layout - centered
         buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
         buttons_layout.addWidget(calc_btn)
         buttons_layout.addWidget(save_btn)
         buttons_layout.addStretch()
 
-        # Left side layout - formulario compacto
+        # Result section
+        result_layout = QVBoxLayout()
+        result_layout.addWidget(self.result_label)
+
+        # Left side layout - formulario centrado
         left_layout = QVBoxLayout()
-        left_layout.addLayout(form)
+        left_layout.setSpacing(12)
+        left_layout.setContentsMargins(15, 15, 15, 15)
+        left_layout.addStretch()
+        form_widget = QWidget()
+        form_widget.setLayout(form)
+        left_layout.addWidget(card("Case Information", form_widget))
         left_layout.addLayout(buttons_layout)
-        left_layout.addWidget(self.result_label)
-        left_layout.addSpacing(15)
+        left_layout.addWidget(card("Calculation Result", result_layout))
+        left_layout.addSpacing(12)
         
         # Progress bar section
-        progress_group = QGroupBox("Daily Production (6:00 AM - 3:00 PM)")
         progress_layout = QVBoxLayout()
         
         self.daily_production_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -101,43 +181,30 @@ class RegisterTab(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%v%")
-        self.progress_bar.setMinimumHeight(40)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 2px solid grey;
-                border-radius: 5px;
-                text-align: center;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QProgressBar::chunk {
-                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #4CAF50, stop:1 #8BC34A);
-                border-radius: 3px;
-            }
-        """)
+        self.progress_bar.setMinimumHeight(28)
         progress_layout.addWidget(self.progress_bar)
-        progress_group.setLayout(progress_layout)
+        
+        progress_group = card("Daily Production (6:00 AM - 3:00 PM)", progress_layout)
         
         left_layout.addWidget(progress_group)
         left_layout.addStretch()
         
-        # Main layout con tabs: Register y Downtime
-        main_tabs = QTabWidget()
-        
-        # Tab 1: Register (formulario compacto)
-        register_widget = QWidget()
-        register_layout = QVBoxLayout()
-        register_layout.addLayout(left_layout)
-        register_widget.setLayout(register_layout)
-        main_tabs.addTab(register_widget, "Register")
-        
-        # Tab 2: Downtime
+        # Right side layout - Downtime Manager
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(12)
+        right_layout.setContentsMargins(15, 15, 15, 15)
         downtime_widget = DowntimeManager(on_update_callback=self.load_daily_production)
-        main_tabs.addTab(downtime_widget, "Downtime")
+        right_layout.addWidget(downtime_widget)
+        
+        # Main horizontal layout: Register left, Downtime right
+        main_layout = QHBoxLayout()
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(right_layout, 1)
         
         final_layout = QVBoxLayout()
-        final_layout.addWidget(main_tabs)
+        final_layout.addLayout(main_layout)
         self.setLayout(final_layout)
         
         self.load_daily_production()
@@ -151,6 +218,13 @@ class RegisterTab(QWidget):
         if region and region in self.standards:
             self.tipo.clear()
             self.tipo.addItems(self.standards[region]["Aligners"].keys())
+    
+    def validate_end_time(self):
+        """Ensure end_time is not less than start_time"""
+        if self.end_time.time() < self.start_time.time():
+            self.end_time.blockSignals(True)
+            self.end_time.setTime(self.start_time.time())
+            self.end_time.blockSignals(False)
     
     def calculate_case_value(self, std_time):
         """
@@ -200,19 +274,29 @@ class RegisterTab(QWidget):
             return
 
         efficiency = (std_time / real_minutes) * 100
-        estado = "🟢 OK" if efficiency >= 100 else "🔴 LOW"
+        
+        # Determine status and color
+        if efficiency >= 100:
+            status = "✓ OK"
+            color = "#4CAF50"
+        elif efficiency >= 95:
+            status = "⚠ WARN"
+            color = "#FFC107"
+        else:
+            status = "✗ LOW"
+            color = "#F44336"
 
-        self.result_label.setText(
-            f"Std: {std_time:.1f} min | Real: {real_minutes:.1f} min | Efficiency: {efficiency:.1f}% {estado}\n"
-            f"Case Value: {case_value:.3f}%"
-        )
+        # Display result with dynamic color
+        result_text = f"{efficiency:.1f}% – {status}"
+        self.result_label.setText(result_text)
+        self.result_label.setStyleSheet(f"color: {color}; font-size: 20px; font-weight: bold; text-align: center;")
 
     def load_daily_production(self):
         conn = get_connection()
         cursor = conn.cursor()
         today = datetime.now().strftime("%Y-%m-%d")
         
-        # Get total case values
+        # Get total case values for today
         cursor.execute("""
             SELECT SUM(case_value)
             FROM cases
@@ -243,51 +327,26 @@ class RegisterTab(QWidget):
         self.progress_bar.setValue(display_value)
         
         # Change color based on performance
-        if total_production >= 100:
-            self.progress_bar.setStyleSheet("""
-                QProgressBar {
-                    border: 2px solid grey;
-                    border-radius: 5px;
-                    text-align: center;
-                    font-size: 18px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #4CAF50, stop:1 #66BB6A);
-                    border-radius: 3px;
-                }
-            """)
-        elif total_production >= 80:
-            self.progress_bar.setStyleSheet("""
-                QProgressBar {
-                    border: 2px solid grey;
-                    border-radius: 5px;
-                    text-align: center;
-                    font-size: 18px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #FFC107, stop:1 #FFD54F);
-                    border-radius: 3px;
-                }
-            """)
+        if total_production < 95:
+            bar_color = "#F44336"
+        elif total_production < 100:
+            bar_color = "#FFC107"
         else:
-            self.progress_bar.setStyleSheet("""
-                QProgressBar {
-                    border: 2px solid grey;
-                    border-radius: 5px;
-                    text-align: center;
-                    font-size: 18px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #F44336, stop:1 #EF5350);
-                    border-radius: 3px;
-                }
-            """)
+            bar_color = "#4CAF50"
+        
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid #3c3c3c;
+                border-radius: 8px;
+                text-align: center;
+                height: 24px;
+                background-color: #2b2b2b;
+            }}
+            QProgressBar::chunk {{
+                background-color: {bar_color};
+                border-radius: 6px;
+            }}
+        """)
         
         return total_production
 
@@ -296,6 +355,7 @@ class RegisterTab(QWidget):
         tipo = self.tipo.currentText()
         case_id = self.case_id.text()
         doctor = self.doctor.text().strip()
+        case_date = self.case_date.date().toString("yyyy-MM-dd")
 
         start = self.start_time.time()
         end = self.end_time.time()
@@ -328,7 +388,7 @@ class RegisterTab(QWidget):
             region,
             tipo,
             doctor if doctor else "",
-            datetime.now().strftime("%Y-%m-%d"),
+            case_date,
             start.toString("HH:mm"),
             end.toString("HH:mm"),
             tiempo_real,
@@ -341,7 +401,9 @@ class RegisterTab(QWidget):
         conn.commit()
         conn.close()
 
-        self.result_label.setText(f"✅ Case saved | Value: {case_value:.3f}% | Efficiency: {efficiency:.1f}%")
+        # Show success message with color
+        self.result_label.setText("✓ Case Saved")
+        self.result_label.setStyleSheet("color: #4CAF50; font-size: 20px; font-weight: bold; text-align: center;")
         self.load_daily_production()
         self.case_id.clear()
         self.doctor.clear()

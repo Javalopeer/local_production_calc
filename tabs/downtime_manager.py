@@ -28,13 +28,13 @@ class DowntimeManager(QWidget):
         input_layout.addWidget(QLabel("Start:"))
         self.downtime_start = QTimeEdit()
         self.downtime_start.setTime(QTime.currentTime())
-        self.downtime_start.setMaximumWidth(100)
+        self.downtime_start.setMaximumWidth(90)
         input_layout.addWidget(self.downtime_start)
 
         input_layout.addWidget(QLabel("End:"))
         self.downtime_end = QTimeEdit()
         self.downtime_end.setTime(QTime.currentTime())
-        self.downtime_end.setMaximumWidth(100)
+        self.downtime_end.setMaximumWidth(90)
         input_layout.addWidget(self.downtime_end)
 
         input_layout.addWidget(QLabel("Reason:"))
@@ -46,11 +46,12 @@ class DowntimeManager(QWidget):
             "Meeting",
             "Other"
         ])
-        self.downtime_reason.setMaximumWidth(150)
+        self.downtime_reason.setMaximumWidth(135)
         input_layout.addWidget(self.downtime_reason)
 
         add_btn = QPushButton("Add")
-        add_btn.setMaximumWidth(80)
+        add_btn.setMaximumWidth(75)
+        add_btn.setMinimumHeight(23)
         add_btn.clicked.connect(self.add_downtime)
         input_layout.addWidget(add_btn)
 
@@ -61,12 +62,12 @@ class DowntimeManager(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Start", "End", "Duration (min)", "Reason"])
-        self.table.setMaximumHeight(200)
+        self.table.setMaximumHeight(188)
         main_layout.addWidget(self.table)
 
         # Delete button
         delete_btn = QPushButton("Delete Selected")
-        delete_btn.setMaximumWidth(150)
+        delete_btn.setMaximumWidth(112)
         delete_btn.clicked.connect(self.delete_downtime)
         main_layout.addWidget(delete_btn)
 

@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QPushButton, QDateEdit, QTableWidget, QTableWidgetItem
 )
 from PySide6.QtCore import QDate
+from PySide6.QtGui import QColor
 from db.database import get_connection
 from datetime import datetime, timedelta
 
@@ -17,7 +18,7 @@ class ProductionTab(QWidget):
 
         # Title
         title = QLabel("Production & Percentages")
-        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #4aa3ff;")
         main_layout.addWidget(title)
 
         # Stats Layout
@@ -29,7 +30,7 @@ class ProductionTab(QWidget):
         self.stats_low = QLabel("LOW: -")
 
         for stat in [self.stats_avg, self.stats_total, self.stats_ok, self.stats_low]:
-            stat.setStyleSheet("padding: 10px; border: 1px solid #ccc; border-radius: 5px;")
+            stat.setStyleSheet("padding: 10px; border: 1px solid #3c3c3c; border-radius: 5px; background-color: #2b2b2b;")
             stats_layout.addWidget(stat)
 
         main_layout.addLayout(stats_layout)
@@ -94,9 +95,11 @@ class ProductionTab(QWidget):
             
             efficiency_item = QTableWidgetItem(f"{row[5]:.1f}%")
             if row[6] == "OK":
-                efficiency_item.setBackground(__import__('PySide6.QtGui', fromlist=['QColor']).QColor(144, 238, 144))
+                efficiency_item.setBackground(QColor(76, 175, 80))  # Green
+                efficiency_item.setForeground(QColor(255, 255, 255))
             else:
-                efficiency_item.setBackground(__import__('PySide6.QtGui', fromlist=['QColor']).QColor(255, 127, 127))
+                efficiency_item.setBackground(QColor(244, 67, 54))  # Red
+                efficiency_item.setForeground(QColor(255, 255, 255))
             self.table.setItem(idx, 5, efficiency_item)
             
             self.table.setItem(idx, 6, QTableWidgetItem(f"{row[7]:.3f}%"))

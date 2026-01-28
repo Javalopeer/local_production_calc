@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QDateEdit, QComboBox, QFileDialog
 )
 from PySide6.QtCore import QDate
+from PySide6.QtGui import QColor
 from db.database import get_connection
 import csv
 
@@ -18,7 +19,7 @@ class HistoryTab(QWidget):
 
         # Title
         title = QLabel("Case History")
-        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #4aa3ff;")
         main_layout.addWidget(title)
 
         # Search and Filter Layout
@@ -98,9 +99,11 @@ class HistoryTab(QWidget):
             
             efficiency_item = QTableWidgetItem(f"{case[7]:.1f}%")
             if case[8] == "OK":
-                efficiency_item.setBackground(__import__('PySide6.QtGui', fromlist=['QColor']).QColor(144, 238, 144))
+                efficiency_item.setBackground(QColor(76, 175, 80))  # Green
+                efficiency_item.setForeground(QColor(255, 255, 255))
             else:
-                efficiency_item.setBackground(__import__('PySide6.QtGui', fromlist=['QColor']).QColor(255, 127, 127))
+                efficiency_item.setBackground(QColor(244, 67, 54))  # Red
+                efficiency_item.setForeground(QColor(255, 255, 255))
             self.table.setItem(idx, 7, efficiency_item)
             
             self.table.setItem(idx, 8, QTableWidgetItem(case[8]))
