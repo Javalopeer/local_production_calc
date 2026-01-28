@@ -51,6 +51,7 @@ class HistoryTab(QWidget):
 
         # Table
         self.table = QTableWidget()
+        self.table.setAlternatingRowColors(True)
         self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
             "ID", "Case", "Region", "Case Type",
