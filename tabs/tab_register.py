@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QTabWidget, QDateEdit
@@ -8,6 +10,22 @@ from PySide6.QtGui import QFont
 from db.database import get_connection
 from datetime import datetime
 from .downtime_manager import DowntimeManager
+
+
+def get_resource_path(relative_path):
+    """Get absolute path to resource - works for dev and PyInstaller"""
+    if getattr(sys, 'frozen', False):
+        # Running as compiled exe - look in exe directory first, then _MEIPASS
+        exe_dir = os.path.dirname(sys.executable)
+        exe_path = os.path.join(exe_dir, relative_path)
+        if os.path.exists(exe_path):
+            return exe_path
+        # Fall back to bundled data
+        return os.path.join(sys._MEIPASS, relative_path)
+    else:
+        # Running as script
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base, relative_path)
 
 
 def card(title, widget):
@@ -216,7 +234,8 @@ class RegisterTab(QWidget):
         self.load_daily_production()
 
     def load_standards(self):
-        with open("data/standards.json", "r") as f:
+        standards_path = get_resource_path(os.path.join("data", "standards.json"))
+        with open(standards_path, "r") as f:
             self.standards = json.load(f)
     
     def update_case_types(self):
