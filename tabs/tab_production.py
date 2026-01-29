@@ -17,8 +17,8 @@ class ProductionTab(QWidget):
 
     def init_ui(self):
         main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(14)
+        main_layout.setContentsMargins(8, 10, 8, 8)  # Reduced top margin
+        main_layout.setSpacing(10)
 
         # Title - centered
         title = QLabel("Production & Percentages")
@@ -37,7 +37,8 @@ class ProductionTab(QWidget):
         self.stats_low = QLabel("🟢 - | 🔴 -")
 
         for stat in [self.stats_avg, self.stats_total, self.stats_ok, self.stats_low]:
-            stat.setStyleSheet("padding: 6px 14px; border: 1px solid #3c3c3c; border-radius: 5px; background-color: #2b2b2b; font-size: 11px;")
+            stat.setStyleSheet("padding: 6px 12px; border: 1px solid #3c3c3c; border-radius: 4px; background-color: #2b2b2b; font-size: 11px;")
+            stat.setFixedHeight(28)
             stats_row.addWidget(stat)
         
         stats_row.addStretch()
@@ -45,7 +46,7 @@ class ProductionTab(QWidget):
 
         # Row 2: Date filters - centered
         date_row = QHBoxLayout()
-        date_row.setSpacing(15)
+        date_row.setSpacing(12)
         date_row.addStretch()
         
         date_row.addWidget(QLabel("From:"))
@@ -94,6 +95,9 @@ class ProductionTab(QWidget):
         filters_row.addStretch()
         main_layout.addLayout(filters_row)
 
+        # Add spacing between filters and table
+        main_layout.addSpacing(20)
+
         # Table
         self.table = QTableWidget()
         self.table.setAlternatingRowColors(False)
@@ -133,11 +137,15 @@ class ProductionTab(QWidget):
         header.setStretchLastSection(False)
         
         # Set fixed width for table - reduced to eliminate empty space
-        table_width = 95 + 130 + 130 + 90 + 50 + 50 + 45 + 55 + 70 + 2  # columns only
+        table_width = 95 + 130 + 130 + 90 + 50 + 50 + 45 + 55 + 70 + 5  # columns + 3px
         self.table.setFixedWidth(table_width)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setMaximumHeight(325)  # 12 rows (~25px each) + header (~25px)
         
         main_layout.addWidget(self.table, alignment=Qt.AlignmentFlag.AlignHCenter)
+        
+        # Add bottom spacing to match top
+        main_layout.addSpacing(10)
 
         self.setLayout(main_layout)
 
