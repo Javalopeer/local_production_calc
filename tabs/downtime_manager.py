@@ -187,38 +187,38 @@ class DowntimeManager(QWidget):
             self.downtime_reason.setCurrentIndex(0)
             self.current_edit_row = -1
 
-    def load_edit_data(self, row):
-        """Load downtime data into edit fields"""
-        start_text = self.table.item(row, 0).text()
-        end_text = self.table.item(row, 1).text()
-        reason_text = self.table.item(row, 3).text()
+    # def load_edit_data(self, row):
+    #     """Load downtime data into edit fields"""
+    #     start_text = self.table.item(row, 0).text()
+    #     end_text = self.table.item(row, 1).text()
+    #     reason_text = self.table.item(row, 3).text()
         
-        self.downtime_start.setTime(QTime.fromString(start_text, "HH:mm"))
-        self.downtime_end.setTime(QTime.fromString(end_text, "HH:mm"))
+    #     self.downtime_start.setTime(QTime.fromString(start_text, "HH:mm"))
+    #     self.downtime_end.setTime(QTime.fromString(end_text, "HH:mm"))
         
-        index = self.downtime_reason.findText(reason_text)
-        if index >= 0:
-            self.downtime_reason.setCurrentIndex(index)
+    #     index = self.downtime_reason.findText(reason_text)
+    #     if index >= 0:
+    #         self.downtime_reason.setCurrentIndex(index)
         
-        self.current_edit_row = row
-        self.update_button_colors()
+    #     self.current_edit_row = row
+    #     self.update_button_colors()
 
-    def edit_downtime(self):
-        """Toggle edit mode"""
-        self.edit_mode = not self.edit_mode
+    # def edit_downtime(self):
+    #     """Toggle edit mode"""
+    #     self.edit_mode = not self.edit_mode
         
-        if self.edit_mode:
-            # Entering edit mode - deactivate delete mode
-            self.delete_mode = False
+    #     if self.edit_mode:
+    #         # Entering edit mode - deactivate delete mode
+    #         self.delete_mode = False
         
-        self.update_button_colors()
+    #     self.update_button_colors()
         
-        if not self.edit_mode:
-            # If exiting edit mode, clear fields
-            self.downtime_start.setTime(QTime.currentTime())
-            self.downtime_end.setTime(QTime.currentTime())
-            self.downtime_reason.setCurrentIndex(0)
-            self.current_edit_row = -1
+    #     if not self.edit_mode:
+    #         # If exiting edit mode, clear fields
+    #         self.downtime_start.setTime(QTime.currentTime())
+    #         self.downtime_end.setTime(QTime.currentTime())
+    #         self.downtime_reason.setCurrentIndex(0)
+    #         self.current_edit_row = -1
 
     def update_button_colors(self):
         """Update button colors based on delete mode"""
@@ -227,9 +227,7 @@ class DowntimeManager(QWidget):
             self.delete_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #B71C1C;
-                    border: 2px solid #FF5252;
                     border-radius: 6px;
-                    padding: 8px 14px;
                     color: white;
                     font-weight: bold;
                 }
@@ -244,8 +242,6 @@ class DowntimeManager(QWidget):
                     background-color: #2d89ef;
                     border: none;
                     border-radius: 6px;
-                    padding: 8px 14px;
-                    color: white;
                     font-weight: bold;
                 }
                 QPushButton:hover {
