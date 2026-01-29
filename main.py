@@ -9,6 +9,7 @@ import qtawesome as qta
 from tabs.tab_register import RegisterTab
 from tabs.tab_production import ProductionTab
 from tabs.tab_history import HistoryTab
+from tabs.tab_overtime import OvertimeTab
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -16,23 +17,47 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Production Performance Calculator")
         self.setWindowIcon(qta.icon('fa5s.calculator', color='#2d89ef'))
 
-        tabs = QTabWidget()
+        self.tabs = QTabWidget()
         
         self.register_tab = RegisterTab()
         self.production_tab = ProductionTab()
         self.history_tab = HistoryTab()
+        self.overtime_tab = OvertimeTab()
         
         # Connect register tab to production tab for dynamic updates
         self.register_tab.case_saved.connect(self.production_tab.load_data)
         self.register_tab.case_saved.connect(self.history_tab.load_all_cases)
         
-        tabs.addTab(self.register_tab, qta.icon('fa5s.edit', color='#4aa3ff'), "Register")
-        tabs.addTab(self.production_tab, qta.icon('fa5s.chart-bar', color='#4aa3ff'), "Production")
-        tabs.addTab(self.history_tab, qta.icon('fa5s.history', color='#4aa3ff'), "History")
+        # Connect production tab edit/delete to register tab
+        self.production_tab.case_updated.connect(self.on_production_case_updated)
+        
+        # Connect OT tab to refresh when cases change
+        self.overtime_tab.ot_saved.connect(self.history_tab.load_all_cases)
+        
+        self.tabs.addTab(self.register_tab, qta.icon('fa5s.edit', color='#4aa3ff'), "Register")
+        self.tabs.addTab(self.overtime_tab, qta.icon('fa5s.clock', color='#FF9800'), "OT")
+        self.tabs.addTab(self.production_tab, qta.icon('fa5s.chart-bar', color='#4aa3ff'), "Production")
+        self.tabs.addTab(self.history_tab, qta.icon('fa5s.history', color='#4aa3ff'), "History")
 
-        self.setCentralWidget(tabs)
+        self.setCentralWidget(self.tabs)
         self.adjustSize()
         self.setFixedSize(self.size())
+
+    def on_production_case_updated(self):
+        """Handle case update/delete from production tab"""
+        # Check if production_tab has an editing_case_id (edit action)
+        if hasattr(self.production_tab, 'editing_case_id') and self.production_tab.editing_case_id:
+            # Load case into register tab for editing
+            self.register_tab.load_case_for_edit(self.production_tab.editing_case_id)
+            self.production_tab.editing_case_id = None
+            # Switch to Register tab
+            self.tabs.setCurrentIndex(0)
+        else:
+            # Just refresh register tab (delete action)
+            self.register_tab.load_daily_production()
+        
+        # Refresh history tab
+        self.history_tab.load_all_cases()
 
 if __name__ == "__main__":
     init_db()
