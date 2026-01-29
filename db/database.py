@@ -1,7 +1,25 @@
 import sqlite3
 import os
+import sys
 
-DB_PATH = os.path.join("data", "cases.db")
+def get_base_path():
+    """Get the base path for data files - works for both dev and PyInstaller exe"""
+    if getattr(sys, 'frozen', False):
+        # Running as compiled exe
+        return os.path.dirname(sys.executable)
+    else:
+        # Running as script
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def get_data_path():
+    """Get the data directory path, creating it if needed"""
+    base = get_base_path()
+    data_dir = os.path.join(base, "data")
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+    return data_dir
+
+DB_PATH = os.path.join(get_data_path(), "cases.db")
 
 def get_connection():
     return sqlite3.connect(DB_PATH)
