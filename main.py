@@ -10,6 +10,7 @@ from tabs.tab_register import RegisterTab
 from tabs.tab_production import ProductionTab
 from tabs.tab_history import HistoryTab
 from tabs.tab_overtime import OvertimeTab
+from tabs.tab_standards import StandardsTab
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -23,6 +24,7 @@ class MainWindow(QMainWindow):
         self.production_tab = ProductionTab()
         self.history_tab = HistoryTab()
         self.overtime_tab = OvertimeTab()
+        self.standards_tab = StandardsTab()
         
         # Connect register tab to production tab for dynamic updates
         self.register_tab.case_saved.connect(self.production_tab.load_data)
@@ -34,14 +36,25 @@ class MainWindow(QMainWindow):
         # Connect OT tab to refresh when cases change
         self.overtime_tab.ot_saved.connect(self.history_tab.load_all_cases)
         
+        # Connect standards tab to refresh Register and OT when standards change
+        self.standards_tab.standards_updated.connect(self.on_standards_updated)
+        
         self.tabs.addTab(self.register_tab, qta.icon('fa5s.edit', color='#4aa3ff'), "Register")
         self.tabs.addTab(self.overtime_tab, qta.icon('fa5s.clock', color='#FF9800'), "OT")
         self.tabs.addTab(self.production_tab, qta.icon('fa5s.chart-bar', color='#4aa3ff'), "Production")
         self.tabs.addTab(self.history_tab, qta.icon('fa5s.history', color='#4aa3ff'), "History")
+        self.tabs.addTab(self.standards_tab, qta.icon('fa5s.cog', color='#9E9E9E'), "Standards")
 
         self.setCentralWidget(self.tabs)
         self.adjustSize()
         self.setFixedSize(self.size())
+
+    def on_standards_updated(self):
+        """Reload standards in Register and OT tabs when standards are modified"""
+        self.register_tab.load_standards()
+        self.register_tab.update_case_types()
+        self.overtime_tab.load_standards()
+        self.overtime_tab.update_case_types()
 
     def on_production_case_updated(self):
         """Handle case update/delete from production tab"""
