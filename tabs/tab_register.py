@@ -104,6 +104,7 @@ class RegisterTab(QWidget):
         self.case_id = QLineEdit()
         self.case_id.setMaximumWidth(150)
         self.case_id.setPlaceholderText("Enter Case ID")
+        self.case_id.textChanged.connect(self.on_case_id_changed)
         self.region = QComboBox()
         self.region.setMaximumWidth(180)
         self.tipo = QComboBox()
@@ -147,7 +148,7 @@ class RegisterTab(QWidget):
         self.update_case_types()
 
         self.start_time.setTime(QTime.currentTime())
-        self.end_time.setTime(QTime.currentTime())
+        self.end_time.setTime(QTime(0, 0))  # Empty/default value
 
         calc_btn = QPushButton("Calculate")
         calc_btn.setMaximumWidth(120)
@@ -320,6 +321,11 @@ class RegisterTab(QWidget):
         units_per_5pct = region_data[str(second_lowest)] - region_data[str(lowest)]
         below_pct = lowest - production_pct
         return max(0, region_data[str(lowest)] - (below_pct / 5) * units_per_5pct)
+    
+    def on_case_id_changed(self, text):
+        """Auto-set start time when Case ID is first entered"""
+        if text and len(text) == 1:  # First character entered
+            self.start_time.setTime(QTime.currentTime())
     
     def update_case_types(self):
         region = self.region.currentText()
@@ -616,6 +622,7 @@ class RegisterTab(QWidget):
         self.doctor.clear()
         self.comments_input.clear()
         self.count_toggle.setChecked(True)  # Reset toggle to ON
+        self.end_time.setTime(QTime(0, 0))  # Clear end time
         
         # Emit signal to notify other tabs
         self.case_saved.emit()
