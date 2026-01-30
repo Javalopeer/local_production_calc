@@ -42,9 +42,21 @@ def init_db():
             std_time REAL,
             efficiency REAL,
             estado TEXT,
-            case_value REAL
+            case_value REAL,
+            count_production INTEGER DEFAULT 1,
+            comments TEXT DEFAULT ''
         )
     """)
+    
+    # Add columns if they don't exist (for existing databases)
+    try:
+        cursor.execute("ALTER TABLE cases ADD COLUMN count_production INTEGER DEFAULT 1")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE cases ADD COLUMN comments TEXT DEFAULT ''")
+    except:
+        pass
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS downtimes (
@@ -56,6 +68,36 @@ def init_db():
             duracion REAL
         )
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ot_cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT,
+            region TEXT,
+            tipo_caso TEXT,
+            doctor TEXT,
+            fecha TEXT,
+            hora_inicio TEXT,
+            hora_fin TEXT,
+            tiempo_real REAL,
+            std_time REAL,
+            efficiency REAL,
+            estado TEXT,
+            case_value REAL,
+            count_production INTEGER DEFAULT 1,
+            comments TEXT DEFAULT ''
+        )
+    """)
+    
+    # Add columns if they don't exist (for existing databases)
+    try:
+        cursor.execute("ALTER TABLE ot_cases ADD COLUMN count_production INTEGER DEFAULT 1")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE ot_cases ADD COLUMN comments TEXT DEFAULT ''")
+    except:
+        pass
 
     conn.commit()
     conn.close()
