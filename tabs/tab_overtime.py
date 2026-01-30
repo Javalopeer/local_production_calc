@@ -91,6 +91,7 @@ class OvertimeTab(QWidget):
         self.case_id = QLineEdit()
         self.case_id.setMaximumWidth(150)
         self.case_id.setPlaceholderText("Enter Case ID")
+        self.case_id.textChanged.connect(self.on_case_id_changed)
         
         self.region = QComboBox()
         self.region.setMaximumWidth(180)
@@ -110,7 +111,7 @@ class OvertimeTab(QWidget):
         
         self.end_time = TimeEditWithShortcut()
         self.end_time.setMaximumWidth(120)
-        self.end_time.setTime(QTime.currentTime())
+        self.end_time.setTime(QTime(0, 0))  # Empty/default value
         self.end_time.timeChanged.connect(self.validate_end_time)
 
         self.case_date = DateEditWithShortcut()
@@ -388,6 +389,11 @@ class OvertimeTab(QWidget):
         self.setLayout(main_layout)
         self.load_daily_ot_production()
         self.load_ot_cases()
+
+    def on_case_id_changed(self, text):
+        """Auto-set start time when Case ID is first entered"""
+        if text and len(text) == 1:  # First character entered
+            self.start_time.setTime(QTime.currentTime())
 
     def update_case_types(self):
         region = self.region.currentText()
@@ -680,6 +686,7 @@ class OvertimeTab(QWidget):
         self.doctor.clear()
         self.comments_input.clear()
         self.count_toggle.setChecked(True)  # Reset toggle to ON
+        self.end_time.setTime(QTime(0, 0))  # Clear end time
         
         self.ot_saved.emit()
 
