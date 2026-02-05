@@ -21,12 +21,44 @@ def get_data_path():
 
 DB_PATH = os.path.join(get_data_path(), "cases.db")
 
+# Current schema version - increment when making DB changes
+CURRENT_SCHEMA_VERSION = 1
+
 def get_connection():
     return sqlite3.connect(DB_PATH)
+
+def get_db_version():
+    """Get the current database schema version"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT version FROM db_metadata WHERE key='schema_version'")
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 0
+    except:
+        conn.close()
+        return 0
+
+def set_db_version(version):
+    """Set the database schema version"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO db_metadata (key, version) VALUES ('schema_version', ?)" , (version,))
+    conn.commit()
+    conn.close()
 
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
+    
+    # Create metadata table for version tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS db_metadata (
+            key TEXT PRIMARY KEY,
+            version INTEGER
+        )
+    """)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS cases (
@@ -98,6 +130,11 @@ def init_db():
         cursor.execute("ALTER TABLE ot_cases ADD COLUMN comments TEXT DEFAULT ''")
     except:
         pass
+    
+    # Update schema version
+    cursor.execute("INSERT OR REPLACE INTO db_metadata (key, version) VALUES ('schema_version', ?)", (CURRENT_SCHEMA_VERSION,))
 
     conn.commit()
     conn.close()
+    
+    print(f"Database initialized - Schema version: {CURRENT_SCHEMA_VERSION}")
