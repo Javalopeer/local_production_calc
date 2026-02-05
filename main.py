@@ -209,19 +209,12 @@ if __name__ == "__main__":
     }
 
     QTableWidget {
-        background-color: #2b2b2b;
-        alternate-background-color: #333333;
         gridline-color: #3c3c3c;
         selection-background-color: #2d89ef;
     }
 
     QTableWidget::item {
         padding: 6px;
-        border-bottom: 1px solid #3c3c3c;
-    }
-
-    QTableWidget::item:alternate {
-        background-color: #333333;
     }
 
     QHeaderView::section {
