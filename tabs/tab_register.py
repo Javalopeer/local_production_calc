@@ -622,7 +622,11 @@ class RegisterTab(QWidget):
         self.doctor.clear()
         self.comments_input.clear()
         self.count_toggle.setChecked(True)  # Reset toggle to ON
-        self.end_time.setTime(QTime(0, 0))  # Clear end time
+        
+        # Clear end time - set to midnight (00:00)
+        self.end_time.blockSignals(True)
+        self.end_time.setTime(QTime(0, 0))
+        self.end_time.blockSignals(False)
         
         # Emit signal to notify other tabs
         self.case_saved.emit()
