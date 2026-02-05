@@ -85,6 +85,13 @@ class OvertimeTab(QWidget):
         units_path = get_resource_path(os.path.join("data", "units_eq.json"))
         with open(units_path, "r") as f:
             self.units_eq = json.load(f)
+    
+    def calculate_units_eq(self, region, case_value):
+        """Calculate equivalent units for a case based on region and value"""
+        if region not in self.units_eq or not case_value:
+            return 0.0
+        units_at_100 = self.units_eq[region].get("100", 0)
+        return (case_value / 100) * units_at_100
 
     def init_ui(self):
         # Form fields
@@ -310,9 +317,9 @@ class OvertimeTab(QWidget):
         self.ot_table = QTableWidget()
         self.ot_table.setAlternatingRowColors(False)
         self.ot_table.verticalHeader().setVisible(False)
-        self.ot_table.setColumnCount(7)
+        self.ot_table.setColumnCount(8)
         self.ot_table.setHorizontalHeaderLabels([
-            "Case ID", "Doctor", "Region", "Type", "Time", "Eff %", "Value %"
+            "Case ID", "Doctor", "Region", "Type", "Time", "Eff %", "Value %", "Units Eq"
         ])
         self.ot_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.ot_table.setShowGrid(True)
@@ -331,19 +338,20 @@ class OvertimeTab(QWidget):
         """)
         
         # Set column widths
-        self.ot_table.setColumnWidth(0, 85)   # Case ID
-        self.ot_table.setColumnWidth(1, 100)  # Doctor
-        self.ot_table.setColumnWidth(2, 90)  # Region
-        self.ot_table.setColumnWidth(3, 75)   # Type
-        self.ot_table.setColumnWidth(4, 50)   # Time
-        self.ot_table.setColumnWidth(5, 55)   # Eff
-        self.ot_table.setColumnWidth(6, 60)   # Value
+        self.ot_table.setColumnWidth(0, 80)   # Case ID
+        self.ot_table.setColumnWidth(1, 90)  # Doctor
+        self.ot_table.setColumnWidth(2, 85)  # Region
+        self.ot_table.setColumnWidth(3, 65)   # Type
+        self.ot_table.setColumnWidth(4, 45)   # Time
+        self.ot_table.setColumnWidth(5, 50)   # Eff
+        self.ot_table.setColumnWidth(6, 55)   # Value
+        self.ot_table.setColumnWidth(7, 55)   # Units Eq
         
         header = self.ot_table.horizontalHeader()
         header.setStretchLastSection(False)
         
         # Fixed table size
-        table_width = 85 + 100 + 100 + 75 + 50 + 55 + 60 + 5
+        table_width = 80 + 90 + 85 + 65 + 45 + 50 + 55 + 55 + 5
         self.ot_table.setFixedWidth(table_width)
         self.ot_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.ot_table.setMaximumHeight(260)
@@ -538,7 +546,7 @@ class OvertimeTab(QWidget):
         selected_date = self.case_date.date().toString("yyyy-MM-dd")
         
         cursor.execute("""
-            SELECT id, case_id, doctor, region, tipo_caso, tiempo_real, efficiency, case_value, estado
+            SELECT id, case_id, doctor, region, tipo_caso, tiempo_real, efficiency, case_value, estado, count_production
             FROM ot_cases
             WHERE fecha = ?
             ORDER BY id DESC
@@ -551,12 +559,24 @@ class OvertimeTab(QWidget):
         self.ot_case_ids = []  # Store database IDs for edit/delete
         
         for row_idx, case in enumerate(cases):
-            db_id, case_id, doctor, region, tipo, tiempo_real, efficiency, case_value, estado = case
+            db_id, case_id, doctor, region, tipo, tiempo_real, efficiency, case_value, estado, count_production = case
             self.ot_case_ids.append(db_id)
+            
+            # Check if case counts for production
+            counts_for_production = count_production if count_production is not None else 1
+            
+            # Yellow background for cases that don't count, otherwise zebra striping
+            if counts_for_production == 0:
+                bg_color = QColor(180, 150, 50)  # Yellow/gold for non-counting cases
+            else:
+                bg_color = QColor(43, 43, 43) if (row_idx % 2 == 0) else QColor(45, 45, 45)
+            
+            bg_brush = QBrush(bg_color)
             
             # Case ID - bold
             case_item = QTableWidgetItem(str(case_id))
             case_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            case_item.setBackground(bg_brush)
             font = QFont()
             font.setBold(True)
             case_item.setFont(font)
@@ -565,48 +585,51 @@ class OvertimeTab(QWidget):
             # Doctor - bold
             doctor_item = QTableWidgetItem(str(doctor) if doctor else "")
             doctor_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            doctor_item.setBackground(bg_brush)
             doctor_item.setFont(font)
             self.ot_table.setItem(row_idx, 1, doctor_item)
             
             # Region
             region_item = QTableWidgetItem(str(region))
             region_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            region_item.setBackground(bg_brush)
             self.ot_table.setItem(row_idx, 2, region_item)
             
             # Type
             tipo_item = QTableWidgetItem(str(tipo))
             tipo_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            tipo_item.setBackground(bg_brush)
             self.ot_table.setItem(row_idx, 3, tipo_item)
             
             # Time
             time_item = QTableWidgetItem(f"{tiempo_real:.0f}")
             time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            time_item.setBackground(bg_brush)
             self.ot_table.setItem(row_idx, 4, time_item)
             
-            # Efficiency with color
+            # Efficiency with color background (like Production tab)
             eff_item = QTableWidgetItem(f"{efficiency:.0f}")
             eff_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if estado == "OK":
-                eff_item.setForeground(QBrush(QColor(76, 175, 80)))  # Green
+                eff_item.setBackground(QBrush(QColor(76, 175, 80)))  # Green background
+                eff_item.setForeground(QBrush(QColor(255, 255, 255)))  # White text
             else:
-                eff_item.setForeground(QBrush(QColor(244, 67, 54)))  # Red
+                eff_item.setBackground(QBrush(QColor(244, 67, 54)))  # Red background
+                eff_item.setForeground(QBrush(QColor(255, 255, 255)))  # White text
             self.ot_table.setItem(row_idx, 5, eff_item)
             
-            # Value with color (same as efficiency)
+            # Value - no color, same background as other columns
             value_item = QTableWidgetItem(f"{case_value:.2f}")
             value_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if estado == "OK":
-                value_item.setForeground(QBrush(QColor(76, 175, 80)))  # Green
-            else:
-                value_item.setForeground(QBrush(QColor(244, 67, 54)))  # Red
+            value_item.setBackground(bg_brush)
             self.ot_table.setItem(row_idx, 6, value_item)
             
-            # Zebra striping
-            if row_idx % 2 == 1:
-                for col in range(7):
-                    item = self.ot_table.item(row_idx, col)
-                    if item:
-                        item.setBackground(QColor(45, 45, 45))
+            # Units Equivalent - calculated from region and case_value
+            units_eq = self.calculate_units_eq(region, case_value)
+            units_eq_item = QTableWidgetItem(f"{units_eq:.2f}")
+            units_eq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            units_eq_item.setBackground(bg_brush)
+            self.ot_table.setItem(row_idx, 7, units_eq_item)
 
     def save_ot_case(self):
         region = self.region.currentText()
@@ -686,7 +709,11 @@ class OvertimeTab(QWidget):
         self.doctor.clear()
         self.comments_input.clear()
         self.count_toggle.setChecked(True)  # Reset toggle to ON
-        self.end_time.setTime(QTime(0, 0))  # Clear end time
+        
+        # Clear end time - set to midnight (00:00)
+        self.end_time.blockSignals(True)
+        self.end_time.setTime(QTime(0, 0))
+        self.end_time.blockSignals(False)
         
         self.ot_saved.emit()
 
