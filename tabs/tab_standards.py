@@ -241,12 +241,12 @@ class StandardsTab(QWidget):
         add_type_btn.clicked.connect(self.add_type)
         action_layout.addWidget(add_type_btn)
         
-        edit_btn = QPushButton("Edit Selected")
+        edit_btn = QPushButton("Edit")
         edit_btn.setMaximumWidth(100)
         edit_btn.clicked.connect(self.edit_selected)
         action_layout.addWidget(edit_btn)
         
-        delete_btn = QPushButton("Delete Selected")
+        delete_btn = QPushButton("Delete")
         delete_btn.setMaximumWidth(110)
         delete_btn.setStyleSheet("""
             QPushButton {

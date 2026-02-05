@@ -42,7 +42,7 @@
     "Africa": {
         "Aligners": {
             "Primary": 25.53,
-            "Secondary": 19.30,
+            "Secondary": 19.3,
             "CR": 10.78,
             "Stage RX Primary": 34.54,
             "Stage RX Secondary": 26.96,
@@ -51,15 +51,15 @@
     },
     "Mediterranean": {
         "Aligners": {
-            "Primary": 24.70,
-            "Secondary": 19.30,
+            "Primary": 24.7,
+            "Secondary": 19.3,
             "CR": 10.78
         }
     },
     "Italy": {
         "Aligners": {
             "Primary": 25,
-            "Secondary": 19.30,
+            "Secondary": 19.3,
             "CR": 10.78,
             "Stage RX Primary": 32.72,
             "Stage RX Secondary": 22.14,
@@ -71,7 +71,7 @@
     },
     "France": {
         "Aligners": {
-            "Primary": 26.70,
+            "Primary": 26.7,
             "Secondary": 20.27,
             "CR": 10.78,
             "Stage RX Primary": 33.57,
@@ -110,7 +110,7 @@
             "Primary": 31.84,
             "Secondary": 21.19,
             "CR": 10.78,
-            "Stage RX Primary": 50.30,
+            "Stage RX Primary": 50.3,
             "Stage RX Secondary": 24.52,
             "Stage RX CR": 12.76
         }
@@ -126,8 +126,8 @@
     },
     "Ukin": {
         "Aligners": {
-            "Primary": 24.70,
-            "Secondary": 19.30,
+            "Primary": 24.7,
+            "Secondary": 19.3,
             "CR": 10.78,
             "Stage RX Primary": 40.41,
             "Stage RX Secondary": 17.58,
@@ -139,8 +139,8 @@
     },
     "POD Ukin": {
         "Aligners": {
-            "Primary": 24.70,
-            "Secondary": 19.30,
+            "Primary": 24.7,
+            "Secondary": 19.3,
             "CR": 10.78,
             "Stage RX Primary": 29.93,
             "Stage RX Secondary": 18.29,
@@ -149,11 +149,11 @@
     },
     "Clex France": {
         "Aligners": {
-            "Primary": 24.70,
-            "Secondary": 19.30,
+            "Primary": 24.7,
+            "Secondary": 19.3,
             "CR": 10.78,
             "Stage RX Primary": 43.08,
-            "Stage RX Secondary": 29.60,
+            "Stage RX Secondary": 29.6,
             "Stage RX CR": 10.78
         }
     },
@@ -166,8 +166,8 @@
     },
     "Iberia": {
         "Aligners": {
-            "Primary": 27.70,
-            "Secondary": 22.30,
+            "Primary": 27.7,
+            "Secondary": 22.3,
             "CR": 15.99,
             "Stage RX Primary": 38.94,
             "Stage RX Secondary": 32.97,
@@ -179,8 +179,8 @@
     },
     "Latam": {
         "Aligners": {
-            "Primary": 24.70,
-            "Secondary": 19.30,
+            "Primary": 24.7,
+            "Secondary": 19.3,
             "CR": 10.78,
             "Stage RX Primary": 38.34,
             "Stage RX Secondary": 31.72,
@@ -190,7 +190,7 @@
     "Regions NA & Canada": {
         "Aligners": {
             "Primary": 25.65,
-            "Secondary": 19.30,
+            "Secondary": 19.3,
             "CR": 10.78,
             "Stage RX Primary": 34.63,
             "Stage RX Secondary": 27.91,
@@ -203,7 +203,7 @@
     "Pod IDI": {
         "Aligners": {
             "Primary": 27.55,
-            "Secondary": 19.30,
+            "Secondary": 19.3,
             "CR": 10.78,
             "Stage RX Primary": 35.87,
             "Stage RX Secondary": 28.65,
@@ -216,8 +216,8 @@
     "Portugal": {
         "Aligners": {
             "Primary": 27.55,
-            "Secondary": 20.90,
-            "CR": 15.20,
+            "Secondary": 20.9,
+            "CR": 15.2,
             "Stage RX Primary": 35.87,
             "Stage RX Secondary": 28.65,
             "Stage RX CR": 11.87,
@@ -228,8 +228,8 @@
     },
     "ICON Warford": {
         "Aligners": {
-            "Primary": 28.50,
-            "Secondary": 20.90,
+            "Primary": 28.5,
+            "Secondary": 20.9,
             "CR": 10.78,
             "Stage RX Primary": 37.45,
             "Stage RX Secondary": 28.65,
@@ -242,7 +242,7 @@
     "ICON": {
         "Aligners": {
             "Primary": 31.35,
-            "Secondary": 24.70,
+            "Secondary": 24.7,
             "CR": 10.78,
             "Stage RX Primary": 41.75,
             "Stage RX Secondary": 33.39,

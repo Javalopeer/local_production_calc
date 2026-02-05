@@ -5,6 +5,10 @@ from PySide6.QtWidgets import (
 from db.database import init_db
 import qtawesome as qta
 
+# ============== VERSION ==============
+APP_VERSION = "1.0.0"
+DB_SCHEMA_VERSION = 1
+# =====================================
 
 from tabs.tab_register import RegisterTab
 from tabs.tab_production import ProductionTab
@@ -15,7 +19,7 @@ from tabs.tab_standards import StandardsTab
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Production Performance Calculator")
+        self.setWindowTitle(f"Production Performance Calculator v{APP_VERSION}")
         self.setWindowIcon(qta.icon('fa5s.calculator', color='#2d89ef'))
 
         self.tabs = QTabWidget()
