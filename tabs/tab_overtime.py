@@ -4,7 +4,7 @@ import sys
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QDateEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit, QProgressBar
+    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit, QProgressBar, QScrollArea
 )
 from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QColor, QBrush
@@ -264,7 +264,9 @@ class OvertimeTab(QWidget):
         summary_layout.addWidget(self.ot_progress_bar)
         
         summary_widget.setLayout(summary_layout)
-        right_layout.addWidget(card("OT Daily Summary", summary_widget))
+        self.ot_summary_group = card("OT Daily Summary", summary_widget)
+        self.ot_summary_group.setMaximumHeight(130)
+        right_layout.addWidget(self.ot_summary_group)
         
         # Filter/Finder section
         filter_layout = QHBoxLayout()
@@ -319,7 +321,7 @@ class OvertimeTab(QWidget):
         self.ot_table.verticalHeader().setVisible(False)
         self.ot_table.setColumnCount(8)
         self.ot_table.setHorizontalHeaderLabels([
-            "Case ID", "Doctor", "Region", "Type", "Time", "Eff %", "Value %", "Units Eq"
+            "Case ID", "Doctor", "Region", "Type", "Time", "Eff %", "Value %", "Und Eq"
         ])
         self.ot_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.ot_table.setShowGrid(True)
@@ -338,20 +340,20 @@ class OvertimeTab(QWidget):
         """)
         
         # Set column widths
-        self.ot_table.setColumnWidth(0, 80)   # Case ID
-        self.ot_table.setColumnWidth(1, 90)  # Doctor
-        self.ot_table.setColumnWidth(2, 85)  # Region
+        self.ot_table.setColumnWidth(0, 85)   # Case ID
+        self.ot_table.setColumnWidth(1, 90)   # Doctor
+        self.ot_table.setColumnWidth(2, 85)   # Region
         self.ot_table.setColumnWidth(3, 65)   # Type
         self.ot_table.setColumnWidth(4, 45)   # Time
-        self.ot_table.setColumnWidth(5, 50)   # Eff
+        self.ot_table.setColumnWidth(5, 48)   # Eff
         self.ot_table.setColumnWidth(6, 55)   # Value
-        self.ot_table.setColumnWidth(7, 55)   # Units Eq
+        self.ot_table.setColumnWidth(7, 50)   # Units Eq
         
         header = self.ot_table.horizontalHeader()
         header.setStretchLastSection(False)
         
         # Fixed table size
-        table_width = 80 + 90 + 85 + 65 + 45 + 50 + 55 + 55 + 5
+        table_width = 85 + 90 + 85 + 65 + 45 + 50 + 55 + 50 + 10
         self.ot_table.setFixedWidth(table_width)
         self.ot_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.ot_table.setMaximumHeight(260)
@@ -386,17 +388,60 @@ class OvertimeTab(QWidget):
         action_buttons_layout.addStretch()
         right_layout.addLayout(action_buttons_layout)
         right_layout.addStretch()
-
-        # Main layout
-        main_layout = QHBoxLayout()
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.addLayout(left_layout, 1)
-        main_layout.addLayout(right_layout, 1)
-
-        self.setLayout(main_layout)
+        
+        # Create widgets for responsive layout
+        left_widget = QWidget()
+        left_widget.setLayout(left_layout)
+        
+        right_widget = QWidget()
+        right_widget.setLayout(right_layout)
+        
+        # Container for vertical layout (always responsive)
+        self.content_widget = QWidget()
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setSpacing(15)
+        self.content_layout.setContentsMargins(5, 5, 5, 5)
+        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        
+        self.left_widget = left_widget
+        self.right_widget = right_widget
+        self.right_layout = right_layout
+        
+        self.content_layout.addWidget(left_widget)
+        self.content_layout.addWidget(right_widget)
+        
+        # Scroll area for content
+        scroll = QScrollArea()
+        scroll.setWidget(self.content_widget)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        
+        # Main layout with sticky OT summary at bottom
+        self.final_layout = QVBoxLayout()
+        self.final_layout.setContentsMargins(5, 5, 5, 5)
+        self.final_layout.setSpacing(5)
+        self.final_layout.addWidget(scroll, 1)
+        
+        # Move OT summary to sticky bottom
+        self.right_layout.removeWidget(self.ot_summary_group)
+        self.final_layout.addWidget(self.ot_summary_group, 0)
+        
+        self.setLayout(self.final_layout)
+        
         self.load_daily_ot_production()
         self.load_ot_cases()
+    
+    def resizeEvent(self, event):
+        """Handle resize to adjust widget widths"""
+        super().resizeEvent(event)
+        width = event.size().width()
+        
+        # Always vertical layout - just adjust widths
+        responsive_width = min(width - 40, 600)
+        self.left_widget.setFixedWidth(responsive_width)
+        self.right_widget.setFixedWidth(responsive_width)
 
     def on_case_id_changed(self, text):
         """Auto-set start time when Case ID is first entered"""
