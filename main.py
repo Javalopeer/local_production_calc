@@ -1,7 +1,9 @@
 import sys
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QTabWidget
+    QApplication, QMainWindow, QTabWidget, QScrollArea
 )
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from db.database import init_db
 import qtawesome as qta
 
@@ -50,8 +52,15 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.standards_tab, qta.icon('fa5s.cog', color='#9E9E9E'), "Standards")
 
         self.setCentralWidget(self.tabs)
-        self.adjustSize()
-        self.setFixedSize(self.size())
+        
+        # Get screen height for maximum window height
+        screen = QGuiApplication.primaryScreen()
+        screen_height = screen.availableGeometry().height()
+        
+        # Set size constraints - resizable with min/max
+        self.setMinimumSize(640, 550)  # Minimum width 640px
+        self.setMaximumSize(900, screen_height)  # Maximum height = monitor height
+        self.resize(900, 700)  # Default size 900x700
 
     def on_standards_updated(self):
         """Reload standards in Register and OT tabs when standards are modified"""
