@@ -4,7 +4,8 @@ import sys
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, QLabel,
     QTreeWidget, QTreeWidgetItem, QFileDialog, QMessageBox, QLineEdit,
-    QHeaderView, QDialog, QFormLayout, QDialogButtonBox, QComboBox
+    QHeaderView, QDialog, QFormLayout, QDialogButtonBox, QComboBox,
+    QTableWidget, QTableWidgetItem, QDoubleSpinBox, QCheckBox, QScrollArea
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
@@ -131,6 +132,162 @@ class AddTypeDialog(QDialog):
             return None
 
 
+class AddRegionDialog(QDialog):
+    """Dialog for adding a new region with existing types selection"""
+    def __init__(self, existing_regions, all_standards, parent=None):
+        super().__init__(parent)
+        self.existing_regions = existing_regions
+        self.all_standards = all_standards
+        self.type_rows = []  # List to track type checkboxes and spinboxes
+        self.setWindowTitle("Add New Region")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(400)
+        
+        layout = QVBoxLayout()
+        
+        # Region name input
+        region_layout = QHBoxLayout()
+        region_layout.addWidget(QLabel("Region Name:"))
+        self.region_input = QLineEdit()
+        self.region_input.setPlaceholderText("e.g., LATAM, APAC, etc.")
+        region_layout.addWidget(self.region_input)
+        layout.addLayout(region_layout)
+        
+        # Existing types section
+        types_label = QLabel("Select existing types to include:")
+        types_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(types_label)
+        
+        # Get all unique types from all regions
+        self.all_types = self.get_all_unique_types()
+        
+        # Table for existing types
+        self.types_table = QTableWidget()
+        self.types_table.setColumnCount(3)
+        self.types_table.setHorizontalHeaderLabels(["Include", "Type Name", "Time (min)"])
+        self.types_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.types_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.types_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.types_table.setColumnWidth(0, 60)
+        self.types_table.setColumnWidth(2, 100)
+        self.types_table.verticalHeader().setVisible(False)
+        
+        # Populate with existing types
+        self.types_table.setRowCount(len(self.all_types))
+        for row, (type_name, default_time) in enumerate(self.all_types.items()):
+            # Checkbox
+            checkbox = QCheckBox()
+            checkbox.setStyleSheet("margin-left: 20px;")
+            self.types_table.setCellWidget(row, 0, checkbox)
+            
+            # Type name (read-only)
+            name_item = QTableWidgetItem(type_name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.types_table.setItem(row, 1, name_item)
+            
+            # Time spinbox
+            spinbox = QDoubleSpinBox()
+            spinbox.setRange(0.01, 9999.99)
+            spinbox.setDecimals(2)
+            spinbox.setValue(default_time)
+            self.types_table.setCellWidget(row, 2, spinbox)
+            
+            self.type_rows.append((checkbox, type_name, spinbox))
+        
+        layout.addWidget(self.types_table)
+        
+        # Custom type section
+        custom_label = QLabel("Or add a custom type:")
+        custom_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(custom_label)
+        
+        custom_layout = QHBoxLayout()
+        self.custom_type_input = QLineEdit()
+        self.custom_type_input.setPlaceholderText("Custom type name")
+        custom_layout.addWidget(self.custom_type_input)
+        
+        self.custom_time_input = QLineEdit()
+        self.custom_time_input.setPlaceholderText("Time (min)")
+        self.custom_time_input.setFixedWidth(80)
+        custom_layout.addWidget(self.custom_time_input)
+        layout.addLayout(custom_layout)
+        
+        # Info label
+        info = QLabel("Note: Select at least one type or add a custom type.")
+        info.setStyleSheet("color: #888; font-size: 11px; margin-top: 5px;")
+        layout.addWidget(info)
+        
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        self.setLayout(layout)
+    
+    def get_all_unique_types(self):
+        """Get all unique types across all regions with their most common time"""
+        types = {}
+        for region, data in self.all_standards.items():
+            if "Aligners" in data:
+                for type_name, time_value in data["Aligners"].items():
+                    if type_name not in types:
+                        types[type_name] = time_value
+        return dict(sorted(types.items()))
+    
+    def validate_and_accept(self):
+        region = self.region_input.text().strip()
+        if not region:
+            QMessageBox.warning(self, "Error", "Please enter a region name.")
+            return
+        if region in self.existing_regions:
+            QMessageBox.warning(self, "Error", f"Region '{region}' already exists.")
+            return
+        
+        # Check if at least one type is selected or custom type is provided
+        has_selected = any(cb.isChecked() for cb, _, _ in self.type_rows)
+        has_custom = bool(self.custom_type_input.text().strip())
+        
+        if not has_selected and not has_custom:
+            QMessageBox.warning(self, "Error", "Please select at least one type or add a custom type.")
+            return
+        
+        # Validate custom type if provided
+        if has_custom:
+            try:
+                float(self.custom_time_input.text())
+            except ValueError:
+                QMessageBox.warning(self, "Error", "Please enter a valid time for the custom type.")
+                return
+        
+        self.accept()
+    
+    def get_data(self):
+        """Return region name and dict of types with times"""
+        types = {}
+        
+        # Get selected existing types
+        for checkbox, type_name, spinbox in self.type_rows:
+            if checkbox.isChecked():
+                types[type_name] = spinbox.value()
+        
+        # Add custom type if provided
+        custom_name = self.custom_type_input.text().strip()
+        if custom_name:
+            try:
+                custom_time = float(self.custom_time_input.text())
+                types[custom_name] = custom_time
+            except ValueError:
+                pass
+        
+        return {
+            'region': self.region_input.text().strip(),
+            'types': types
+        }
+
+
 class StandardsTab(QWidget):
     standards_updated = Signal()  # Signal emitted when standards are modified
     
@@ -236,6 +393,11 @@ class StandardsTab(QWidget):
         action_layout = QHBoxLayout()
         action_layout.addStretch()
         
+        add_region_btn = QPushButton("Add Region")
+        add_region_btn.setMaximumWidth(100)
+        add_region_btn.clicked.connect(self.add_region)
+        action_layout.addWidget(add_region_btn)
+        
         add_type_btn = QPushButton("Add Type")
         add_type_btn.setMaximumWidth(100)
         add_type_btn.clicked.connect(self.add_type)
@@ -329,6 +491,18 @@ class StandardsTab(QWidget):
             self.edit_item(item)
         else:
             QMessageBox.information(self, "Info", "Please select a case type to edit.")
+    
+    def add_region(self):
+        """Add a new region"""
+        dialog = AddRegionDialog(list(self.standards.keys()), self.standards, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            data = dialog.get_data()
+            if data and data['types']:
+                region = data['region']
+                self.standards[region] = {
+                    "Aligners": data['types']
+                }
+                self.populate_tree()
     
     def add_type(self):
         """Add a new case type"""
