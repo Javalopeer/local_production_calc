@@ -8,7 +8,7 @@ if __name__ == "__main__":
 
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
-    QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QTabWidget, QDateEdit, QTextEdit
+    QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QTabWidget, QDateEdit, QTextEdit, QScrollArea
 )
 from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont
@@ -222,12 +222,14 @@ class RegisterTab(QWidget):
         self.progress_bar.setMinimumHeight(28)
         progress_layout.addWidget(self.progress_bar)
         
-        progress_group = card("Daily Production (6:00 AM - 3:00 PM)", progress_layout)
+        self.progress_group = card("Daily Production (6:00 AM - 3:00 PM)", progress_layout)
+        self.progress_group.setMaximumHeight(130)
 
-        # Left side layout - Case Information y Calculation Result
-        left_layout = QVBoxLayout()
+        # Create left card (Case Information + Calculation Result)
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
         left_layout.setSpacing(12)
-        left_layout.setContentsMargins(15, 15, 15, 0)
+        left_layout.setContentsMargins(10, 10, 10, 10)
         
         form_widget = QWidget()
         form_widget.setLayout(form)
@@ -238,8 +240,9 @@ class RegisterTab(QWidget):
         left_layout.addWidget(card("Calculation Result", result_layout))
         left_layout.addStretch()
         
-        # Right side layout - Comments, Downtime, Daily Production
-        right_layout = QVBoxLayout()
+        # Create right card (Comments, Downtime, Progress)
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
         right_layout.setSpacing(12)
         right_layout.setContentsMargins(10, 10, 10, 10)
         
@@ -258,20 +261,76 @@ class RegisterTab(QWidget):
         downtime_card = card("Downtime", downtime_widget)
         right_layout.addWidget(downtime_card)
         
-        right_layout.addWidget(progress_group)
+        # Progress bar in right column (normal mode)
+        right_layout.addWidget(self.progress_group)
+        right_layout.addStretch()
         
-        # Main horizontal layout: Register left, Production+Downtime right
-        main_layout = QHBoxLayout()
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.addLayout(left_layout, 1)
-        main_layout.addLayout(right_layout, 1)
+        # Container for responsive layout
+        self.content_widget = QWidget()
+        self.content_layout = QHBoxLayout(self.content_widget)
+        self.content_layout.setSpacing(15)
+        self.content_layout.setContentsMargins(5, 5, 5, 5)
+        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         
-        final_layout = QVBoxLayout()
-        final_layout.addLayout(main_layout)
-        self.setLayout(final_layout)
+        self.left_widget = left_widget
+        self.right_widget = right_widget
+        self.right_layout = right_layout
+        
+        self.content_layout.addWidget(left_widget)
+        self.content_layout.addWidget(right_widget)
+        
+        # Scroll area for content
+        scroll = QScrollArea()
+        scroll.setWidget(self.content_widget)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        
+        # Main layout
+        self.final_layout = QVBoxLayout()
+        self.final_layout.setContentsMargins(5, 5, 5, 5)
+        self.final_layout.setSpacing(5)
+        self.final_layout.addWidget(scroll, 1)
+        self.setLayout(self.final_layout)
+        
+        # Store current layout mode
+        self.is_vertical = False
         
         self.load_daily_production()
+    
+    def resizeEvent(self, event):
+        """Handle resize to switch between horizontal and vertical layout"""
+        super().resizeEvent(event)
+        width = event.size().width()
+        
+        # Switch to vertical layout when width < 850
+        if width < 850 and not self.is_vertical:
+            self.is_vertical = True
+            self.content_layout.setDirection(QVBoxLayout.Direction.TopToBottom)
+            # Set fixed width so widgets center properly and are wider
+            responsive_width = min(width - 40, 600)  # Use most of available width
+            self.left_widget.setFixedWidth(responsive_width)
+            self.right_widget.setFixedWidth(responsive_width)
+            # Move progress bar to sticky bottom
+            self.right_layout.removeWidget(self.progress_group)
+            self.final_layout.addWidget(self.progress_group, 0)
+        elif width >= 850 and self.is_vertical:
+            self.is_vertical = False
+            self.content_layout.setDirection(QHBoxLayout.Direction.LeftToRight)
+            # Remove fixed width in horizontal mode
+            self.left_widget.setMinimumWidth(0)
+            self.left_widget.setMaximumWidth(16777215)
+            self.right_widget.setMinimumWidth(0)
+            self.right_widget.setMaximumWidth(16777215)
+            # Move progress bar back to right column
+            self.final_layout.removeWidget(self.progress_group)
+            self.right_layout.insertWidget(2, self.progress_group)  # After downtime
+        elif self.is_vertical:
+            # Update width when resizing in vertical mode
+            responsive_width = min(width - 40, 600)
+            self.left_widget.setFixedWidth(responsive_width)
+            self.right_widget.setFixedWidth(responsive_width)
 
     def load_standards(self):
         standards_path = get_resource_path(os.path.join("data", "standards.json"))
