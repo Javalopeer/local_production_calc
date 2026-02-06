@@ -176,12 +176,9 @@ class ProductionTab(QWidget):
         filters_row.addStretch()
         main_layout.addLayout(filters_row)
 
-        # Add spacing between filters and table
-        main_layout.addSpacing(20)
-
         # Table
         self.table = QTableWidget()
-        self.table.setAlternatingRowColors(False)
+        self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
@@ -222,9 +219,14 @@ class ProductionTab(QWidget):
         table_width = 95 + 100 + 100 + 70 + 55 + 55 + 40 + 50 + 60 + 50 + 10  # columns + 5px
         self.table.setFixedWidth(table_width)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.table.setMaximumHeight(325)  # 12 rows (~25px each) + header (~25px)
+        self.table.setMinimumHeight(200)  # Minimum height
         
-        main_layout.addWidget(self.table, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # Use a container to center the table while allowing it to grow
+        table_container = QHBoxLayout()
+        table_container.addStretch()
+        table_container.addWidget(self.table)
+        table_container.addStretch()
+        main_layout.addLayout(table_container, 1)  # Stretch factor 1 to fill space
         
         # Edit/Delete buttons
         action_buttons_layout = QHBoxLayout()
@@ -278,6 +280,22 @@ class ProductionTab(QWidget):
         main_layout.addSpacing(10)
 
         self.setLayout(main_layout)
+
+    def resizeEvent(self, event):
+        """Hide Eff % column when width < 695px and adjust table width"""
+        super().resizeEvent(event)
+        width = event.size().width()
+        
+        # Column widths: 85+100+100+70+55+55+40+55+60+50+15 = 685 (full)
+        # Without Eff: 85+100+100+70+55+55+40+60+50+15 = 630
+        
+        # Column 7 is "Eff %"
+        if width < 695:
+            self.table.setColumnHidden(7, True)
+            self.table.setFixedWidth(630)  # Without Eff column
+        else:
+            self.table.setColumnHidden(7, False)
+            self.table.setFixedWidth(685)  # Full width
 
     def load_regions_and_types(self):
         """Load unique regions and types for filters based on current mode"""
@@ -363,14 +381,14 @@ class ProductionTab(QWidget):
                 SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin, 
                        tiempo_real, efficiency, estado, case_value, count_production
                 FROM cases
-                ORDER BY fecha DESC, hora_inicio DESC
+                ORDER BY id DESC
             """)
         else:  # OT mode
             cursor.execute("""
                 SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin, 
                        tiempo_real, efficiency, estado, case_value, count_production
                 FROM ot_cases
-                ORDER BY fecha DESC, hora_inicio DESC
+                ORDER BY id DESC
             """)
 
         self.all_cases = cursor.fetchall()
@@ -516,12 +534,14 @@ class ProductionTab(QWidget):
                 self.table.setItem(row_idx, 1, doctor_item)
                 
                 # Other columns - centered (indices shifted)
+                # Get std_time for comparison (need to load from standards)
+                tiempo_real = case[8]  # Time at index 8
+                
                 other_items = [
                     str(case[3]),           # Region (index 3)
                     str(case[4]),           # Type (index 4)
                     str(case[6]),           # Start (index 6)
                     str(case[7]),           # End (index 7)
-                    f"{case[8]:.0f}",       # Time (index 8)
                 ]
                 
                 for col, text in enumerate(other_items, start=2):
@@ -529,6 +549,21 @@ class ProductionTab(QWidget):
                     item.setBackground(bg_brush)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     self.table.setItem(row_idx, col, item)
+                
+                # Time column - if exceeds standard, show 0 in green, else show actual time
+                # Check if efficiency >= 100 (OK) means time was within standard
+                if case[10] == "OK":  # estado at index 10
+                    # Within time - show actual time in green
+                    time_item = QTableWidgetItem(f"{tiempo_real:.0f}")
+                    time_item.setBackground(QBrush(QColor(76, 175, 80)))  # Green
+                    time_item.setForeground(QBrush(QColor(255, 255, 255)))
+                else:
+                    # Exceeded time - show 0 in green
+                    time_item = QTableWidgetItem("0")
+                    time_item.setBackground(QBrush(QColor(76, 175, 80)))  # Green
+                    time_item.setForeground(QBrush(QColor(255, 255, 255)))
+                time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, 6, time_item)
                 
                 # Efficiency with color - centered (efficiency at index 9, estado at index 10)
                 efficiency_item = QTableWidgetItem(f"{case[9]:.0f}%")
