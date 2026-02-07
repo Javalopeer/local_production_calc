@@ -1,6 +1,6 @@
 import sys
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QTabWidget, QScrollArea
+    QApplication, QMainWindow, QTabWidget, QScrollArea, QCheckBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
@@ -31,6 +31,7 @@ class MainWindow(QMainWindow):
         self.history_tab = HistoryTab()
         self.overtime_tab = OvertimeTab()
         self.standards_tab = StandardsTab()
+
         
         # Connect register tab to production tab for dynamic updates
         self.register_tab.case_saved.connect(self.production_tab.load_data)
@@ -61,6 +62,14 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(640, 550)  # Minimum width 640px
         self.setMaximumSize(900, screen_height)  # Maximum height = monitor height
         self.resize(900, 700)  # Default size 900x700
+        # Theme toggle checkbox in status bar
+        try:
+            light_chk = QCheckBox("Light")
+            light_chk.setToolTip("Toggle light mode")
+            light_chk.toggled.connect(lambda checked: QApplication.instance().setStyleSheet(LIGHT_STYLE if checked else DARK_STYLE))
+            self.statusBar().addPermanentWidget(light_chk)
+        except Exception:
+            pass
 
     def on_standards_updated(self):
         """Reload standards in Register and OT tabs when standards are modified"""
@@ -88,8 +97,8 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     init_db()
     app = QApplication(sys.argv)
-    
-    app.setStyleSheet("""
+
+    DARK_STYLE = """
     QWidget {
         background-color: #1e1e1e;
         color: #e6e6e6;
@@ -233,7 +242,155 @@ if __name__ == "__main__":
         border: none;
         font-weight: bold;
     }
-    """)
+    """
+
+    LIGHT_STYLE = """
+    QWidget {
+        background-color: #F7ECE1; /* main background */
+        color: #242038; /* primary text */
+        font-family: Segoe UI;
+        font-size: 12px;
+    }
+
+    QLabel {
+        color: #242038;
+    }
+
+    QLineEdit, QComboBox, QDateEdit, QTimeEdit {
+        background-color: #ffffff;
+        border: 1px solid #CAC4CE;
+        border-radius: 6px;
+        padding: 6px;
+        color: #242038;
+    }
+
+    QTimeEdit::up-button, QTimeEdit::down-button,
+    QDateEdit::up-button, QDateEdit::down-button {
+        width: 0px;
+        border: none;
+    }
+
+    QTimeEdit, QDateEdit {
+        padding-right: 6px;
+    }
+
+    QComboBox {
+        background-color: #ffffff;
+        border: 1px solid #CAC4CE;
+        border-radius: 6px;
+        padding: 6px;
+    }
+
+    QComboBox QAbstractItemView {
+        background-color: #ffffff;
+        color: #242038;
+        selection-background-color: #8D86C9;
+        border: 1px solid #CAC4CE;
+        outline: none;
+    }
+
+    QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
+        border: 1px solid #725AC1;
+    }
+
+    QPushButton {
+        background-color: #725AC1; /* primary action */
+        border: none;
+        border-radius: 6px;
+        padding: 8px 14px;
+        color: white;
+        font-weight: bold;
+    }
+
+    QPushButton:hover {
+        background-color: #8D86C9; /* hover */
+    }
+
+    QPushButton:pressed {
+        background-color: #5e489f;
+    }
+
+    QPushButton:disabled {
+        background-color: #CAC4CE;
+    }
+
+    QTabWidget::pane {
+        border: 1px solid #CAC4CE;
+        margin-top: 5px;
+    }
+
+    QTabBar::tab {
+        background: #F7ECE1;
+        padding: 8px 16px;
+        border-radius: 6px;
+        margin-left: 10px;
+        margin-top: 8px;
+        margin-bottom: 4px;
+        border: 1px solid #CAC4CE;
+        color: #242038;
+        font-weight: 500;
+    }
+
+    QTabBar::tab:hover {
+        background: #fff7f0;
+        color: #242038;
+    }
+
+    QTabBar::tab:selected {
+        background: #725AC1;
+        color: white;
+        border: 1px solid #725AC1;
+    }
+
+    QGroupBox {
+        border: 1px solid #CAC4CE;
+        border-radius: 8px;
+        margin-top: 10px;
+        padding: 10px;
+        color: #242038;
+    }
+
+    QGroupBox:title {
+        subcontrol-origin: margin;
+        subcontrol-position: top left;
+        padding: 0 6px;
+        color: #725AC1;
+        font-weight: bold;
+    }
+
+    QProgressBar {
+        border: 1px solid #CAC4CE;
+        border-radius: 8px;
+        text-align: center;
+        height: 24px;
+        background-color: #ffffff;
+    }
+
+    QProgressBar::chunk {
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 #8D86C9, stop:0.5 #725AC1, stop:1 #8D86C9);
+        border-radius: 6px;
+    }
+
+    QTableWidget {
+        gridline-color: #CAC4CE;
+        selection-background-color: #8D86C9;
+    }
+
+    QTableWidget::item {
+        padding: 6px;
+    }
+
+    QHeaderView::section {
+        background-color: #8D86C9;
+        color: white;
+        padding: 6px;
+        border: none;
+        font-weight: bold;
+    }
+    """
+
+    app.setStyleSheet(DARK_STYLE)
     
     window = MainWindow()
     window.show()
