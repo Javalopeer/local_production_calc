@@ -66,7 +66,28 @@ class MainWindow(QMainWindow):
         try:
             light_chk = QCheckBox("Light")
             light_chk.setToolTip("Toggle light mode")
-            light_chk.toggled.connect(lambda checked: QApplication.instance().setStyleSheet(LIGHT_STYLE if checked else DARK_STYLE))
+            def on_theme_toggled(checked):
+                QApplication.instance().setStyleSheet(LIGHT_STYLE if checked else DARK_STYLE)
+                # Notify tabs to update their local progress-bar styles
+                try:
+                    self.register_tab.update_progress_bar_style(checked)
+                except Exception:
+                    pass
+                try:
+                    self.overtime_tab.update_progress_bar_style(checked)
+                except Exception:
+                    pass
+                # Notify tabs to update label colors when switching themes
+                try:
+                    self.register_tab.update_theme_labels(checked)
+                except Exception:
+                    pass
+                try:
+                    self.overtime_tab.update_theme_labels(checked)
+                except Exception:
+                    pass
+
+            light_chk.toggled.connect(on_theme_toggled)
             self.statusBar().addPermanentWidget(light_chk)
         except Exception:
             pass
@@ -320,26 +341,26 @@ if __name__ == "__main__":
     }
 
     QTabBar::tab {
-        background: #F7ECE1;
+        background: #8D86C9;
         padding: 8px 16px;
         border-radius: 6px;
         margin-left: 10px;
         margin-top: 8px;
         margin-bottom: 4px;
-        border: 1px solid #CAC4CE;
-        color: #242038;
+        border: 1px solid #8D86C9;
+        color: white;
         font-weight: 500;
     }
 
     QTabBar::tab:hover {
-        background: #fff7f0;
-        color: #242038;
+        background: #9b94d1;
+        color: white;
     }
 
     QTabBar::tab:selected {
-        background: #725AC1;
+        background: #8D86C9;
         color: white;
-        border: 1px solid #725AC1;
+        border: 1px solid #8D86C9;
     }
 
     QGroupBox {
@@ -359,16 +380,16 @@ if __name__ == "__main__":
     }
 
     QProgressBar {
-        border: 1px solid #CAC4CE;
+        border: 1px solid #8D86C9;
         border-radius: 8px;
         text-align: center;
         height: 24px;
-        background-color: #ffffff;
+        background-color: #8D86C9; /* production bar background */
     }
 
     QProgressBar::chunk {
         background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-            stop:0 #8D86C9, stop:0.5 #725AC1, stop:1 #8D86C9);
+            stop:0 #2b2b2b, stop:0.5 #1e1e1e, stop:1 #2b2b2b);
         border-radius: 6px;
     }
 
