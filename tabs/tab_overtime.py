@@ -1,11 +1,13 @@
 import json
 import os
 import sys
+import re
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QDateEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit, QProgressBar, QScrollArea
+    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit, QProgressBar, QScrollArea, QDoubleSpinBox, QSpinBox, QFrame
 )
+from PySide6.QtWidgets import QAbstractSpinBox
 from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QColor, QBrush
 from db.database import get_connection
@@ -88,10 +90,27 @@ class OvertimeTab(QWidget):
     
     def calculate_units_eq(self, region, case_value):
         """Calculate equivalent units for a case based on region and value"""
-        if region not in self.units_eq or not case_value:
+        if not case_value:
             return 0.0
-        units_at_100 = self.units_eq[region].get("100", 0)
-        return (case_value / 100) * units_at_100
+
+        # direct match
+        if region in self.units_eq:
+            units_at_100 = self.units_eq[region].get("100", 0)
+            return (case_value / 100) * units_at_100
+
+        # fallback: try to find a close key by normalizing names (remove non-alnum, lowercase)
+        def norm(s):
+            return re.sub(r'[^a-z0-9]', '', s.lower()) if s else ''
+
+        rnorm = norm(region)
+        for k in self.units_eq.keys():
+            kn = norm(k)
+            if kn and (kn in rnorm or rnorm in kn):
+                units_at_100 = self.units_eq[k].get("100", 0)
+                return (case_value / 100) * units_at_100
+
+        # no match
+        return 0.0
 
     def init_ui(self):
         # Form fields
@@ -217,12 +236,88 @@ class OvertimeTab(QWidget):
         
         form_widget = QWidget()
         form_widget.setLayout(form)
-        case_info_card = card("OT Case Information", form_widget)
-        
+
+        # Build a combined case info card: form on the left, estimate panel on the right
+        case_card_widget = QWidget()
+        case_card_layout = QHBoxLayout()
+        case_card_layout.setContentsMargins(6, 6, 6, 6)
+        case_card_layout.setSpacing(12)
+
+        # Left: the existing form
+        case_card_layout.addWidget(form_widget, 1)
+
+        # Vertical separator between left form and right estimate panel
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        separator.setLineWidth(1)
+        separator.setFixedWidth(1)
+        separator.setStyleSheet("background-color: #3c3c3c;")
+        case_card_layout.addWidget(separator)
+
+        # Right: compact estimate panel (region, hours, button, result)
+        estimate_panel = QWidget()
+        estimate_panel_layout = QVBoxLayout()
+        estimate_panel_layout.setContentsMargins(0, 0, 0, 0)
+        estimate_panel_layout.setSpacing(8)
+
+        # Region selector for estimate (independent from left-side region)
+        self.est_region_combo = QComboBox()
+        self.est_region_combo.addItems(sorted(self.standards.keys()))
+        self.est_region_combo.setMaximumWidth(160)
+        # region selector will be applied when user clicks Estimate
+
+        estimate_panel_layout.addWidget(self.est_region_combo)
+
+        self.ot_hours_spin = QDoubleSpinBox()
+        self.ot_hours_spin.setRange(0.25, 12.0)
+        self.ot_hours_spin.setSingleStep(0.25)
+        self.ot_hours_spin.setValue(1.0)
+        self.ot_hours_spin.setSuffix(" h")
+        self.ot_hours_spin.setMaximumWidth(120)
+
+        estimate_btn = QPushButton("Estimate")
+        estimate_btn.setMaximumWidth(120)
+        estimate_btn.clicked.connect(self.calculate_for_hours)
+
+        self.estimate_label = QLabel("")
+        self.estimate_label.setWordWrap(True)
+        self.estimate_label.setStyleSheet("font-size:12px; color:#e6e6e6;")
+        self.estimate_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # hide the overall quick summary — we'll show per-type info next to each spinbox
+        self.estimate_label.hide()
+
+        # counts per type area
+        self.estimate_counts_layout = QFormLayout()
+        self.estimate_counts_layout.setSpacing(6)
+        self.estimate_counts_widget = QWidget()
+        self.estimate_counts_widget.setLayout(self.estimate_counts_layout)
+        # hide until user presses Estimate
+        self.estimate_counts_widget.hide()
+
+        # per-type info labels (populated in update_estimate_types)
+        self.estimate_info_labels = {}
+
+        estimate_panel_layout.addWidget(self.ot_hours_spin)
+        estimate_panel_layout.addWidget(estimate_btn)
+        estimate_panel_layout.addWidget(self.estimate_label)
+        estimate_panel_layout.addWidget(self.estimate_counts_widget)
+        estimate_panel_layout.addStretch()
+        estimate_panel.setLayout(estimate_panel_layout)
+        estimate_panel.setMaximumWidth(260)
+
+        case_card_layout.addWidget(estimate_panel, 0)
+        case_card_widget.setLayout(case_card_layout)
+
+        case_info_card = card("OT Case Information", case_card_widget)
+
         left_layout.addWidget(case_info_card)
+
+        # initialize estimate type spinboxes (use right-region selector)
+        self.estimate_counts = {}
+        # do not auto-update counts; user must press Estimate
         left_layout.addLayout(buttons_layout)
         left_layout.addWidget(card("Calculation Result", result_layout))
-        left_layout.addStretch()
 
         # Right layout
         right_layout = QVBoxLayout()
@@ -239,7 +334,6 @@ class OvertimeTab(QWidget):
         summary_layout = QVBoxLayout()
         summary_layout.addWidget(self.daily_ot_label)
         summary_layout.addWidget(self.ot_units_label)
-        
         # OT Progress bar
         self.ot_progress_bar = QProgressBar()
         self.ot_progress_bar.setMinimum(0)
@@ -262,7 +356,7 @@ class OvertimeTab(QWidget):
             }
         """)
         summary_layout.addWidget(self.ot_progress_bar)
-        
+
         summary_widget.setLayout(summary_layout)
         self.ot_summary_group = card("OT Daily Summary", summary_widget)
         self.ot_summary_group.setMaximumHeight(130)
@@ -387,7 +481,6 @@ class OvertimeTab(QWidget):
         action_buttons_layout.addWidget(self.delete_ot_btn)
         action_buttons_layout.addStretch()
         right_layout.addLayout(action_buttons_layout)
-        right_layout.addStretch()
         
         # Create widgets for responsive layout
         left_widget = QWidget()
@@ -417,6 +510,7 @@ class OvertimeTab(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # No extra bottom margin — let footer sit below the scroll area
         
         # Main layout with sticky OT summary at bottom
         self.final_layout = QVBoxLayout()
@@ -453,6 +547,7 @@ class OvertimeTab(QWidget):
         if region and region in self.standards:
             self.tipo.clear()
             self.tipo.addItems(self.standards[region]["Aligners"].keys())
+        # (do not update right-hand estimate region here)
 
     def validate_end_time(self):
         if self.end_time.time() < self.start_time.time():
@@ -569,6 +664,159 @@ class OvertimeTab(QWidget):
         """)
         
         return total_ot
+
+    def calculate_for_hours(self):
+        """Estimate production percent, TU and equivalent units for selected OT hours"""
+        # Rebuild spinboxes for the selected right-side region and hours
+        self.update_estimate_types()
+        # show the counts area only when estimate requested
+        self.estimate_counts_widget.show()
+
+        # Now compute totals using counts in the spinboxes and include UE
+        hours = float(self.ot_hours_spin.value())
+        minutes = hours * 60.0
+        region = self.est_region_combo.currentText() if hasattr(self, 'est_region_combo') else self.region.currentText()
+
+        total_cases = 0
+        total_case_value = 0.0
+        total_equivalent_units = 0.0
+        used_minutes = 0.0
+
+        for t, sb in self.estimate_counts.items():
+            cnt = int(sb.value())
+            total_cases += cnt
+            # use resolved standards key stored during update_estimate_types
+            key = getattr(self, 'estimate_key_map', {}).get(t)
+            std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
+            case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
+            units_per_case = self.calculate_units_eq(region, case_value_per)
+            total_case_value += cnt * case_value_per
+            total_equivalent_units += cnt * units_per_case
+            used_minutes += cnt * float(std_time or 0)
+
+        tu_percent = (used_minutes / minutes) * 100.0 if minutes > 0 else 0.0
+
+        # Update per-type info labels with "% · TU · UE"
+        minutes = minutes if minutes > 0 else 1.0
+        for t, sb in self.estimate_counts.items():
+            cnt = int(sb.value())
+            key = getattr(self, 'estimate_key_map', {}).get(t)
+            std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
+            case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
+            units_per_case = self.calculate_units_eq(region, case_value_per)
+            cases_value_total = cnt * case_value_per
+            used_min_type = cnt * float(std_time or 0)
+            tu_type = (used_min_type / minutes) * 100.0
+            equiv_units_type = cnt * units_per_case
+            info_label = self.estimate_info_labels.get(t)
+            if info_label:
+                info_label.setText(f"{cases_value_total:.2f}% · TU {tu_type:.1f}% · {equiv_units_type:.2f} UE")
+
+        # clear overall label (we use per-type labels now)
+        self.estimate_label.clear()
+        return
+
+    def update_estimate_types(self):
+        """Rebuild the per-type spinboxes based on selected region."""
+        # clear existing
+        try:
+            while self.estimate_counts_layout.count():
+                item = self.estimate_counts_layout.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+        except Exception:
+            pass
+
+        self.estimate_counts = {}
+        # mapping from canonical label (CR/Refinement/Primary) to actual standards key used
+        self.estimate_key_map = {}
+        # use the right-side region selector if present
+        region = self.est_region_combo.currentText() if hasattr(self, 'est_region_combo') else self.region.currentText()
+        if not region or region not in self.standards:
+            return
+
+        # compute maximum cases possible given selected hours
+        minutes = float(self.ot_hours_spin.value()) * 60.0 if hasattr(self, 'ot_hours_spin') else 0.0
+        # Ensure the three canonical types are present: CR, Refinement, Primary
+        desired = ['CR', 'Refinement', 'Primary']
+        all_types = list(self.standards[region].get("Aligners", {}).keys())
+
+        for t in desired:
+            # try exact match first
+            found_key = None
+            for k in all_types:
+                if k.strip().lower() == t.lower():
+                    found_key = k
+                    break
+            # flexible fallback: for 'Refinement' match any key containing 'ref', for 'CR' match 'cr', for 'Primary' match 'primary'
+            if not found_key:
+                needle = t.lower()
+                if t.lower() == 'refinement':
+                    needle = 'ref'
+                if t.lower() == 'cr':
+                    needle = 'cr'
+                for k in all_types:
+                    if needle in k.strip().lower():
+                        found_key = k
+                        break
+
+            # If still not found for Refinement, fall back to a 'Secondary' variant if available
+            if not found_key and t.lower() == 'refinement':
+                fallback_candidates = ['Secondary', 'Stage RX Secondary', 'Bite Sync Secondary']
+                for cand in fallback_candidates:
+                    for k in all_types:
+                        if k.strip().lower() == cand.lower():
+                            found_key = k
+                            break
+                    if found_key:
+                        break
+
+            std_time = self.standards[region]["Aligners"].get(found_key, 0) if found_key else 0
+            # store mapping for later calculations
+            self.estimate_key_map[t] = found_key
+            max_cases = int((minutes // float(std_time)) if std_time and minutes > 0 else 0)
+            sb = QSpinBox()
+            # remove up/down buttons for a compact numeric field and make it non-editable
+            sb.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            sb.setReadOnly(True)
+            sb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            sb.setRange(0, max(1, max_cases))
+            # default to max possible so user sees capacity
+            sb.setValue(max_cases)
+            sb.setMaximumWidth(90)
+
+            # per-type info label placed below spinbox
+            info_label = QLabel("")
+            info_label.setStyleSheet("font-size:11px; color:#bdbdbd;")
+            info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            # container widget to hold spinbox and info label (vertical)
+            container = QWidget()
+            v = QVBoxLayout()
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(4)
+            v.addWidget(sb)
+            v.addWidget(info_label)
+            container.setLayout(v)
+
+            self.estimate_counts_layout.addRow(f"{t}", container)
+            self.estimate_counts[t] = sb
+            self.estimate_info_labels[t] = info_label
+
+        # After building spinboxes, compute quick summary (without UE)
+        total_case_value = 0.0
+        used_minutes = 0.0
+        for t, sb in self.estimate_counts.items():
+            cnt = int(sb.value())
+            key = self.estimate_key_map.get(t)
+            std_time = self.standards[region]["Aligners"].get(key, 0) if key else 0
+            case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
+            total_case_value += cnt * case_value_per
+            used_minutes += cnt * float(std_time or 0)
+
+        tu_percent = (used_minutes / minutes) * 100.0 if minutes > 0 else 0.0
+        # update label without UE (UE shown only on explicit Estimate) — hide case count
+        self.estimate_label.setText(f"{total_case_value:.2f}% · TU {tu_percent:.1f}%")
 
     def animate_ot_progress_bar(self, target_value):
         """Animate the OT progress bar to the target value"""
