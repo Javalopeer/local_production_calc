@@ -3,7 +3,7 @@ import os
 import sys
 import re
 from PySide6.QtWidgets import (
-    QWidget, QFormLayout, QComboBox, QLineEdit,
+    QApplication, QWidget, QFormLayout, QComboBox, QLineEdit,
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QDateEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit, QProgressBar, QScrollArea, QDoubleSpinBox, QSpinBox, QFrame
 )
@@ -195,7 +195,7 @@ class OvertimeTab(QWidget):
         toggle_layout = QHBoxLayout()
         toggle_layout.setContentsMargins(0, 0, 0, 0)
         toggle_label = QLabel("Count to production?")
-        toggle_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        toggle_label.setStyleSheet("font-size: 11px; color: #000000;")
         toggle_layout.addWidget(toggle_label)
         toggle_layout.addWidget(self.count_toggle)
         toggle_layout.addStretch()
@@ -282,7 +282,7 @@ class OvertimeTab(QWidget):
 
         self.estimate_label = QLabel("")
         self.estimate_label.setWordWrap(True)
-        self.estimate_label.setStyleSheet("font-size:12px; color:#e6e6e6;")
+        self.estimate_label.setStyleSheet("font-size:12px; color:#222222;")
         self.estimate_label.setAlignment(Qt.AlignmentFlag.AlignTop)
         # hide the overall quick summary — we'll show per-type info next to each spinbox
         self.estimate_label.hide()
@@ -648,20 +648,11 @@ class OvertimeTab(QWidget):
             bar_color = "#FF9800"  # Orange
         else:
             bar_color = "#4CAF50"  # Green for good OT
-        
-        self.ot_progress_bar.setStyleSheet(f"""
-            QProgressBar {{
-                border: 1px solid #3c3c3c;
-                border-radius: 8px;
-                text-align: center;
-                height: 24px;
-                background-color: #2b2b2b;
-            }}
-            QProgressBar::chunk {{
-                background-color: {bar_color};
-                border-radius: 6px;
-            }}
-        """)
+        # Store chunk color and let the theme helper set the background
+        self._ot_progress_chunk = bar_color
+        current_is_light = 'background-color: #F7ECE1' in QApplication.instance().styleSheet()
+        # Update bar appearance according to current theme
+        self.update_progress_bar_style(current_is_light)
         
         return total_ot
 
@@ -788,7 +779,7 @@ class OvertimeTab(QWidget):
 
             # per-type info label placed below spinbox
             info_label = QLabel("")
-            info_label.setStyleSheet("font-size:11px; color:#bdbdbd;")
+            info_label.setStyleSheet("font-size:11px; color:#222222;")
             info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             # container widget to hold spinbox and info label (vertical)
             container = QWidget()
@@ -831,6 +822,68 @@ class OvertimeTab(QWidget):
         self._ot_progress_animation.setStartValue(current_value)
         self._ot_progress_animation.setEndValue(target_value)
         self._ot_progress_animation.start()
+
+    def update_progress_bar_style(self, light_mode: bool):
+        """Update OT progress bar appearance for light/dark themes."""
+        chunk = getattr(self, '_ot_progress_chunk', '#FF9800')
+        if light_mode:
+            bg = '#8D86C9'
+        else:
+            bg = '#2b2b2b'
+
+        try:
+            self.ot_progress_bar.setStyleSheet(f"""
+                QProgressBar {{
+                    border: 1px solid #3c3c3c;
+                    border-radius: 8px;
+                    text-align: center;
+                    height: 24px;
+                    background-color: {bg};
+                }}
+                QProgressBar::chunk {{
+                    background-color: {chunk};
+                    border-radius: 6px;
+                }}
+            """)
+        except Exception:
+            pass
+
+    def update_theme_labels(self, light_mode: bool):
+        """Adjust label colors so Light mode shows dark text and Dark mode preserves original light colors."""
+        try:
+            if light_mode:
+                tl_color = '#000000'
+                est_color = '#222222'
+                info_color = '#222222'
+            else:
+                tl_color = '#aaaaaa'
+                est_color = '#e6e6e6'
+                info_color = '#bdbdbd'
+
+            # Count toggle label
+            for w in [getattr(self, 'count_toggle', None)]:
+                pass
+            toggle_label = None
+            # find the toggle label by walking children
+            for child in self.findChildren(QLabel):
+                if child.text() == 'Count to production?':
+                    toggle_label = child
+                    break
+            if toggle_label:
+                toggle_label.setStyleSheet(f"font-size:11px; color: {tl_color};")
+
+            # estimate overall label
+            if hasattr(self, 'estimate_label') and self.estimate_label:
+                self.estimate_label.setStyleSheet(f"font-size:12px; color:{est_color};")
+
+            # per-type info labels
+            for lbl in getattr(self, 'estimate_info_labels', {}).values():
+                try:
+                    lbl.setStyleSheet(f"font-size:11px; color:{info_color};")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def load_ot_cases(self):
         """Load OT cases for selected date into the table"""
