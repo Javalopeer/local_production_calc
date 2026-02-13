@@ -445,6 +445,33 @@ class StandardsTab(QWidget):
         
         self.setLayout(main_layout)
         self.populate_tree()
+
+    def update_theme_labels(self, is_light: bool):
+        """Color tree widget text white in light mode or reset in dark mode."""
+        from PySide6.QtGui import QBrush, QColor
+
+        fg_color = QColor(255, 255, 255) if is_light else QColor(0, 0, 0)
+        bg_css = ' QTreeWidget { background-color: #e6e6e6; } QTreeWidget::item { background-color: #e6e6e6; }'
+        # save original stylesheet once
+        if not hasattr(self.tree, '_saved_style'):
+            self.tree._saved_style = self.tree.styleSheet() or ''
+        if is_light:
+            self.tree.setStyleSheet(self.tree._saved_style + bg_css)
+        else:
+            self.tree.setStyleSheet(self.tree._saved_style)
+
+        def walk(item):
+            for i in range(item.childCount()):
+                child = item.child(i)
+                child.setForeground(0, QBrush(fg_color))
+                child.setForeground(1, QBrush(fg_color))
+                walk(child)
+
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            top.setForeground(0, QBrush(fg_color))
+            top.setForeground(1, QBrush(fg_color))
+            walk(top)
     
     def populate_tree(self):
         """Populate the tree widget with standards data"""
