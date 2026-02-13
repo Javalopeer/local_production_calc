@@ -195,7 +195,10 @@ class OvertimeTab(QWidget):
         toggle_layout = QHBoxLayout()
         toggle_layout.setContentsMargins(0, 0, 0, 0)
         toggle_label = QLabel("Count to production?")
-        toggle_label.setStyleSheet("font-size: 11px; color: #000000;")
+        # Do not set a fixed color here; theme updater will apply appropriate color.
+        toggle_label.setStyleSheet("font-size: 11px;")
+        # keep a reference so update_theme_labels can update it later
+        self.count_toggle_label = toggle_label
         toggle_layout.addWidget(toggle_label)
         toggle_layout.addWidget(self.count_toggle)
         toggle_layout.addStretch()
@@ -203,12 +206,16 @@ class OvertimeTab(QWidget):
         toggle_widget.setLayout(toggle_layout)
         form.addRow("", toggle_widget)
 
-        # Buttons layout
+        # Buttons layout (centered)
         buttons_layout = QHBoxLayout()
         buttons_layout.addStretch()
         buttons_layout.addWidget(calc_btn)
+        buttons_layout.addSpacing(8)
         buttons_layout.addWidget(save_btn)
         buttons_layout.addStretch()
+        # Container so we can center the buttons within the left column
+        buttons_container = QWidget()
+        buttons_container.setLayout(buttons_layout)
 
         # Result section
         result_layout = QVBoxLayout()
@@ -316,13 +323,14 @@ class OvertimeTab(QWidget):
         # initialize estimate type spinboxes (use right-region selector)
         self.estimate_counts = {}
         # do not auto-update counts; user must press Estimate
-        left_layout.addLayout(buttons_layout)
+        left_layout.addWidget(buttons_container, alignment=Qt.AlignmentFlag.AlignHCenter)
         left_layout.addWidget(card("Calculation Result", result_layout))
 
         # Right layout
         right_layout = QVBoxLayout()
         right_layout.setSpacing(8)
-        right_layout.setContentsMargins(15, 15, 15, 15)
+        # Reduce right panel margins so content is closer to the card borders
+        right_layout.setContentsMargins(8, 8, 8, 8)
         
         # Comments section 
         comments_card = card("Comments (Optional)", self.comments_input)
@@ -349,6 +357,7 @@ class OvertimeTab(QWidget):
                 text-align: center;
                 height: 24px;
                 background-color: #2b2b2b;
+                color: #ffffff;
             }
             QProgressBar::chunk {
                 background-color: #FF9800;
@@ -406,8 +415,11 @@ class OvertimeTab(QWidget):
         filter_layout.addWidget(self.type_filter)
         filter_layout.addWidget(self.clear_filter_btn)
         filter_layout.addStretch()
-        
-        right_layout.addLayout(filter_layout)
+
+        # Wrap filters in a container so we can center them horizontally
+        filter_container = QWidget()
+        filter_container.setLayout(filter_layout)
+        right_layout.addWidget(filter_container, alignment=Qt.AlignmentFlag.AlignHCenter)
         
         # OT Cases Table
         self.ot_table = QTableWidget()
@@ -450,10 +462,19 @@ class OvertimeTab(QWidget):
         table_width = 85 + 90 + 85 + 65 + 45 + 50 + 55 + 50 + 10
         self.ot_table.setFixedWidth(table_width)
         self.ot_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.ot_table.setMaximumHeight(260)
+        # Reduce table max height to avoid large empty area inside the card
+        self.ot_table.setMaximumHeight(200)
         
         table_card = card("Today's OT Cases", self.ot_table)
-        right_layout.addWidget(table_card)
+        # Remove extra top/inner margins so the header sits flush with the card title
+        try:
+            if table_card.layout():
+                table_card.layout().setContentsMargins(0, 0, 0, 0)
+                table_card.layout().setSpacing(0)
+        except Exception:
+            pass
+        # Center the OT cases table card horizontally within the right panel
+        right_layout.addWidget(table_card, alignment=Qt.AlignmentFlag.AlignHCenter)
         
         # Edit/Delete buttons
         action_buttons_layout = QHBoxLayout()
@@ -475,67 +496,81 @@ class OvertimeTab(QWidget):
                 background-color: #D32F2F;
             }
         """)
-        self.delete_ot_btn.clicked.connect(self.delete_selected_ot_case)
-        
-        action_buttons_layout.addWidget(self.edit_ot_btn)
-        action_buttons_layout.addWidget(self.delete_ot_btn)
-        action_buttons_layout.addStretch()
-        right_layout.addLayout(action_buttons_layout)
-        
-        # Create widgets for responsive layout
-        left_widget = QWidget()
-        left_widget.setLayout(left_layout)
-        
-        right_widget = QWidget()
-        right_widget.setLayout(right_layout)
-        
-        # Container for vertical layout (always responsive)
-        self.content_widget = QWidget()
-        self.content_layout = QVBoxLayout(self.content_widget)
-        self.content_layout.setSpacing(15)
-        self.content_layout.setContentsMargins(5, 5, 5, 5)
-        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        
-        self.left_widget = left_widget
-        self.right_widget = right_widget
-        self.right_layout = right_layout
-        
-        self.content_layout.addWidget(left_widget)
-        self.content_layout.addWidget(right_widget)
-        
-        # Scroll area for content
-        scroll = QScrollArea()
-        scroll.setWidget(self.content_widget)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        # No extra bottom margin — let footer sit below the scroll area
-        
-        # Main layout with sticky OT summary at bottom
+        # Create main final layout and add left/right content inside a scroll area
         self.final_layout = QVBoxLayout()
         self.final_layout.setContentsMargins(5, 5, 5, 5)
         self.final_layout.setSpacing(5)
-        self.final_layout.addWidget(scroll, 1)
-        
-        # Move OT summary to sticky bottom
-        self.right_layout.removeWidget(self.ot_summary_group)
+
+        # Build left/right widgets from existing layouts
+        try:
+            left_widget = QWidget()
+            left_widget.setLayout(left_layout)
+            right_widget = QWidget()
+            right_widget.setLayout(right_layout)
+            # expose as attributes so resizeEvent can access them
+            self.left_widget = left_widget
+            self.right_widget = right_widget
+
+            from PySide6.QtWidgets import QBoxLayout
+
+            self.content_widget = QWidget()
+            # Default to stacked (TopToBottom) so initial position is left above right.
+            self.content_layout = QBoxLayout(QBoxLayout.TopToBottom)
+            self.content_widget.setLayout(self.content_layout)
+            self.content_layout.setSpacing(15)
+            self.content_layout.setContentsMargins(5, 5, 5, 5)
+            # Align left/top so stacked widgets align like a staircase and don't center.
+            self.content_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            # Add widgets; we'll switch direction in resizeEvent when window is wide.
+            self.content_layout.addWidget(left_widget, 1)
+            self.content_layout.addWidget(right_widget, 0)
+
+            scroll = QScrollArea()
+            scroll.setWidget(self.content_widget)
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+            self.final_layout.addWidget(scroll, 1)
+        except Exception:
+            # Fallback: still add the summary group if building content fails
+            pass
+
         self.final_layout.addWidget(self.ot_summary_group, 0)
-        
         self.setLayout(self.final_layout)
         
         self.load_daily_ot_production()
         self.load_ot_cases()
     
     def resizeEvent(self, event):
-        """Handle resize to adjust widget widths"""
+        """Switch between stacked and side-by-side depending on width.
+
+        Default behavior: stacked (TopToBottom). If the window becomes wider
+        than `stack_threshold`, switch to LeftToRight to show panels side-by-side.
+        """
         super().resizeEvent(event)
-        width = event.size().width()
-        
-        # Always vertical layout - just adjust widths
-        responsive_width = min(width - 40, 600)
-        self.left_widget.setFixedWidth(responsive_width)
-        self.right_widget.setFixedWidth(responsive_width)
+        try:
+            from PySide6.QtWidgets import QBoxLayout
+
+            width = event.size().width()
+            stack_threshold = 1000
+            if width > stack_threshold:
+                # side-by-side
+                self.content_layout.setDirection(QBoxLayout.LeftToRight)
+                # give right panel a comfortable max width
+                try:
+                    self.right_widget.setMaximumWidth(420)
+                except Exception:
+                    pass
+            else:
+                # stacked vertically
+                self.content_layout.setDirection(QBoxLayout.TopToBottom)
+                try:
+                    self.right_widget.setMaximumWidth(16777215)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def on_case_id_changed(self, text):
         """Auto-set start time when Case ID is first entered"""
@@ -839,12 +874,52 @@ class OvertimeTab(QWidget):
                     text-align: center;
                     height: 24px;
                     background-color: {bg};
+                    color: #ffffff;
                 }}
                 QProgressBar::chunk {{
                     background-color: {chunk};
                     border-radius: 6px;
                 }}
             """)
+        except Exception:
+            pass
+
+        # Also adjust OT table and action button colors to match Downtime appearance when in Light mode
+        try:
+            # Save original styles on first run so we can restore on dark mode
+            if not hasattr(self, '_ot_table_saved_style'):
+                self._ot_table_saved_style = self.ot_table.styleSheet() or ''
+
+            if light_mode:
+                # Table header and grid colors in light mode: use grayish, high-contrast hues for readability
+                # Do NOT force per-item background here so per-item setBackground() calls
+                # (used for efficiency coloring) are respected.
+                self.ot_table.setStyleSheet("""
+                    QTableWidget {
+                        gridline-color: #E0E0E0;
+                        background-color: #ffffff;
+                        color: #222222;
+                    }
+                    QHeaderView::section {
+                        background-color: #E6E6E6;
+                        color: #242038;
+                        border: 1px solid #D0CFCF;
+                        padding: 6px;
+                    }
+                """)
+
+                # (Buttons left unchanged here; only table colors are adjusted)
+            else:
+                # Restore saved styles for dark mode
+                try:
+                    self.ot_table.setStyleSheet(self._ot_table_saved_style)
+                except Exception:
+                    pass
+                # restore OT table style only (buttons keep their original behavior)
+                try:
+                    self.ot_table.setStyleSheet(self._ot_table_saved_style)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -856,19 +931,19 @@ class OvertimeTab(QWidget):
                 est_color = '#222222'
                 info_color = '#222222'
             else:
-                tl_color = '#aaaaaa'
+                # Use a bright/light label color for dark mode so it's readable
+                tl_color = '#e6e6e6'
                 est_color = '#e6e6e6'
                 info_color = '#bdbdbd'
 
-            # Count toggle label
-            for w in [getattr(self, 'count_toggle', None)]:
-                pass
-            toggle_label = None
-            # find the toggle label by walking children
-            for child in self.findChildren(QLabel):
-                if child.text() == 'Count to production?':
-                    toggle_label = child
-                    break
+            # Count toggle label — prefer explicit reference if available
+            toggle_label = getattr(self, 'count_toggle_label', None)
+            if toggle_label is None:
+                # fallback: find by text
+                for child in self.findChildren(QLabel):
+                    if child.text() == 'Count to production?':
+                        toggle_label = child
+                        break
             if toggle_label:
                 toggle_label.setStyleSheet(f"font-size:11px; color: {tl_color};")
 
@@ -882,6 +957,33 @@ class OvertimeTab(QWidget):
                     lbl.setStyleSheet(f"font-size:11px; color:{info_color};")
                 except Exception:
                     pass
+            # Update table cell foregrounds to match theme (light text on dark backgrounds, dark on light)
+            try:
+                from PySide6.QtGui import QBrush, QColor
+                from PySide6.QtWidgets import QTableWidget
+                # We'll set each item's foreground color based on its background
+                # color to ensure contrast. If the background is light, use dark
+                # text; if background is dark, use white text.
+                for table in self.findChildren(QTableWidget):
+                    for r in range(table.rowCount()):
+                        for c in range(table.columnCount()):
+                            item = table.item(r, c)
+                            if item:
+                                bg = item.background().color() if item.background() else None
+                                if bg is None:
+                                    fg = QColor(34, 32, 56) if light_mode else QColor(255, 255, 255)
+                                else:
+                                    # lightness threshold - if background is light, use dark text
+                                    fg = QColor(34, 32, 56) if bg.lightness() > 128 else QColor(255, 255, 255)
+                                item.setForeground(QBrush(fg))
+            except Exception:
+                pass
+
+            # Ensure progress bar and table header styles are updated too
+            try:
+                self.update_progress_bar_style(light_mode)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -892,7 +994,7 @@ class OvertimeTab(QWidget):
         selected_date = self.case_date.date().toString("yyyy-MM-dd")
         
         cursor.execute("""
-            SELECT id, case_id, doctor, region, tipo_caso, tiempo_real, efficiency, case_value, estado, count_production
+            SELECT id, case_id, doctor, region, tipo_caso, tiempo_real, hora_inicio, hora_fin, efficiency, case_value, estado, count_production
             FROM ot_cases
             WHERE fecha = ?
             ORDER BY id DESC
@@ -901,24 +1003,42 @@ class OvertimeTab(QWidget):
         cases = cursor.fetchall()
         conn.close()
         
+        # Robustly determine if the app is in light mode using palette
+        try:
+            from PySide6.QtGui import QPalette
+            pal = QApplication.instance().palette()
+            win_color = pal.color(QPalette.ColorRole.Window)
+            current_is_light = win_color.lightness() > 128
+        except Exception:
+            current_is_light = False
+
         self.ot_table.setRowCount(len(cases))
         self.ot_case_ids = []  # Store database IDs for edit/delete
         
         for row_idx, case in enumerate(cases):
-            db_id, case_id, doctor, region, tipo, tiempo_real, efficiency, case_value, estado, count_production = case
+            (db_id, case_id, doctor, region, tipo,
+             tiempo_real, hora_inicio, hora_fin,
+             efficiency, case_value, estado, count_production) = case
             self.ot_case_ids.append(db_id)
             
             # Check if case counts for production
             counts_for_production = count_production if count_production is not None else 1
             
-            # Yellow background for cases that don't count, otherwise zebra striping
+            # Yellow background for cases that don't count, otherwise zebra striping.
+            # Use the palette-derived theme flag so light mode rows are light.
             if counts_for_production == 0:
                 bg_color = QColor(180, 150, 50)  # Yellow/gold for non-counting cases
             else:
-                bg_color = QColor(43, 43, 43) if (row_idx % 2 == 0) else QColor(45, 45, 45)
+                if current_is_light:
+                    bg_color = QColor(255, 255, 255) if (row_idx % 2 == 0) else QColor(250, 250, 250)
+                else:
+                    bg_color = QColor(43, 43, 43) if (row_idx % 2 == 0) else QColor(45, 45, 45)
             
             bg_brush = QBrush(bg_color)
             
+            # Determine text color based on theme
+            text_color = QColor(34, 32, 56) if current_is_light else QColor(255, 255, 255)
+
             # Case ID - bold
             case_item = QTableWidgetItem(str(case_id))
             case_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -926,6 +1046,7 @@ class OvertimeTab(QWidget):
             font = QFont()
             font.setBold(True)
             case_item.setFont(font)
+            case_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 0, case_item)
             
             # Doctor - bold
@@ -933,41 +1054,79 @@ class OvertimeTab(QWidget):
             doctor_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             doctor_item.setBackground(bg_brush)
             doctor_item.setFont(font)
+            doctor_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 1, doctor_item)
             
             # Region
             region_item = QTableWidgetItem(str(region))
             region_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             region_item.setBackground(bg_brush)
+            region_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 2, region_item)
             
             # Type
             tipo_item = QTableWidgetItem(str(tipo))
             tipo_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             tipo_item.setBackground(bg_brush)
+            tipo_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 3, tipo_item)
             
-            # Time
-            time_item = QTableWidgetItem(f"{tiempo_real:.0f}")
+            # Time (if stored tiempo_real is 0 or missing, try to compute from hora_inicio/hora_fin)
+            try:
+                t_val = float(tiempo_real) if tiempo_real is not None else 0.0
+            except Exception:
+                t_val = 0.0
+
+            if t_val <= 0 and hora_inicio and hora_fin:
+                try:
+                    # hora_* stored as 'HH:MM'
+                    st = QTime.fromString(hora_inicio, "HH:mm")
+                    ed = QTime.fromString(hora_fin, "HH:mm")
+                    if st.isValid() and ed.isValid():
+                        t_val = st.secsTo(ed) / 60.0
+                except Exception:
+                    t_val = t_val
+
+            time_item = QTableWidgetItem(f"{t_val:.0f}")
             time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             time_item.setBackground(bg_brush)
+            time_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 4, time_item)
             
             # Efficiency with color background (like Production tab)
             eff_item = QTableWidgetItem(f"{efficiency:.0f}")
             eff_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if estado == "OK":
-                eff_item.setBackground(QBrush(QColor(76, 175, 80)))  # Green background
-                eff_item.setForeground(QBrush(QColor(255, 255, 255)))  # White text
+            # Color the Efficiency column based on numeric efficiency rules:
+            # >=100 -> green, >=95 -> yellow, else red. Text stays white for contrast.
+            try:
+                eff_val = float(efficiency)
+            except Exception:
+                eff_val = None
+
+            if eff_val is not None:
+                if eff_val >= 100:
+                    eff_item.setBackground(QBrush(QColor(76, 175, 80)))  # Green
+                elif eff_val >= 95:
+                    eff_item.setBackground(QBrush(QColor(255, 193, 7)))  # Amber/Yellow
+                else:
+                    eff_item.setBackground(QBrush(QColor(244, 67, 54)))  # Red
+                # choose text color for eff cell: dark text on light theme, white on dark
+                eff_text_color = QColor(34, 32, 56) if current_is_light else QColor(255, 255, 255)
+                eff_item.setForeground(QBrush(eff_text_color))
             else:
-                eff_item.setBackground(QBrush(QColor(244, 67, 54)))  # Red background
-                eff_item.setForeground(QBrush(QColor(255, 255, 255)))  # White text
+                # Fallback: use estado if numeric efficiency missing
+                if estado == "OK":
+                    eff_item.setBackground(QBrush(QColor(76, 175, 80)))
+                else:
+                    eff_item.setBackground(QBrush(QColor(244, 67, 54)))
+                eff_item.setForeground(QBrush(QColor(255, 255, 255)))
             self.ot_table.setItem(row_idx, 5, eff_item)
             
             # Value - no color, same background as other columns
             value_item = QTableWidgetItem(f"{case_value:.2f}")
             value_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             value_item.setBackground(bg_brush)
+            value_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 6, value_item)
             
             # Units Equivalent - calculated from region and case_value
@@ -975,7 +1134,14 @@ class OvertimeTab(QWidget):
             units_eq_item = QTableWidgetItem(f"{units_eq:.2f}")
             units_eq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             units_eq_item.setBackground(bg_brush)
+            units_eq_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 7, units_eq_item)
+
+        # After populating rows, ensure other theme-driven labels update
+        try:
+            self.update_theme_labels(current_is_light)
+        except Exception:
+            pass
 
     def save_ot_case(self):
         region = self.region.currentText()
@@ -1103,6 +1269,42 @@ class OvertimeTab(QWidget):
             self.count_toggle.setChecked(bool(count_prod))
             self.comments_input.setText(row[7] if row[7] else "")
             
+            self.result_label.setText("Editing - Click Save to update")
+            self.result_label.setStyleSheet("color: #FFC107; font-size: 13px; font-weight: bold; text-align: center;")
+
+    def load_case_for_edit(self, db_id):
+        """Load an OT case by database id into the OT form for editing (public API)."""
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT case_id, region, tipo_caso, doctor, hora_inicio, hora_fin, count_production, comments
+            FROM ot_cases WHERE id = ?
+        """, (db_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            self.editing_ot_id = db_id
+            self.case_id.setText(row[0])
+
+            # Set region and type
+            region_idx = self.region.findText(row[1])
+            if region_idx >= 0:
+                self.region.setCurrentIndex(region_idx)
+            self.update_case_types()
+            type_idx = self.tipo.findText(row[2])
+            if type_idx >= 0:
+                self.tipo.setCurrentIndex(type_idx)
+
+            self.doctor.setText(row[3] if row[3] else "")
+            self.start_time.setTime(QTime.fromString(row[4], "HH:mm"))
+            self.end_time.setTime(QTime.fromString(row[5], "HH:mm"))
+
+            # Set toggle and comments
+            count_prod = row[6] if row[6] is not None else 1
+            self.count_toggle.setChecked(bool(count_prod))
+            self.comments_input.setText(row[7] if row[7] else "")
+
             self.result_label.setText("Editing - Click Save to update")
             self.result_label.setStyleSheet("color: #FFC107; font-size: 13px; font-weight: bold; text-align: center;")
 
