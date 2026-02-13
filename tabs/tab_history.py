@@ -40,37 +40,43 @@ class HistoryTab(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
 
+        # Summary stats label (dynamic)
+        self.stats_label = QLabel("Total: 0 | Time: 0m | Value: 0.00%")
+        self.stats_label.setStyleSheet("font-size: 12px; color: #9CC3FF; font-weight: bold;")
+        self.stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.stats_label)
+
         # First filter row - Search, Status, Date
-        filter_row1 = QHBoxLayout()
-        filter_row1.addStretch()
+        self.filter_row1 = QHBoxLayout()
+        self.filter_row1.addStretch()
         
-        filter_row1.addWidget(QLabel("Search:"))
+        self.filter_row1.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Case ID...")
         self.search_input.setFixedWidth(100)
         self.search_input.textChanged.connect(self.on_filter_changed)
-        filter_row1.addWidget(self.search_input)
+        self.filter_row1.addWidget(self.search_input)
 
-        filter_row1.addWidget(QLabel("Status:"))
+        self.filter_row1.addWidget(QLabel("Status:"))
         self.status_filter = QComboBox()
         self.status_filter.addItems(["All", "OK", "LOW"])
         self.status_filter.setFixedWidth(70)
         self.status_filter.currentTextChanged.connect(self.on_filter_changed)
-        filter_row1.addWidget(self.status_filter)
+        self.filter_row1.addWidget(self.status_filter)
 
-        filter_row1.addWidget(QLabel("From:"))
+        self.filter_row1.addWidget(QLabel("From:"))
         self.date_from = QDateEdit()
         self.date_from.setDate(QDate.currentDate().addMonths(-1))
         self.date_from.setFixedWidth(110)
         self.date_from.dateChanged.connect(self.on_filter_changed)
-        filter_row1.addWidget(self.date_from)
+        self.filter_row1.addWidget(self.date_from)
         
-        filter_row1.addWidget(QLabel("To:"))
+        self.filter_row1.addWidget(QLabel("To:"))
         self.date_to = QDateEdit()
         self.date_to.setDate(QDate.currentDate())
         self.date_to.setFixedWidth(110)
         self.date_to.dateChanged.connect(self.on_filter_changed)
-        filter_row1.addWidget(self.date_to)
+        self.filter_row1.addWidget(self.date_to)
         
         # Specific date filter - in a separate container for responsive layout
         self.specific_date_label = QLabel("|")
@@ -86,12 +92,12 @@ class HistoryTab(QWidget):
         self.specific_date.dateChanged.connect(self.on_filter_changed)
         
         # Add to filter_row1 initially (will be moved in resizeEvent if needed)
-        filter_row1.addWidget(self.specific_date_label)
-        filter_row1.addWidget(self.specific_date_check)
-        filter_row1.addWidget(self.specific_date)
+        self.filter_row1.addWidget(self.specific_date_label)
+        self.filter_row1.addWidget(self.specific_date_check)
+        self.filter_row1.addWidget(self.specific_date)
 
-        filter_row1.addStretch()
-        main_layout.addLayout(filter_row1)
+        self.filter_row1.addStretch()
+        main_layout.addLayout(self.filter_row1)
         
         # Specific date row (hidden by default, shown in small screens)
         self.specific_row = QHBoxLayout()
@@ -236,11 +242,11 @@ class HistoryTab(QWidget):
                 self.specific_date_label.setParent(None)
                 self.specific_date_check.setParent(None)
                 self.specific_date.setParent(None)
-                
+
                 # Insert between stretches in specific_row (no separator)
                 self.specific_row.insertWidget(1, self.specific_date_check)
                 self.specific_row.insertWidget(2, self.specific_date)
-                
+
                 self.specific_date_label.setVisible(False)
                 self.specific_row_widget.setVisible(True)
                 self.specific_in_row1 = False
@@ -249,15 +255,14 @@ class HistoryTab(QWidget):
             if not self.specific_in_row1:
                 self.specific_date_check.setParent(None)
                 self.specific_date.setParent(None)
-                
-                # Find the filter_row1 layout and insert before the last stretch
-                filter_row1 = self.layout().itemAt(1).layout()  # Title is at 0, filter_row1 at 1
-                # Insert at positions before the last stretch
-                count = filter_row1.count()
-                filter_row1.insertWidget(count - 1, self.specific_date_label)
-                filter_row1.insertWidget(count, self.specific_date_check)
-                filter_row1.insertWidget(count + 1, self.specific_date)
-                
+
+                # Insert into stored filter_row1 before the last stretch
+                count = self.filter_row1.count()
+                # place label before the final stretch
+                self.filter_row1.insertWidget(count - 1, self.specific_date_label)
+                self.filter_row1.insertWidget(count, self.specific_date_check)
+                self.filter_row1.insertWidget(count + 1, self.specific_date)
+
                 self.specific_date_label.setVisible(True)
                 self.specific_row_widget.setVisible(False)
                 self.specific_in_row1 = True
@@ -286,10 +291,17 @@ class HistoryTab(QWidget):
     def load_all_cases(self):
         conn = get_connection()
         cursor = conn.cursor()
+        # Load regular and OT cases together, marking source
         cursor.execute("""
-            SELECT id, case_id, doctor, region, tipo_caso,
-                   fecha, tiempo_real, std_time, efficiency, estado, case_value
-            FROM cases
+            SELECT * FROM (
+                SELECT id, case_id, doctor, region, tipo_caso,
+                       fecha, tiempo_real, std_time, efficiency, estado, case_value, 'reg' as source
+                FROM cases
+                UNION ALL
+                SELECT id, case_id, doctor, region, tipo_caso,
+                       fecha, tiempo_real, std_time, efficiency, estado, case_value, 'ot' as source
+                FROM ot_cases
+            )
             ORDER BY id DESC
         """)
         self.all_cases = cursor.fetchall()
@@ -377,9 +389,23 @@ class HistoryTab(QWidget):
 
         self.table.setRowCount(len(page_items))
 
+        # Update summary stats for ALL filtered items (not only current page)
+        total_cases = len(filtered)
+        total_time = sum((c[6] or 0) for c in filtered)
+        total_value = sum((c[10] or 0) for c in filtered)
+        self.stats_label.setText(f"Total: {total_cases} | Time: {total_time:.0f}m | Value: {total_value:.2f}%")
+
         for idx, case in enumerate(page_items):
             # Zebra striping
+            # Default zebra colors for regular cases
             bg_color = QColor(43, 43, 43) if (idx % 2 == 0) else QColor(55, 55, 55)
+            # If this is an OT case (source at index 11), use a distinct blue tint
+            try:
+                source = case[11]
+            except Exception:
+                source = 'reg'
+            if source == 'ot':
+                bg_color = QColor(28, 48, 90) if (idx % 2 == 0) else QColor(38, 58, 110)
             bg_brush = QBrush(bg_color)
             
             # Case ID - Bold
@@ -416,17 +442,15 @@ class HistoryTab(QWidget):
             date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(idx, 4, date_item)
             
-            # Time - green if OK, show 0 if exceeded
-            tiempo_real = case[6]
+            # Time - always show actual minutes; color by estado
+            tiempo_real = case[6] or 0
             estado = case[9]
+            time_item = QTableWidgetItem(f"{tiempo_real:.0f}")
             if estado == "OK":
-                time_item = QTableWidgetItem(f"{tiempo_real:.0f}")
                 time_item.setBackground(QBrush(QColor(76, 175, 80)))
-                time_item.setForeground(QBrush(QColor(255, 255, 255)))
             else:
-                time_item = QTableWidgetItem("0")
-                time_item.setBackground(QBrush(QColor(76, 175, 80)))
-                time_item.setForeground(QBrush(QColor(255, 255, 255)))
+                time_item.setBackground(QBrush(QColor(244, 67, 54)))
+            time_item.setForeground(QBrush(QColor(255, 255, 255)))
             time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(idx, 5, time_item)
             
@@ -658,3 +682,66 @@ class HistoryTab(QWidget):
                 QMessageBox.information(self, "Export Successful", f"CSV exported to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", f"Error: {str(e)}")
+
+    def update_theme_labels(self, is_light: bool):
+        """Adjust table styling so cell text is light and readable.
+
+        User expects light-colored letters (white) in the history table. To keep
+        good contrast we force a dark table background when switching to light
+        theme and set all cell foregrounds to white. In dark theme we restore
+        the saved table style and keep white text as well.
+        """
+        fg_color = QColor(255, 255, 255)
+        # Dark table CSS used when app is in light mode so white text remains readable
+        dark_table_css = (
+            ' QTableWidget { background-color: #2b2b2b; gridline-color: #3c3c3c; } '
+            ' QHeaderView::section { background-color: #3c3c3c; color: white; border: 1px solid #5a5a5a; padding: 4px; } '
+        )
+
+        for table in self.findChildren(QTableWidget):
+            if not hasattr(table, '_saved_style'):
+                table._saved_style = table.styleSheet() or ''
+            try:
+                if is_light:
+                    table.setStyleSheet(table._saved_style + dark_table_css)
+                else:
+                    table.setStyleSheet(table._saved_style)
+            except Exception:
+                pass
+
+            # Set per-item foreground based on background lightness for consistent
+            # white/light letters in the History view while preserving colored
+            # status/efficiency cells.
+            for r in range(table.rowCount()):
+                for c in range(table.columnCount()):
+                    item = table.item(r, c)
+                    if item:
+                        bg = item.background().color() if item.background() else None
+                        if bg is None:
+                            item.setForeground(QBrush(fg_color))
+                        else:
+                            # If background is dark, white text; if background is light, dark text.
+                            fg = QColor(255, 255, 255) if bg.lightness() < 129 else QColor(34, 32, 56)
+                            item.setForeground(QBrush(fg))
+
+        # Title color: make History title dark in light mode, keep blue in dark
+        try:
+            for lbl in self.findChildren(QLabel):
+                if lbl.text().strip() == "Case History":
+                    if is_light:
+                        lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #242038;")
+                    else:
+                        lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #4aa3ff;")
+                    break
+        except Exception:
+            pass
+
+        # Stats label (Total | Time | Value) — use dark text in light mode
+        try:
+            if hasattr(self, 'stats_label') and self.stats_label:
+                if is_light:
+                    self.stats_label.setStyleSheet("font-size: 12px; color: #242038; font-weight: bold;")
+                else:
+                    self.stats_label.setStyleSheet("font-size: 12px; color: #9CC3FF; font-weight: bold;")
+        except Exception:
+            pass
