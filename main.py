@@ -2,7 +2,7 @@ import sys
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QScrollArea, QCheckBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from db.database import init_db
 import qtawesome as qta
@@ -19,6 +19,7 @@ from tabs.tab_overtime import OvertimeTab
 from tabs.tab_standards import StandardsTab
 
 class MainWindow(QMainWindow):
+    themeChanged = Signal(bool)
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Production Performance Calculator v{APP_VERSION}")
@@ -31,6 +32,38 @@ class MainWindow(QMainWindow):
         self.history_tab = HistoryTab()
         self.overtime_tab = OvertimeTab()
         self.standards_tab = StandardsTab()
+
+        # Connect a themeChanged signal to tabs so they update their local styles
+        try:
+            self.themeChanged.connect(self.register_tab.update_theme_labels)
+        except Exception:
+            pass
+        try:
+            self.themeChanged.connect(self.overtime_tab.update_theme_labels)
+        except Exception:
+            pass
+        try:
+            self.themeChanged.connect(self.history_tab.update_theme_labels)
+        except Exception:
+            pass
+        try:
+            self.themeChanged.connect(self.production_tab.update_theme_labels)
+        except Exception:
+            pass
+        try:
+            self.themeChanged.connect(self.register_tab.update_progress_bar_style)
+        except Exception:
+            pass
+        try:
+            self.themeChanged.connect(self.overtime_tab.update_progress_bar_style)
+        except Exception:
+            pass
+        try:
+            # ProductionTab doesn't currently implement update_progress_bar_style,
+            # but call update_theme_labels on theme change as a safe fallback.
+            self.themeChanged.connect(self.production_tab.update_theme_labels)
+        except Exception:
+            pass
 
         
         # Connect register tab to production tab for dynamic updates
@@ -46,11 +79,11 @@ class MainWindow(QMainWindow):
         # Connect standards tab to refresh Register and OT when standards change
         self.standards_tab.standards_updated.connect(self.on_standards_updated)
         
-        self.tabs.addTab(self.register_tab, qta.icon('fa5s.edit', color='#4aa3ff'), "Register")
-        self.tabs.addTab(self.overtime_tab, qta.icon('fa5s.clock', color='#FF9800'), "OT")
-        self.tabs.addTab(self.production_tab, qta.icon('fa5s.chart-bar', color='#4aa3ff'), "Production")
-        self.tabs.addTab(self.history_tab, qta.icon('fa5s.history', color='#4aa3ff'), "History")
-        self.tabs.addTab(self.standards_tab, qta.icon('fa5s.cog', color='#9E9E9E'), "Standards")
+        self.tabs.addTab(self.register_tab, qta.icon('fa5s.edit', color="#b8ceb1"), "Register")
+        self.tabs.addTab(self.overtime_tab, qta.icon('fa5s.clock', color='#b8ceb1'), "OT")
+        self.tabs.addTab(self.production_tab, qta.icon('fa5s.chart-bar', color='#b8ceb1'), "Production")
+        self.tabs.addTab(self.history_tab, qta.icon('fa5s.history', color='#b8ceb1'), "History")
+        self.tabs.addTab(self.standards_tab, qta.icon('fa5s.cog', color='#b8ceb1'), "Standards")
 
         self.setCentralWidget(self.tabs)
         
@@ -68,24 +101,31 @@ class MainWindow(QMainWindow):
             light_chk.setToolTip("Toggle light mode")
             def on_theme_toggled(checked):
                 QApplication.instance().setStyleSheet(LIGHT_STYLE if checked else DARK_STYLE)
-                # Notify tabs to update their local progress-bar styles
+                # Emit a single signal so tabs update themselves (clean approach)
                 try:
-                    self.register_tab.update_progress_bar_style(checked)
+                    self.themeChanged.emit(checked)
                 except Exception:
-                    pass
-                try:
-                    self.overtime_tab.update_progress_bar_style(checked)
-                except Exception:
-                    pass
-                # Notify tabs to update label colors when switching themes
-                try:
-                    self.register_tab.update_theme_labels(checked)
-                except Exception:
-                    pass
-                try:
-                    self.overtime_tab.update_theme_labels(checked)
-                except Exception:
-                    pass
+                    # Fallback: call known updaters directly if emit fails
+                    try:
+                        self.register_tab.update_progress_bar_style(checked)
+                    except Exception:
+                        pass
+                    try:
+                        self.overtime_tab.update_progress_bar_style(checked)
+                    except Exception:
+                        pass
+                    try:
+                        self.production_tab.update_theme_labels(checked)
+                    except Exception:
+                        pass
+                    try:
+                        self.register_tab.update_theme_labels(checked)
+                    except Exception:
+                        pass
+                    try:
+                        self.overtime_tab.update_theme_labels(checked)
+                    except Exception:
+                        pass
 
             light_chk.toggled.connect(on_theme_toggled)
             self.statusBar().addPermanentWidget(light_chk)
@@ -103,11 +143,26 @@ class MainWindow(QMainWindow):
         """Handle case update/delete from production tab"""
         # Check if production_tab has an editing_case_id (edit action)
         if hasattr(self.production_tab, 'editing_case_id') and self.production_tab.editing_case_id:
-            # Load case into register tab for editing
-            self.register_tab.load_case_for_edit(self.production_tab.editing_case_id)
-            self.production_tab.editing_case_id = None
-            # Switch to Register tab
-            self.tabs.setCurrentIndex(0)
+            # Route edit to Register or OT depending on what was selected in ProductionTab
+            editing_mode = getattr(self.production_tab, 'editing_mode', 'reg')
+            db_id = self.production_tab.editing_case_id
+            try:
+                if editing_mode == 'ot':
+                    # Load into OT tab form
+                    try:
+                        self.overtime_tab.load_case_for_edit(db_id)
+                    except Exception:
+                        # fallback if method missing
+                        self.overtime_tab.editing_ot_id = db_id
+                    # Switch to OT tab (index 1)
+                    self.tabs.setCurrentIndex(1)
+                else:
+                    # Default: load into Register tab
+                    self.register_tab.load_case_for_edit(db_id)
+                    self.tabs.setCurrentIndex(0)
+            finally:
+                # clear editing marker on production tab
+                self.production_tab.editing_case_id = None
         else:
             # Just refresh register tab (delete action)
             self.register_tab.load_daily_production()
@@ -239,6 +294,7 @@ if __name__ == "__main__":
         text-align: center;
         height: 24px;
         background-color: #2b2b2b;
+        color: #ffffff;
     }
 
     QProgressBar::chunk {
@@ -385,6 +441,7 @@ if __name__ == "__main__":
         text-align: center;
         height: 24px;
         background-color: #8D86C9; /* production bar background */
+        color: #ffffff;
     }
 
     QProgressBar::chunk {
