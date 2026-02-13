@@ -298,6 +298,27 @@ class RegisterTab(QWidget):
         self.is_vertical = False
         
         self.load_daily_production()
+
+    def update_theme_labels(self, is_light: bool):
+        """Apply table text color changes for light/dark mode across any child tables."""
+        from PySide6.QtGui import QBrush, QColor
+        from PySide6.QtWidgets import QTableWidget
+
+        # In light mode use dark text; in dark mode use light text
+        fg_color = QColor(0, 0, 0) if is_light else QColor(255, 255, 255)
+        bg_css = ' QTableWidget { background-color: #ffffff; } QTableWidget::item { background-color: #ffffff; }'
+        for table in self.findChildren(QTableWidget):
+            if not hasattr(table, '_saved_style'):
+                table._saved_style = table.styleSheet() or ''
+            if is_light:
+                table.setStyleSheet(table._saved_style + bg_css)
+            else:
+                table.setStyleSheet(table._saved_style)
+            for r in range(table.rowCount()):
+                for c in range(table.columnCount()):
+                    item = table.item(r, c)
+                    if item:
+                        item.setForeground(QBrush(fg_color))
     
     def resizeEvent(self, event):
         """Handle resize to switch between horizontal and vertical layout"""
@@ -342,6 +363,24 @@ class RegisterTab(QWidget):
         units_path = get_resource_path(os.path.join("data", "units_eq.json"))
         with open(units_path, "r") as f:
             self.units_eq = json.load(f)
+
+    def get_units_at_100(self, region):
+        """Return units at 100% for a region, attempting tolerant matching."""
+        if not region:
+            return 0
+        if region in self.units_eq:
+            return self.units_eq[region].get("100", 0)
+
+        alt = region.replace(" & Canada", "").replace("Regions ", "").strip()
+        for key in self.units_eq.keys():
+            if key == alt or key.replace("Regions ", "") == alt:
+                return self.units_eq[key].get("100", 0)
+
+        for key in self.units_eq.keys():
+            if alt and (alt in key or key in alt):
+                return self.units_eq[key].get("100", 0)
+
+        return 0
     
     def get_units_for_production(self, region, production_pct):
         """
@@ -496,13 +535,11 @@ class RegisterTab(QWidget):
         region_cases = cursor.fetchall()
         conn.close()
         
-        # Calculate equivalent units based on region
+        # Calculate equivalent units based on region (tolerant region matching)
         total_equivalent_units = 0.0
         for region, case_value in region_cases:
-            if region in self.units_eq and case_value:
-                # Get units at 100% for this region
-                units_at_100 = self.units_eq[region].get("100", 0)
-                # Equivalent units = (case_value / 100) * units_at_100
+            if case_value:
+                units_at_100 = self.get_units_at_100(region)
                 total_equivalent_units += (case_value / 100) * units_at_100
         
         # Get total downtime and calculate as production value
@@ -541,6 +578,7 @@ class RegisterTab(QWidget):
                 text-align: center;
                 height: 24px;
                 background-color: #2b2b2b;
+                color: #ffffff;
             }}
             QProgressBar::chunk {{
                 background-color: {bar_color};
