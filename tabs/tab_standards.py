@@ -5,34 +5,11 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, QLabel,
     QTreeWidget, QTreeWidgetItem, QFileDialog, QMessageBox, QLineEdit,
     QHeaderView, QDialog, QFormLayout, QDialogButtonBox, QComboBox,
-    QTableWidget, QTableWidgetItem, QDoubleSpinBox, QCheckBox, QScrollArea
+    QTableWidget, QTableWidgetItem, QDoubleSpinBox, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-
-
-def get_resource_path(relative_path):
-    """Get absolute path to resource - works for dev and PyInstaller"""
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        exe_path = os.path.join(exe_dir, relative_path)
-        if os.path.exists(exe_path):
-            return exe_path
-        return os.path.join(sys._MEIPASS, relative_path)
-    else:
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base, relative_path)
-
-
-def get_writable_path(relative_path):
-    """Get writable path for saving files"""
-    if getattr(sys, 'frozen', False):
-        # When running as exe, save in exe directory
-        exe_dir = os.path.dirname(sys.executable)
-        return os.path.join(exe_dir, relative_path)
-    else:
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base, relative_path)
+from .utils import get_resource_path, get_writable_path, load_units_eq_data
 
 
 def card(title, widget):
@@ -45,39 +22,46 @@ def card(title, widget):
 
 
 class EditStandardDialog(QDialog):
-    """Dialog for editing a standard time value"""
-    def __init__(self, region, case_type, current_value, parent=None):
+    """Dialog for editing a standard time and equivalent units value"""
+    def __init__(self, region, case_type, current_time, current_ue, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Edit Standard Time")
-        self.setMinimumWidth(300)
-        
+        self.setWindowTitle("Edit Standard")
+        self.setMinimumWidth(320)
+
         layout = QVBoxLayout()
-        
-        # Info labels
+
         info_layout = QFormLayout()
         info_layout.addRow("Region:", QLabel(region))
         info_layout.addRow("Type:", QLabel(case_type))
-        
-        # Value input
-        self.value_input = QLineEdit(str(current_value))
+
+        self.value_input = QLineEdit(str(current_time))
         self.value_input.setPlaceholderText("Enter time in minutes")
-        info_layout.addRow("Time (min):", self.value_input)
-        
+        info_layout.addRow("Std Time (min):", self.value_input)
+
+        self.ue_input = QLineEdit(str(current_ue))
+        self.ue_input.setPlaceholderText("Equiv. units per case")
+        info_layout.addRow("Equiv. Units:", self.ue_input)
+
         layout.addLayout(info_layout)
-        
-        # Buttons
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        
+
         self.setLayout(layout)
-    
-    def get_value(self):
+
+    def get_time(self):
         try:
             return float(self.value_input.text())
+        except ValueError:
+            return None
+
+    def get_ue(self):
+        try:
+            return float(self.ue_input.text())
         except ValueError:
             return None
 
@@ -103,13 +87,18 @@ class AddTypeDialog(QDialog):
         self.type_input.setPlaceholderText("e.g., Stage RX Primary")
         form_layout.addRow("Type Name:", self.type_input)
         
-        # Value input
+        # Std time input
         self.value_input = QLineEdit()
         self.value_input.setPlaceholderText("Time in minutes")
         form_layout.addRow("Standard Time:", self.value_input)
-        
+
+        # UE input
+        self.ue_input = QLineEdit()
+        self.ue_input.setPlaceholderText("Equiv. units per case")
+        form_layout.addRow("Equiv. Units:", self.ue_input)
+
         layout.addLayout(form_layout)
-        
+
         # Buttons
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -117,16 +106,18 @@ class AddTypeDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        
+
         self.setLayout(layout)
-    
+
     def get_data(self):
         try:
             value = float(self.value_input.text())
+            ue = float(self.ue_input.text()) if self.ue_input.text().strip() else None
             return {
                 'region': self.region_combo.currentText(),
                 'type': self.type_input.text().strip(),
-                'value': value
+                'value': value,
+                'ue': ue,
             }
         except ValueError:
             return None
@@ -134,10 +125,11 @@ class AddTypeDialog(QDialog):
 
 class AddRegionDialog(QDialog):
     """Dialog for adding a new region with existing types selection"""
-    def __init__(self, existing_regions, all_standards, parent=None):
+    def __init__(self, existing_regions, all_standards, all_units_eq=None, parent=None):
         super().__init__(parent)
         self.existing_regions = existing_regions
         self.all_standards = all_standards
+        self.all_units_eq = all_units_eq or {}
         self.type_rows = []  # List to track type checkboxes and spinboxes
         self.setWindowTitle("Add New Region")
         self.setMinimumWidth(500)
@@ -163,36 +155,41 @@ class AddRegionDialog(QDialog):
         
         # Table for existing types
         self.types_table = QTableWidget()
-        self.types_table.setColumnCount(3)
-        self.types_table.setHorizontalHeaderLabels(["Include", "Type Name", "Time (min)"])
+        self.types_table.setColumnCount(4)
+        self.types_table.setHorizontalHeaderLabels(["Include", "Type Name", "Time (min)", "Equiv. Units"])
         self.types_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.types_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.types_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.types_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.types_table.setColumnWidth(0, 60)
-        self.types_table.setColumnWidth(2, 100)
+        self.types_table.setColumnWidth(2, 90)
+        self.types_table.setColumnWidth(3, 90)
         self.types_table.verticalHeader().setVisible(False)
-        
+
         # Populate with existing types
         self.types_table.setRowCount(len(self.all_types))
-        for row, (type_name, default_time) in enumerate(self.all_types.items()):
-            # Checkbox
+        for row, (type_name, (default_time, default_ue)) in enumerate(self.all_types.items()):
             checkbox = QCheckBox()
             checkbox.setStyleSheet("margin-left: 20px;")
             self.types_table.setCellWidget(row, 0, checkbox)
-            
-            # Type name (read-only)
+
             name_item = QTableWidgetItem(type_name)
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.types_table.setItem(row, 1, name_item)
-            
-            # Time spinbox
+
             spinbox = QDoubleSpinBox()
             spinbox.setRange(0.01, 9999.99)
             spinbox.setDecimals(2)
             spinbox.setValue(default_time)
             self.types_table.setCellWidget(row, 2, spinbox)
-            
-            self.type_rows.append((checkbox, type_name, spinbox))
+
+            ue_spinbox = QDoubleSpinBox()
+            ue_spinbox.setRange(0.001, 999.999)
+            ue_spinbox.setDecimals(2)
+            ue_spinbox.setValue(default_ue)
+            self.types_table.setCellWidget(row, 3, ue_spinbox)
+
+            self.type_rows.append((checkbox, type_name, spinbox, ue_spinbox))
         
         layout.addWidget(self.types_table)
         
@@ -228,13 +225,15 @@ class AddRegionDialog(QDialog):
         self.setLayout(layout)
     
     def get_all_unique_types(self):
-        """Get all unique types across all regions with their most common time"""
+        """Get all unique types across all regions with (time, ue) tuples"""
         types = {}
         for region, data in self.all_standards.items():
             if "Aligners" in data:
+                reg_ue = self.all_units_eq.get(region, {})
                 for type_name, time_value in data["Aligners"].items():
                     if type_name not in types:
-                        types[type_name] = time_value
+                        ue_val = reg_ue.get(type_name, round((time_value / 408.3) * 14.0, 3))
+                        types[type_name] = (time_value, ue_val)
         return dict(sorted(types.items()))
     
     def validate_and_accept(self):
@@ -247,7 +246,7 @@ class AddRegionDialog(QDialog):
             return
         
         # Check if at least one type is selected or custom type is provided
-        has_selected = any(cb.isChecked() for cb, _, _ in self.type_rows)
+        has_selected = any(cb.isChecked() for cb, _, _, _ in self.type_rows)
         has_custom = bool(self.custom_type_input.text().strip())
         
         if not has_selected and not has_custom:
@@ -269,55 +268,73 @@ class AddRegionDialog(QDialog):
         types = {}
         
         # Get selected existing types
-        for checkbox, type_name, spinbox in self.type_rows:
+        for checkbox, type_name, spinbox, ue_spinbox in self.type_rows:
             if checkbox.isChecked():
-                types[type_name] = spinbox.value()
-        
+                types[type_name] = (spinbox.value(), ue_spinbox.value())
+
         # Add custom type if provided
         custom_name = self.custom_type_input.text().strip()
         if custom_name:
             try:
                 custom_time = float(self.custom_time_input.text())
-                types[custom_name] = custom_time
+                ue_val = round((custom_time / 408.3) * 14.0, 3)
+                types[custom_name] = (custom_time, ue_val)
             except ValueError:
                 pass
-        
+
         return {
             'region': self.region_input.text().strip(),
-            'types': types
+            'types': types,
         }
 
 
 class StandardsTab(QWidget):
     standards_updated = Signal()  # Signal emitted when standards are modified
-    
+
     def __init__(self):
         super().__init__()
         self.standards = {}
+        self.units_eq = {}
         self.load_standards()
+        self.load_units_eq()
         self.init_ui()
     
     def load_standards(self):
         """Load standards from JSON file"""
         standards_path = get_resource_path(os.path.join("data", "standards.json"))
         try:
-            with open(standards_path, "r") as f:
+            with open(standards_path, "r", encoding="utf-8-sig") as f:
                 self.standards = json.load(f)
         except Exception as e:
             print(f"Error loading standards: {e}")
             self.standards = {}
-    
+
+    def load_units_eq(self):
+        """Load equivalent units from JSON file"""
+        self.units_eq = load_units_eq_data()
+
     def save_standards(self):
         """Save standards to JSON file"""
         standards_path = get_writable_path(os.path.join("data", "standards.json"))
         try:
-            # Ensure directory exists
             os.makedirs(os.path.dirname(standards_path), exist_ok=True)
-            with open(standards_path, "w") as f:
-                json.dump(self.standards, f, indent=4)
+            with open(standards_path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(self.standards, f, indent=4, ensure_ascii=False)
             return True
         except Exception as e:
             print(f"Error saving standards: {e}")
+            return False
+
+    def save_units_eq(self):
+        """Save equivalent units to JSON file"""
+        path = get_writable_path(os.path.join("data", "units_eq.json"))
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(self.units_eq, f, indent=4, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print(f"Error saving units_eq: {e}")
             return False
     
     def init_ui(self):
@@ -325,46 +342,50 @@ class StandardsTab(QWidget):
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # Header with buttons
-        header_layout = QHBoxLayout()
-        
+        # Title — centered
         title_label = QLabel("Standard Times Configuration")
         title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #4aa3ff;")
-        header_layout.addWidget(title_label)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(title_label)
+
+        # Buttons row — right-aligned
+        header_layout = QHBoxLayout()
         header_layout.addStretch()
-        
+
         # Import button
         import_btn = QPushButton("Import JSON")
         import_btn.setMaximumWidth(100)
         import_btn.clicked.connect(self.import_json)
         header_layout.addWidget(import_btn)
-        
+
         # Export button
         export_btn = QPushButton("Export JSON")
         export_btn.setMaximumWidth(100)
         export_btn.clicked.connect(self.export_json)
         header_layout.addWidget(export_btn)
-        
+
         # Reload button
         reload_btn = QPushButton("Reload")
         reload_btn.setMaximumWidth(80)
         reload_btn.clicked.connect(self.reload_standards)
         header_layout.addWidget(reload_btn)
-        
+
         main_layout.addLayout(header_layout)
         
         # Tree widget for displaying standards
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Region / Type", "Standard Time (min)"])
+        self.tree.setHeaderLabels(["Region / Type", "Std Time (min)", "Equiv. Units"])
         self.tree.setAlternatingRowColors(True)
         self.tree.setRootIsDecorated(True)
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
-        
+
         # Set column widths
         header = self.tree.header()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.tree.setColumnWidth(1, 150)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.tree.setColumnWidth(1, 130)
+        self.tree.setColumnWidth(2, 120)
         
         # Style the tree
         self.tree.setStyleSheet("""
@@ -465,29 +486,35 @@ class StandardsTab(QWidget):
                 child = item.child(i)
                 child.setForeground(0, QBrush(fg_color))
                 child.setForeground(1, QBrush(fg_color))
+                child.setForeground(2, QBrush(fg_color))
                 walk(child)
 
         for i in range(self.tree.topLevelItemCount()):
             top = self.tree.topLevelItem(i)
             top.setForeground(0, QBrush(fg_color))
             top.setForeground(1, QBrush(fg_color))
+            top.setForeground(2, QBrush(fg_color))
             walk(top)
     
     def populate_tree(self):
         """Populate the tree widget with standards data"""
         self.tree.clear()
-        
+
         for region, data in sorted(self.standards.items()):
-            region_item = QTreeWidgetItem([region, ""])
+            region_item = QTreeWidgetItem([region, "", ""])
             region_item.setFont(0, QFont("Segoe UI", 11, QFont.Weight.Bold))
             region_item.setExpanded(True)
-            
+
             if "Aligners" in data:
+                reg_ue = self.units_eq.get(region, {})
                 for case_type, time_value in sorted(data["Aligners"].items()):
-                    type_item = QTreeWidgetItem([case_type, f"{time_value:.2f}"])
+                    ue_val = reg_ue.get(case_type, "")
+                    ue_str = f"{ue_val:.2f}" if isinstance(ue_val, (int, float)) else ""
+                    type_item = QTreeWidgetItem([case_type, f"{time_value:.2f}", ue_str])
                     type_item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+                    type_item.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
                     region_item.addChild(type_item)
-            
+
             self.tree.addTopLevelItem(region_item)
     
     def on_item_double_clicked(self, item, column):
@@ -496,20 +523,27 @@ class StandardsTab(QWidget):
             self.edit_item(item)
     
     def edit_item(self, item):
-        """Edit a standard time value"""
+        """Edit a standard time and UE value"""
         if item.parent() is None:
-            return  # Can't edit region headers
-        
+            return
+
         region = item.parent().text(0)
         case_type = item.text(0)
-        current_value = self.standards.get(region, {}).get("Aligners", {}).get(case_type, 0)
-        
-        dialog = EditStandardDialog(region, case_type, current_value, self)
+        current_time = self.standards.get(region, {}).get("Aligners", {}).get(case_type, 0)
+        current_ue = self.units_eq.get(region, {}).get(case_type, 0)
+
+        dialog = EditStandardDialog(region, case_type, current_time, current_ue, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_value = dialog.get_value()
-            if new_value is not None and new_value > 0:
-                self.standards[region]["Aligners"][case_type] = new_value
-                item.setText(1, f"{new_value:.2f}")
+            new_time = dialog.get_time()
+            new_ue = dialog.get_ue()
+            if new_time is not None and new_time > 0:
+                self.standards[region]["Aligners"][case_type] = new_time
+                item.setText(1, f"{new_time:.2f}")
+            if new_ue is not None and new_ue >= 0:
+                if region not in self.units_eq:
+                    self.units_eq[region] = {}
+                self.units_eq[region][case_type] = new_ue
+                item.setText(2, f"{new_ue:.2f}")
     
     def edit_selected(self):
         """Edit the currently selected item"""
@@ -521,14 +555,16 @@ class StandardsTab(QWidget):
     
     def add_region(self):
         """Add a new region"""
-        dialog = AddRegionDialog(list(self.standards.keys()), self.standards, self)
+        dialog = AddRegionDialog(list(self.standards.keys()), self.standards, self.units_eq, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_data()
             if data and data['types']:
                 region = data['region']
+                # data['types'] is now {type: (time, ue)}
                 self.standards[region] = {
-                    "Aligners": data['types']
+                    "Aligners": {t: tv[0] for t, tv in data['types'].items()}
                 }
+                self.units_eq[region] = {t: tv[1] for t, tv in data['types'].items()}
                 self.populate_tree()
     
     def add_type(self):
@@ -542,6 +578,11 @@ class StandardsTab(QWidget):
                     if "Aligners" not in self.standards[region]:
                         self.standards[region]["Aligners"] = {}
                     self.standards[region]["Aligners"][data['type']] = data['value']
+                    # UE: user-provided or compute from std_time as default
+                    ue_val = data.get('ue') or round((data['value'] / 408.3) * 14.0, 3)
+                    if region not in self.units_eq:
+                        self.units_eq[region] = {}
+                    self.units_eq[region][data['type']] = ue_val
                     self.populate_tree()
     
     def delete_selected(self):
@@ -550,9 +591,8 @@ class StandardsTab(QWidget):
         if not item:
             QMessageBox.information(self, "Info", "Please select an item to delete.")
             return
-        
+
         if item.parent() is None:
-            # Deleting a region
             region = item.text(0)
             reply = QMessageBox.question(
                 self, "Confirm Delete",
@@ -561,9 +601,9 @@ class StandardsTab(QWidget):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 del self.standards[region]
+                self.units_eq.pop(region, None)
                 self.populate_tree()
         else:
-            # Deleting a type
             region = item.parent().text(0)
             case_type = item.text(0)
             reply = QMessageBox.question(
@@ -573,15 +613,18 @@ class StandardsTab(QWidget):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 del self.standards[region]["Aligners"][case_type]
+                self.units_eq.get(region, {}).pop(case_type, None)
                 self.populate_tree()
     
     def save_changes(self):
         """Save changes to file and notify other tabs"""
-        if self.save_standards():
-            QMessageBox.information(self, "Success", "Standard times saved successfully!")
+        ok1 = self.save_standards()
+        ok2 = self.save_units_eq()
+        if ok1 and ok2:
+            QMessageBox.information(self, "Success", "Standards saved successfully!")
             self.standards_updated.emit()
         else:
-            QMessageBox.warning(self, "Error", "Failed to save standard times.")
+            QMessageBox.warning(self, "Error", "Failed to save one or more files.")
     
     def import_json(self):
         """Import standards from a JSON file"""
@@ -626,8 +669,9 @@ class StandardsTab(QWidget):
                 QMessageBox.warning(self, "Error", f"Failed to export: {str(e)}")
     
     def reload_standards(self):
-        """Reload standards from file"""
+        """Reload standards and units_eq from file"""
         self.load_standards()
+        self.load_units_eq()
         self.populate_tree()
         QMessageBox.information(self, "Reloaded", "Standards reloaded from file.")
     
