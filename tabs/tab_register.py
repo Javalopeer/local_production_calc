@@ -8,30 +8,14 @@ if __name__ == "__main__":
 
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
-    QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QTabWidget, QDateEdit, QTextEdit, QScrollArea
+    QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QDateEdit, QTextEdit, QScrollArea
 )
 from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont
 from db.database import get_connection
+from .utils import get_resource_path, calculate_case_value as _calc_cv, load_units_eq_data, get_units_per_case as _ue_lookup
 from datetime import datetime
 from .downtime_manager import DowntimeManager
 from .toggle_switch import ToggleSwitch
-
-
-def get_resource_path(relative_path):
-    """Get absolute path to resource - works for dev and PyInstaller"""
-    if getattr(sys, 'frozen', False):
-        # Running as compiled exe - look in exe directory first, then _MEIPASS
-        exe_dir = os.path.dirname(sys.executable)
-        exe_path = os.path.join(exe_dir, relative_path)
-        if os.path.exists(exe_path):
-            return exe_path
-        # Fall back to bundled data
-        return os.path.join(sys._MEIPASS, relative_path)
-    else:
-        # Running as script
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base, relative_path)
 
 
 def card(title, widget):
@@ -194,9 +178,30 @@ class RegisterTab(QWidget):
         toggle_widget.setLayout(toggle_layout)
         form.addRow("", toggle_widget)
 
+        # Import from Web button
+        import_web_btn = QPushButton("Import")
+        import_web_btn.setMaximumWidth(90)
+        import_web_btn.setMinimumHeight(26)
+        import_web_btn.setToolTip(
+            "Copy all text on the case page (Ctrl+A, Ctrl+C),\n"
+            "then click here or press Ctrl+Shift+I to auto-fill the fields."
+        )
+        import_web_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a5c2a;
+                color: #7ec890;
+            }
+            QPushButton:hover {
+                background-color: #236b32;
+                color: #a8e6b8;
+            }
+        """)
+        import_web_btn.clicked.connect(self._on_import_case)
+
         # Buttons layout - centered
         buttons_layout = QHBoxLayout()
         buttons_layout.addStretch()
+        buttons_layout.addWidget(import_web_btn)
         buttons_layout.addWidget(calc_btn)
         buttons_layout.addWidget(save_btn)
         buttons_layout.addStretch()
@@ -256,9 +261,9 @@ class RegisterTab(QWidget):
         right_layout.addWidget(comments_card)
         
         # Downtime section
-        downtime_widget = DowntimeManager(on_update_callback=self.load_daily_production)
-        downtime_widget.setMaximumHeight(300)
-        downtime_card = card("Downtime", downtime_widget)
+        self.downtime_manager = DowntimeManager(on_update_callback=self.load_daily_production)
+        self.downtime_manager.setMaximumHeight(300)
+        downtime_card = card("Downtime", self.downtime_manager)
         right_layout.addWidget(downtime_card)
         
         # Progress bar in right column (normal mode)
@@ -360,65 +365,11 @@ class RegisterTab(QWidget):
 
     def load_units_eq(self):
         """Load units equivalency for production calculation"""
-        units_path = get_resource_path(os.path.join("data", "units_eq.json"))
-        with open(units_path, "r") as f:
-            self.units_eq = json.load(f)
+        self.units_eq = load_units_eq_data()
 
-    def get_units_at_100(self, region):
-        """Return units at 100% for a region, attempting tolerant matching."""
-        if not region:
-            return 0
-        if region in self.units_eq:
-            return self.units_eq[region].get("100", 0)
-
-        alt = region.replace(" & Canada", "").replace("Regions ", "").strip()
-        for key in self.units_eq.keys():
-            if key == alt or key.replace("Regions ", "") == alt:
-                return self.units_eq[key].get("100", 0)
-
-        for key in self.units_eq.keys():
-            if alt and (alt in key or key in alt):
-                return self.units_eq[key].get("100", 0)
-
-        return 0
-    
-    def get_units_for_production(self, region, production_pct):
-        """
-        Get units needed for a given production percentage based on region.
-        Uses linear interpolation between defined thresholds.
-        """
-        if region not in self.units_eq:
-            return 0
-        
-        region_data = self.units_eq[region]
-        thresholds = sorted([int(k) for k in region_data.keys()], reverse=True)
-        
-        # If production is at or above highest threshold
-        if production_pct >= thresholds[0]:
-            # Calculate units per percent and extrapolate
-            units_per_5pct = region_data[str(thresholds[0])] - region_data[str(thresholds[1])]
-            extra_pct = production_pct - thresholds[0]
-            extra_units = (extra_pct / 5) * units_per_5pct
-            return region_data[str(thresholds[0])] + extra_units
-        
-        # Find the two thresholds to interpolate between
-        for i in range(len(thresholds) - 1):
-            if thresholds[i] >= production_pct >= thresholds[i + 1]:
-                upper = thresholds[i]
-                lower = thresholds[i + 1]
-                upper_units = region_data[str(upper)]
-                lower_units = region_data[str(lower)]
-                
-                # Linear interpolation
-                ratio = (production_pct - lower) / (upper - lower)
-                return lower_units + (upper_units - lower_units) * ratio
-        
-        # Below minimum threshold - extrapolate down
-        lowest = thresholds[-1]
-        second_lowest = thresholds[-2]
-        units_per_5pct = region_data[str(second_lowest)] - region_data[str(lowest)]
-        below_pct = lowest - production_pct
-        return max(0, region_data[str(lowest)] - (below_pct / 5) * units_per_5pct)
+    def get_units_per_case(self, region, case_type):
+        """Return UE value for a specific region+case_type."""
+        return _ue_lookup(self.units_eq, region, case_type)
     
     def on_case_id_changed(self, text):
         """Auto-set start time when Case ID is first entered"""
@@ -439,15 +390,8 @@ class RegisterTab(QWidget):
             self.end_time.blockSignals(False)
     
     def calculate_case_value(self, std_time):
-        """
-        Calculate fixed percentage value for a case based on standard time.
-        Reference: 9-hour workday (6:00 AM - 3:00 PM) = 540 minutes = 100%
-        But using 408.3 minutes as base to match ICON Warford Primary = 6.980%
-        Formula: case_value = (std_time / 408.3) * 100
-        """
-        DAILY_BASE_MINUTES = 408.3  # Base for percentage calculation
-        case_value = (std_time / DAILY_BASE_MINUTES) * 100
-        return case_value
+        """Calculate fixed percentage value for a case based on standard time."""
+        return _calc_cv(std_time)
 
     def get_daily_downtime(self, date=None):
         """Get total downtime minutes for given date (or today if not specified)"""
@@ -505,7 +449,9 @@ class RegisterTab(QWidget):
         self.result_label.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold; text-align: center;")
 
     def on_date_changed(self):
-        """Called when the date picker changes - reload production for that date"""
+        """Called when the date picker changes - reload production and downtime for that date"""
+        selected_date = self.case_date.date().toString("yyyy-MM-dd")
+        self.downtime_manager.set_date(selected_date)
         self.load_daily_production()
 
     def load_daily_production(self):
@@ -524,23 +470,22 @@ class RegisterTab(QWidget):
         result = cursor.fetchone()
         total_cases = result[0] if result[0] else 0.0
         
-        # Get cases by region for equivalent units calculation (only count_production = 1)
+        # Get cases by region+type for equivalent units calculation (only count_production = 1)
         cursor.execute("""
-            SELECT region, SUM(case_value)
+            SELECT region, tipo_caso, COUNT(*)
             FROM cases
             WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
-            GROUP BY region
+            GROUP BY region, tipo_caso
         """, (selected_date,))
-        
+
         region_cases = cursor.fetchall()
         conn.close()
-        
-        # Calculate equivalent units based on region (tolerant region matching)
+
+        # Calculate equivalent units: count × UE per case type
         total_equivalent_units = 0.0
-        for region, case_value in region_cases:
-            if case_value:
-                units_at_100 = self.get_units_at_100(region)
-                total_equivalent_units += (case_value / 100) * units_at_100
+        for region, case_type, count in region_cases:
+            if count:
+                total_equivalent_units += count * self.get_units_per_case(region, case_type)
         
         # Get total downtime and calculate as production value
         total_downtime = self.get_daily_downtime(selected_date)
@@ -555,7 +500,9 @@ class RegisterTab(QWidget):
             display_label += f" (Cases: {total_cases:.2f}% + Downtime: {downtime_value:.2f}%)"
         
         self.daily_production_label.setText(display_label)
-        self.equivalent_units_label.setText(f"Equivalent Units: {total_equivalent_units:.2f}")
+        # Equivalent Units = cases only (downtime counts toward production % but not UE)
+        eq_label = f"Equivalent Units: {total_equivalent_units:.2f}"
+        self.equivalent_units_label.setText(eq_label)
         
         # Update progress bar with animation - NO CAP, allow any value
         self.progress_bar.setMaximum(max(100, int(total_production) + 10))
@@ -640,6 +587,104 @@ class RegisterTab(QWidget):
             
             self.result_label.setText("Editing - Click Save to update")
             self.result_label.setStyleSheet("color: #FFC107; font-size: 13px; font-weight: bold; text-align: center;")
+
+    # ── Web Import ────────────────────────────────────────────────────────
+
+    def _on_import_case(self):
+        """
+        Read the clipboard, show a confirmation dialog with the detected data,
+        and fill the fields only if the user confirms.
+        """
+        from sync.clipboard_import import parse_clipboard
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
+
+        data = parse_clipboard(self.standards)
+
+        # Nothing found — show error directly, no dialog
+        if not any(data.get(k) for k in ('case_id', 'region', 'tipo', 'doctor')):
+            self.result_label.setText(
+                "Nothing detected in clipboard.\n"
+                "On the case page: press Ctrl+A then Ctrl+C, then try again."
+            )
+            self.result_label.setStyleSheet(
+                "color: #FFC107; font-size: 12px; font-weight: bold; text-align: center;"
+            )
+            return
+
+        # Build confirmation dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Import from Clipboard")
+        dlg.setMinimumWidth(300)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(10)
+
+        header = QLabel("Import this case?")
+        header.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(header)
+
+        rows = [
+            ("Case ID", data.get('case_id', '—')),
+            ("Region",  data.get('region',  '—')),
+            ("Type",    data.get('tipo',    '—')),
+            ("Doctor",  data.get('doctor',  '—')),
+        ]
+        for label_text, value in rows:
+            row_lbl = QLabel(f"<b>{label_text}:</b>  {value}")
+            row_lbl.setWordWrap(True)
+            layout.addWidget(row_lbl)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_cancel = QPushButton("Cancel")
+        btn_import = QPushButton("Import")
+        btn_import.setDefault(True)
+        btn_import.setStyleSheet(
+            "background-color: #1a5c2a; color: #7ec890; font-weight: bold;"
+        )
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_import)
+        layout.addLayout(btn_layout)
+
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_import.clicked.connect(dlg.accept)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # User confirmed — fill fields
+        filled: list[str] = []
+
+        if data.get('case_id'):
+            self.case_id.setText(data['case_id'])
+            filled.append(f"Case ID: {data['case_id']}")
+
+        if data.get('region'):
+            idx = self.region.findText(data['region'])
+            if idx >= 0:
+                self.region.blockSignals(True)
+                self.region.setCurrentIndex(idx)
+                self.region.blockSignals(False)
+                self.update_case_types()
+                filled.append(f"Region: {data['region']}")
+
+        if data.get('tipo'):
+            idx = self.tipo.findText(data['tipo'])
+            if idx >= 0:
+                self.tipo.setCurrentIndex(idx)
+                filled.append(f"Type: {data['tipo']}")
+
+        if data.get('doctor'):
+            self.doctor.setText(data['doctor'])
+            filled.append(f"Doctor: {data['doctor']}")
+
+        self.start_time.setTime(QTime.currentTime())
+
+        self.result_label.setText(
+            "\n".join(filled) + "\nSet times and click Calculate."
+        )
+        self.result_label.setStyleSheet(
+            "color: #4CAF50; font-size: 12px; font-weight: bold; text-align: center;"
+        )
 
     def save_case(self):
         region = self.region.currentText()
