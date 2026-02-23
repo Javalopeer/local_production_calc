@@ -1,7 +1,6 @@
 import json
 import os
 import sys
-import re
 from PySide6.QtWidgets import (
     QApplication, QWidget, QFormLayout, QComboBox, QLineEdit,
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QDateEdit,
@@ -13,19 +12,7 @@ from PySide6.QtGui import QFont, QColor, QBrush
 from db.database import get_connection
 from datetime import datetime
 from .toggle_switch import ToggleSwitch
-
-
-def get_resource_path(relative_path):
-    """Get absolute path to resource - works for dev and PyInstaller"""
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        exe_path = os.path.join(exe_dir, relative_path)
-        if os.path.exists(exe_path):
-            return exe_path
-        return os.path.join(sys._MEIPASS, relative_path)
-    else:
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base, relative_path)
+from .utils import get_resource_path, calculate_case_value as _calc_cv, load_units_eq_data, get_units_per_case as _ue_lookup
 
 
 def card(title, widget):
@@ -84,33 +71,11 @@ class OvertimeTab(QWidget):
             self.standards = json.load(f)
 
     def load_units_eq(self):
-        units_path = get_resource_path(os.path.join("data", "units_eq.json"))
-        with open(units_path, "r") as f:
-            self.units_eq = json.load(f)
-    
-    def calculate_units_eq(self, region, case_value):
-        """Calculate equivalent units for a case based on region and value"""
-        if not case_value:
-            return 0.0
+        self.units_eq = load_units_eq_data()
 
-        # direct match
-        if region in self.units_eq:
-            units_at_100 = self.units_eq[region].get("100", 0)
-            return (case_value / 100) * units_at_100
-
-        # fallback: try to find a close key by normalizing names (remove non-alnum, lowercase)
-        def norm(s):
-            return re.sub(r'[^a-z0-9]', '', s.lower()) if s else ''
-
-        rnorm = norm(region)
-        for k in self.units_eq.keys():
-            kn = norm(k)
-            if kn and (kn in rnorm or rnorm in kn):
-                units_at_100 = self.units_eq[k].get("100", 0)
-                return (case_value / 100) * units_at_100
-
-        # no match
-        return 0.0
+    def calculate_units_eq(self, region, case_type):
+        """Return UE per case for a given region and case type."""
+        return _ue_lookup(self.units_eq, region, case_type)
 
     def init_ui(self):
         # Form fields
@@ -206,9 +171,30 @@ class OvertimeTab(QWidget):
         toggle_widget.setLayout(toggle_layout)
         form.addRow("", toggle_widget)
 
+        # Import from clipboard button
+        import_btn = QPushButton("Import")
+        import_btn.setMaximumWidth(90)
+        import_btn.setMinimumHeight(26)
+        import_btn.setToolTip(
+            "Copy all text on the case page (Ctrl+A, Ctrl+C),\n"
+            "then click here or press Ctrl+Shift+I to auto-fill the fields."
+        )
+        import_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a5c2a;
+                color: #7ec890;
+            }
+            QPushButton:hover {
+                background-color: #236b32;
+                color: #a8e6b8;
+            }
+        """)
+        import_btn.clicked.connect(self._on_import_case)
+
         # Buttons layout (centered)
         buttons_layout = QHBoxLayout()
         buttons_layout.addStretch()
+        buttons_layout.addWidget(import_btn)
         buttons_layout.addWidget(calc_btn)
         buttons_layout.addSpacing(8)
         buttons_layout.addWidget(save_btn)
@@ -591,10 +577,8 @@ class OvertimeTab(QWidget):
             self.end_time.blockSignals(False)
 
     def calculate_case_value(self, std_time):
-        """Calculate case value percentage"""
-        DAILY_BASE_MINUTES = 408.3
-        case_value = (std_time / DAILY_BASE_MINUTES) * 100
-        return case_value
+        """Calculate case value percentage."""
+        return _calc_cv(std_time)
 
     def calculate(self):
         region = self.region.currentText()
@@ -651,23 +635,22 @@ class OvertimeTab(QWidget):
         result = cursor.fetchone()
         total_ot = result[0] if result[0] else 0.0
         
-        # Get cases by region for equivalent units calculation (only count_production = 1)
+        # Get cases by region+type for equivalent units calculation (only count_production = 1)
         cursor.execute("""
-            SELECT region, SUM(case_value)
+            SELECT region, tipo_caso, COUNT(*)
             FROM ot_cases
             WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
-            GROUP BY region
+            GROUP BY region, tipo_caso
         """, (selected_date,))
-        
+
         region_cases = cursor.fetchall()
         conn.close()
-        
-        # Calculate equivalent units based on region
+
+        # Calculate equivalent units: count × UE per case type
         total_equivalent_units = 0.0
-        for region, case_value in region_cases:
-            if region in self.units_eq and case_value:
-                units_at_100 = self.units_eq[region].get("100", 0)
-                total_equivalent_units += (case_value / 100) * units_at_100
+        for region, case_type, count in region_cases:
+            if count:
+                total_equivalent_units += count * self.calculate_units_eq(region, case_type)
         
         self.daily_ot_label.setText(f"OT Production: {total_ot:.2f}%")
         self.ot_units_label.setText(f"OT Equivalent Units: {total_equivalent_units:.2f}")
@@ -715,7 +698,7 @@ class OvertimeTab(QWidget):
             key = getattr(self, 'estimate_key_map', {}).get(t)
             std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
             case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
-            units_per_case = self.calculate_units_eq(region, case_value_per)
+            units_per_case = self.calculate_units_eq(region, key)
             total_case_value += cnt * case_value_per
             total_equivalent_units += cnt * units_per_case
             used_minutes += cnt * float(std_time or 0)
@@ -729,7 +712,7 @@ class OvertimeTab(QWidget):
             key = getattr(self, 'estimate_key_map', {}).get(t)
             std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
             case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
-            units_per_case = self.calculate_units_eq(region, case_value_per)
+            units_per_case = self.calculate_units_eq(region, key)
             cases_value_total = cnt * case_value_per
             used_min_type = cnt * float(std_time or 0)
             tu_type = (used_min_type / minutes) * 100.0
@@ -1129,8 +1112,8 @@ class OvertimeTab(QWidget):
             value_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 6, value_item)
             
-            # Units Equivalent - calculated from region and case_value
-            units_eq = self.calculate_units_eq(region, case_value)
+            # Units Equivalent - looked up per case type
+            units_eq = self.calculate_units_eq(region, tipo)
             units_eq_item = QTableWidgetItem(f"{units_eq:.2f}")
             units_eq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             units_eq_item.setBackground(bg_brush)
@@ -1142,6 +1125,102 @@ class OvertimeTab(QWidget):
             self.update_theme_labels(current_is_light)
         except Exception:
             pass
+
+    def _on_import_case(self):
+        """
+        Read the clipboard, show a confirmation dialog with the detected data,
+        and fill the fields only if the user confirms.
+        """
+        from sync.clipboard_import import parse_clipboard
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
+
+        data = parse_clipboard(self.standards)
+
+        # Nothing found — show error directly, no dialog
+        if not any(data.get(k) for k in ('case_id', 'region', 'tipo', 'doctor')):
+            self.result_label.setText(
+                "Nothing detected in clipboard.\n"
+                "On the case page: press Ctrl+A then Ctrl+C, then try again."
+            )
+            self.result_label.setStyleSheet(
+                "color: #FFC107; font-size: 12px; font-weight: bold; text-align: center;"
+            )
+            return
+
+        # Build confirmation dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Import from Clipboard")
+        dlg.setMinimumWidth(300)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(10)
+
+        header = QLabel("Import this case?")
+        header.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(header)
+
+        rows = [
+            ("Case ID", data.get('case_id', '—')),
+            ("Region",  data.get('region',  '—')),
+            ("Type",    data.get('tipo',    '—')),
+            ("Doctor",  data.get('doctor',  '—')),
+        ]
+        for label_text, value in rows:
+            row_lbl = QLabel(f"<b>{label_text}:</b>  {value}")
+            row_lbl.setWordWrap(True)
+            layout.addWidget(row_lbl)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_cancel = QPushButton("Cancel")
+        btn_import = QPushButton("Import")
+        btn_import.setDefault(True)
+        btn_import.setStyleSheet(
+            "background-color: #1a5c2a; color: #7ec890; font-weight: bold;"
+        )
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_import)
+        layout.addLayout(btn_layout)
+
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_import.clicked.connect(dlg.accept)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # User confirmed — fill fields
+        filled: list[str] = []
+
+        if data.get('case_id'):
+            self.case_id.setText(data['case_id'])
+            filled.append(f"Case ID: {data['case_id']}")
+
+        if data.get('region'):
+            idx = self.region.findText(data['region'])
+            if idx >= 0:
+                self.region.blockSignals(True)
+                self.region.setCurrentIndex(idx)
+                self.region.blockSignals(False)
+                self.update_case_types()
+                filled.append(f"Region: {data['region']}")
+
+        if data.get('tipo'):
+            idx = self.tipo.findText(data['tipo'])
+            if idx >= 0:
+                self.tipo.setCurrentIndex(idx)
+                filled.append(f"Type: {data['tipo']}")
+
+        if data.get('doctor'):
+            self.doctor.setText(data['doctor'])
+            filled.append(f"Doctor: {data['doctor']}")
+
+        self.start_time.setTime(QTime.currentTime())
+
+        self.result_label.setText(
+            "\n".join(filled) + "\nSet times and click Calculate."
+        )
+        self.result_label.setStyleSheet(
+            "color: #4CAF50; font-size: 12px; font-weight: bold; text-align: center;"
+        )
 
     def save_ot_case(self):
         region = self.region.currentText()
