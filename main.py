@@ -1,14 +1,24 @@
 import sys
+import os
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QTabWidget, QScrollArea, QCheckBox
+    QApplication, QMainWindow, QTabWidget, QScrollArea, QCheckBox,
+    QPushButton, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QFileDialog, QMessageBox, QFormLayout
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut, QIcon
 from db.database import init_db
+from tabs.utils import load_units_eq_data
 import qtawesome as qta
 
+
+def _resource_path(relative: str) -> str:
+    """Return absolute path to a bundled resource (works both frozen and in dev)."""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
+
 # ============== VERSION ==============
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.1"
 DB_SCHEMA_VERSION = 1
 # =====================================
 
@@ -17,13 +27,19 @@ from tabs.tab_production import ProductionTab
 from tabs.tab_history import HistoryTab
 from tabs.tab_overtime import OvertimeTab
 from tabs.tab_standards import StandardsTab
+from tabs.tab_dashboard import DashboardTab
 
 class MainWindow(QMainWindow):
     themeChanged = Signal(bool)
-    def __init__(self):
+    def __init__(self, dark_style="", light_style=""):
         super().__init__()
+        self._dark_style = dark_style
+        self._light_style = light_style
+        self._font_size = 12
+        self._is_light = False
         self.setWindowTitle(f"Production Performance Calculator v{APP_VERSION}")
-        self.setWindowIcon(qta.icon('fa5s.calculator', color='#2d89ef'))
+        _ico = _resource_path(os.path.join("data", "app_icon.ico"))
+        self.setWindowIcon(QIcon(_ico))
 
         self.tabs = QTabWidget()
         
@@ -32,6 +48,7 @@ class MainWindow(QMainWindow):
         self.history_tab = HistoryTab()
         self.overtime_tab = OvertimeTab()
         self.standards_tab = StandardsTab()
+        self.dashboard_tab = DashboardTab()
 
         # Connect a themeChanged signal to tabs so they update their local styles
         try:
@@ -59,9 +76,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            # ProductionTab doesn't currently implement update_progress_bar_style,
-            # but call update_theme_labels on theme change as a safe fallback.
             self.themeChanged.connect(self.production_tab.update_theme_labels)
+        except Exception:
+            pass
+        try:
+            self.themeChanged.connect(self.dashboard_tab.update_theme_labels)
         except Exception:
             pass
 
@@ -69,24 +88,35 @@ class MainWindow(QMainWindow):
         # Connect register tab to production tab for dynamic updates
         self.register_tab.case_saved.connect(self.production_tab.load_data)
         self.register_tab.case_saved.connect(self.history_tab.load_all_cases)
-        
+        self.register_tab.case_saved.connect(self.dashboard_tab.refresh)
+
         # Connect production tab edit/delete to register tab
         self.production_tab.case_updated.connect(self.on_production_case_updated)
-        
+
         # Connect OT tab to refresh when cases change
         self.overtime_tab.ot_saved.connect(self.history_tab.load_all_cases)
+        self.overtime_tab.ot_saved.connect(self.dashboard_tab.refresh)
         
         # Connect standards tab to refresh Register and OT when standards change
         self.standards_tab.standards_updated.connect(self.on_standards_updated)
         
-        self.tabs.addTab(self.register_tab, qta.icon('fa5s.edit', color="#b8ceb1"), "Register")
-        self.tabs.addTab(self.overtime_tab, qta.icon('fa5s.clock', color='#b8ceb1'), "OT")
-        self.tabs.addTab(self.production_tab, qta.icon('fa5s.chart-bar', color='#b8ceb1'), "Production")
-        self.tabs.addTab(self.history_tab, qta.icon('fa5s.history', color='#b8ceb1'), "History")
-        self.tabs.addTab(self.standards_tab, qta.icon('fa5s.cog', color='#b8ceb1'), "Standards")
+        self.tabs.addTab(self.register_tab,  qta.icon('fa5s.edit',            color="#b8ceb1"), "Register")
+        self.tabs.addTab(self.overtime_tab,   qta.icon('fa5s.clock',           color='#b8ceb1'), "OT")
+        self.tabs.addTab(self.production_tab, qta.icon('fa5s.chart-bar',       color='#b8ceb1'), "Production")
+        self.tabs.addTab(self.history_tab,    qta.icon('fa5s.history',         color='#b8ceb1'), "History")
+        self.tabs.addTab(self.standards_tab,  qta.icon('fa5s.cog',             color='#b8ceb1'), "Standards")
+        self.tabs.addTab(self.dashboard_tab,  qta.icon('fa5s.tachometer-alt',  color='#b8ceb1'), "Dashboard")
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setUsesScrollButtons(True)
 
         self.setCentralWidget(self.tabs)
-        
+
+        # ── Global clipboard-import shortcut (Ctrl+Shift+I) ─────────────────────
+        # After copying a case page (Ctrl+A, Ctrl+C in the browser), press
+        # Ctrl+Shift+I here to auto-fill the Register or OT tab.
+        import_shortcut = QShortcut(QKeySequence("Ctrl+Shift+I"), self)
+        import_shortcut.activated.connect(self._trigger_import_shortcut)
+
         # Get screen height for maximum window height
         screen = QGuiApplication.primaryScreen()
         screen_height = screen.availableGeometry().height()
@@ -100,7 +130,8 @@ class MainWindow(QMainWindow):
             light_chk = QCheckBox("Light")
             light_chk.setToolTip("Toggle light mode")
             def on_theme_toggled(checked):
-                QApplication.instance().setStyleSheet(LIGHT_STYLE if checked else DARK_STYLE)
+                self._is_light = checked
+                self._apply_style()
                 # Emit a single signal so tabs update themselves (clean approach)
                 try:
                     self.themeChanged.emit(checked)
@@ -129,15 +160,54 @@ class MainWindow(QMainWindow):
 
             light_chk.toggled.connect(on_theme_toggled)
             self.statusBar().addPermanentWidget(light_chk)
+
+            # Font size buttons
+            from PySide6.QtWidgets import QPushButton as _QPB
+            btn_fup = _QPB("A+")
+            btn_fup.setFixedSize(30, 20)
+            btn_fup.setToolTip("Increase font size")
+            btn_fup.setStyleSheet("font-size: 10px; padding: 1px 3px; font-weight: bold;")
+            btn_fdn = _QPB("A-")
+            btn_fdn.setFixedSize(30, 20)
+            btn_fdn.setToolTip("Decrease font size")
+            btn_fdn.setStyleSheet("font-size: 10px; padding: 1px 3px; font-weight: bold;")
+            btn_fup.clicked.connect(lambda: self._change_font_size(1))
+            btn_fdn.clicked.connect(lambda: self._change_font_size(-1))
+            self.statusBar().addPermanentWidget(btn_fdn)
+            self.statusBar().addPermanentWidget(btn_fup)
+
+            # SharePoint / OneDrive sync button
+            btn_sync_cfg = QPushButton("⚙")
+            btn_sync_cfg.setFixedSize(22, 20)
+            btn_sync_cfg.setToolTip("Sync settings")
+            btn_sync_cfg.setStyleSheet(
+                "font-size: 11px; padding: 1px 2px;"
+            )
+            btn_sync_cfg.clicked.connect(self._open_sync_settings)
+            btn_sync = QPushButton("Sync ↑")
+            btn_sync.setFixedSize(54, 20)
+            btn_sync.setToolTip("Export to SharePoint / OneDrive")
+            btn_sync.setStyleSheet(
+                "font-size: 10px; padding: 1px 4px; font-weight: bold;"
+            )
+            btn_sync.clicked.connect(self._on_sync_clicked)
+            self.statusBar().addPermanentWidget(btn_sync_cfg)
+            self.statusBar().addPermanentWidget(btn_sync)
         except Exception:
             pass
 
     def on_standards_updated(self):
-        """Reload standards in Register and OT tabs when standards are modified"""
+        """Reload standards and units_eq in Register, OT and Production tabs when standards are modified"""
+        load_units_eq_data(force=True)  # Invalidate shared cache so all tabs pick up new values
         self.register_tab.load_standards()
+        self.register_tab.load_units_eq()
         self.register_tab.update_case_types()
         self.overtime_tab.load_standards()
+        self.overtime_tab.load_units_eq()
         self.overtime_tab.update_case_types()
+        self.production_tab.load_units_eq()
+        self.dashboard_tab._load_metadata()
+        self.dashboard_tab.refresh()
 
     def on_production_case_updated(self):
         """Handle case update/delete from production tab"""
@@ -170,9 +240,136 @@ class MainWindow(QMainWindow):
         # Refresh history tab
         self.history_tab.load_all_cases()
 
+    def _apply_style(self):
+        """Re-apply the current stylesheet with the active font size."""
+        base = self._light_style if self._is_light else self._dark_style
+        styled = base.replace("font-size: 12px", f"font-size: {self._font_size}px")
+        QApplication.instance().setStyleSheet(styled)
+
+    def _change_font_size(self, delta: int):
+        """Increment or decrement font size within [9, 18] range and re-apply style."""
+        self._font_size = max(9, min(18, self._font_size + delta))
+        self._apply_style()
+
+    # ── Clipboard import shortcut ─────────────────────────────────────────────
+
+    def _trigger_import_shortcut(self):
+        """Ctrl+Shift+I — runs clipboard import on the currently visible tab."""
+        current_widget = self.tabs.currentWidget()
+        # Walk up the widget tree in case the tab is wrapped in a QScrollArea
+        if hasattr(current_widget, 'widget'):
+            current_widget = current_widget.widget()
+        if hasattr(current_widget, '_on_import_case'):
+            current_widget._on_import_case()
+        else:
+            self.statusBar().showMessage(
+                "Clipboard import is only available in the Register and OT tabs.", 4000
+            )
+
+    # ── SharePoint / OneDrive sync ────────────────────────────────────────────
+
+    def _on_sync_clicked(self):
+        """Called when the Sync button is pressed."""
+        from sync.app_config import load_config, is_configured
+        if not is_configured():
+            self._open_sync_settings(then_sync=True)
+        else:
+            self._do_sync()
+
+    def _open_sync_settings(self, then_sync=False):
+        """Show the Sync Settings dialog and optionally run sync after saving."""
+        from sync.app_config import load_config, save_config
+        cfg = load_config()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Sync Settings — SharePoint / OneDrive")
+        dlg.setMinimumWidth(460)
+        layout = QVBoxLayout(dlg)
+
+        info = QLabel(
+            "Set your name and the OneDrive folder that is synced with your"
+            " supervisor's SharePoint.\n"
+            "The app will save an Excel report there — OneDrive uploads it automatically."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QFormLayout()
+        name_edit = QLineEdit(cfg.get("designer_name", ""))
+        name_edit.setPlaceholderText("Your full name as it will appear in the report")
+        form.addRow("Designer name:", name_edit)
+
+        folder_layout = QHBoxLayout()
+        folder_edit = QLineEdit(cfg.get("export_folder", ""))
+        folder_edit.setPlaceholderText("C:\\Users\\You\\OneDrive - ICON\\Production Reports")
+        browse_btn = QPushButton("Browse…")
+        browse_btn.setFixedWidth(80)
+        def browse():
+            path = QFileDialog.getExistingDirectory(
+                dlg, "Select OneDrive / SharePoint folder",
+                folder_edit.text() or ""
+            )
+            if path:
+                folder_edit.setText(path)
+        browse_btn.clicked.connect(browse)
+        folder_layout.addWidget(folder_edit)
+        folder_layout.addWidget(browse_btn)
+        form.addRow("Export folder:", folder_layout)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        btn_cancel = QPushButton("Cancel")
+        btn_save   = QPushButton("Save")
+        btn_save.setDefault(True)
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_save)
+        layout.addLayout(btns)
+
+        btn_cancel.clicked.connect(dlg.reject)
+        def on_save():
+            cfg["designer_name"] = name_edit.text().strip()
+            cfg["export_folder"] = folder_edit.text().strip()
+            save_config(cfg)
+            dlg.accept()
+        btn_save.clicked.connect(on_save)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted and then_sync:
+            self._do_sync()
+
+    def _do_sync(self):
+        """Run the Excel export and show result to user."""
+        from sync.sharepoint_sync import export_to_sharepoint
+        # Use the date selected in the register tab
+        try:
+            target_date = self.register_tab.case_date.date().toString("yyyy-MM-dd")
+        except Exception:
+            target_date = None
+
+        ok, msg = export_to_sharepoint(target_date)
+        if ok:
+            QMessageBox.information(self, "Sync Complete ✓", msg)
+        else:
+            box = QMessageBox(QMessageBox.Icon.Warning, "Sync Failed", msg, parent=self)
+            # If not configured yet, offer to open settings
+            if "not configured" in msg.lower() or "not found" in msg.lower():
+                box.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("OK", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton().text() == "Open Settings":
+                    self._open_sync_settings(then_sync=True)
+            else:
+                box.exec()
+
 if __name__ == "__main__":
+    # ── Self-installer: runs before Qt so no QApplication is needed yet ─────
+    from self_installer import check_and_install, was_just_installed
+    if check_and_install():
+        sys.exit(0)
+
     init_db()
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(_resource_path(os.path.join("data", "app_icon.ico"))))
 
     DARK_STYLE = """
     QWidget {
@@ -251,14 +448,17 @@ if __name__ == "__main__":
 
     QTabBar::tab {
         background: #2b2b2b;
-        padding: 8px 16px;
+        padding: 4px 6px;
         border-radius: 6px;
-        margin-left: 10px;
+        margin-left: 3px;
+        margin-right: 1px;
         margin-top: 8px;
         margin-bottom: 4px;
         border: 1px solid #3c3c3c;
         color: #999;
         font-weight: 500;
+        font-size: 11px;
+        min-width: 40px;
     }
 
     QTabBar::tab:hover {
@@ -398,14 +598,16 @@ if __name__ == "__main__":
 
     QTabBar::tab {
         background: #8D86C9;
-        padding: 8px 16px;
+        padding: 6px 10px;
         border-radius: 6px;
-        margin-left: 10px;
+        margin-left: 6px;
+        margin-right: 2px;
         margin-top: 8px;
         margin-bottom: 4px;
         border: 1px solid #8D86C9;
         color: white;
         font-weight: 500;
+        min-width: 64px;
     }
 
     QTabBar::tab:hover {
@@ -470,7 +672,14 @@ if __name__ == "__main__":
 
     app.setStyleSheet(DARK_STYLE)
     
-    window = MainWindow()
+    window = MainWindow(dark_style=DARK_STYLE, light_style=LIGHT_STYLE)
     window.show()
+
+    # Show a brief notice if the app was just self-installed
+    if was_just_installed():
+        window.statusBar().showMessage(
+            "✓ Production Calc installed — shortcut created on your Desktop.", 8000
+        )
+
     sys.exit(app.exec())
 
