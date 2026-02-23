@@ -12,7 +12,13 @@ class DowntimeManager(QWidget):
         super().__init__(parent)
         self.on_update_callback = on_update_callback
         self.delete_mode = False
+        self.current_date = datetime.now().strftime("%Y-%m-%d")
         self.init_ui()
+        self.load_downtimes()
+
+    def set_date(self, date_str: str):
+        """Called by RegisterTab when the date picker changes."""
+        self.current_date = date_str
         self.load_downtimes()
 
     def init_ui(self):
@@ -99,7 +105,7 @@ class DowntimeManager(QWidget):
             INSERT INTO downtimes (fecha, hora_inicio, hora_fin, razon, duracion)
             VALUES (?, ?, ?, ?, ?)
         """, (
-            datetime.now().strftime("%Y-%m-%d"),
+            self.current_date,
             start,
             end,
             reason,
@@ -120,14 +126,13 @@ class DowntimeManager(QWidget):
     def load_downtimes(self):
         conn = get_connection()
         cursor = conn.cursor()
-        today = datetime.now().strftime("%Y-%m-%d")
 
         cursor.execute("""
             SELECT id, hora_inicio, hora_fin, duracion, razon
             FROM downtimes
             WHERE fecha = ?
             ORDER BY hora_inicio DESC
-        """, (today,))
+        """, (self.current_date,))
 
         rows = cursor.fetchall()
         conn.close()
