@@ -6,22 +6,8 @@ from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QBrush
 from db.database import get_connection
 from datetime import datetime, timedelta
-import json
-import os
-import sys
-
-
-def get_resource_path(relative_path):
-    """Get absolute path to resource - works for dev and PyInstaller"""
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        exe_path = os.path.join(exe_dir, relative_path)
-        if os.path.exists(exe_path):
-            return exe_path
-        return os.path.join(sys._MEIPASS, relative_path)
-    else:
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base, relative_path)
+from collections import Counter
+from .utils import load_units_eq_data, get_units_per_case as _ue_lookup
 
 
 class ProductionTab(QWidget):
@@ -43,38 +29,16 @@ class ProductionTab(QWidget):
     
     def load_units_eq(self):
         """Load units equivalency for production calculation"""
-        units_path = get_resource_path(os.path.join("data", "units_eq.json"))
-        with open(units_path, "r") as f:
-            self.units_eq = json.load(f)
+        self.units_eq = load_units_eq_data()
 
-    def get_units_at_100(self, region):
-        """Return units at 100% for a region, attempting tolerant matching."""
-        if not region:
-            return 0
-        # exact match
-        if region in self.units_eq:
-            return self.units_eq[region].get("100", 0)
+    def get_units_per_case(self, region, case_type):
+        """Return UE value for a specific region+case_type."""
+        return _ue_lookup(self.units_eq, region, case_type)
 
-        # common variants: try removing suffixes like ' & Canada' or 'Regions '
-        alt = region.replace(" & Canada", "").replace("Regions ", "").strip()
-        for key in self.units_eq.keys():
-            if key == alt or key.replace("Regions ", "") == alt:
-                return self.units_eq[key].get("100", 0)
-
-        # try substring matches (e.g., 'NA' in 'Regions NA')
-        for key in self.units_eq.keys():
-            if alt and (alt in key or key in alt):
-                return self.units_eq[key].get("100", 0)
-
-        return 0
-    
-    def calculate_units_eq(self, region, case_value):
-        """Calculate equivalent units for a case based on region and value"""
+    def calculate_units_eq(self, region, case_value, case_type=None):
+        """Return UE for one case. Prefers per-type lookup; falls back to region average."""
         try:
-            if not case_value:
-                return 0.0
-            units_at_100 = self.get_units_at_100(region)
-            return (case_value / 100) * units_at_100
+            return self.get_units_per_case(region, case_type)
         except Exception:
             return 0.0
 
@@ -502,8 +466,8 @@ class ProductionTab(QWidget):
         except Exception:
             current_is_light = False
 
-        # Count rows needed (dates + cases)
-        total_rows = sum(1 + len(cases) for cases in grouped.values())
+        # Count rows needed (date header + type-breakdown row + cases)
+        total_rows = sum(2 + len(cases) for cases in grouped.values())
         self.table.setRowCount(total_rows)
         
         # Clear the row to db_id mapping
@@ -517,7 +481,7 @@ class ProductionTab(QWidget):
             daily_value = sum(case[11] for case in grouped[fecha])
             daily_cases = len(grouped[fecha])
             # Calculate daily units equivalent
-            daily_units_eq = sum(self.calculate_units_eq(case[3], case[11]) for case in grouped[fecha])
+            daily_units_eq = sum(self.calculate_units_eq(case[3], case[11], case[4]) for case in grouped[fecha])
             # Calculate daily total time (minutes)
             daily_time_sum = sum((case[8] or 0) for case in grouped[fecha])
             
@@ -548,7 +512,33 @@ class ProductionTab(QWidget):
             
             self.table.setSpan(row_idx, 0, 1, 10)  # Span across all columns
             row_idx += 1
-            
+
+            # ── Type-breakdown sub-row ─────────────────────────────────
+            type_counts = Counter(case[4] or "Unknown" for case in grouped[fecha])
+            breakdown_parts = [f"{t}: {c}" for t, c in sorted(type_counts.items())]
+            breakdown_text = "    " + "   │   ".join(breakdown_parts) + "    "
+            breakdown_item = QTableWidgetItem(breakdown_text)
+            if current_is_light:
+                sub_bg = QColor(215, 215, 225)
+                sub_fg = QColor(60, 60, 90)
+            else:
+                sub_bg = QColor(55, 55, 68)
+                sub_fg = QColor(180, 195, 210)
+            breakdown_item.setBackground(sub_bg)
+            breakdown_item.setForeground(sub_fg)
+            sub_font = QFont()
+            sub_font.setPointSize(8)
+            breakdown_item.setFont(sub_font)
+            breakdown_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row_idx, 0, breakdown_item)
+            self.table.setRowHeight(row_idx, 22)
+            for col in range(1, 10):
+                ei = QTableWidgetItem("")
+                ei.setBackground(sub_bg)
+                self.table.setItem(row_idx, col, ei)
+            self.table.setSpan(row_idx, 0, 1, 10)
+            row_idx += 1
+
             # Case rows for this date - zebra striping within each date group
             for case_idx, case in enumerate(grouped[fecha]):
                 # Store mapping from table row to database id
@@ -654,7 +644,7 @@ class ProductionTab(QWidget):
                 self.table.setItem(row_idx, 8, value_item)
                 
                 # Units Equivalent - calculated from region and case_value
-                units_eq = self.calculate_units_eq(case[3], case[11])  # region at index 3, case_value at index 11
+                units_eq = self.calculate_units_eq(case[3], case[11], case[4])  # region, case_value, tipo_caso
                 units_eq_item = QTableWidgetItem(f"{units_eq:.2f}")
                 units_eq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 units_eq_item.setBackground(QBrush(bg_color))
