@@ -374,8 +374,10 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
     Update (or create) Productions/_TeamProduction.xlsx.
     Each designer owns exactly one sheet named after them.
     Rows are one-per-day — if the date already exists it gets overwritten.
-    Since every designer only touches their own sheet, concurrent writes are safe.
+    NEVER starts with a blank workbook if the file already exists — retries
+    load_workbook up to 5 times before giving up.
     """
+    import time
     team_file  = os.path.join(productions_dir, "_TeamProduction.xlsx")
     sheet_name = _safe_sheet_name(designer)
 
@@ -384,34 +386,43 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
     dt_pct   = (total_downtime_min / DAILY_BASE_MINUTES) * 100
     total_pct = total_cases_pct + dt_pct
 
-    # Load existing or create fresh workbook
+    os.makedirs(productions_dir, exist_ok=True)
+
+    # ── Load workbook (with retries) ─────────────────────────────────────────
     if os.path.exists(team_file):
-        try:
-            wb = openpyxl.load_workbook(team_file)
-        except Exception:
-            wb = openpyxl.Workbook()
-            # Remove default blank sheet
-            for s in list(wb.sheetnames):
-                del wb[s]
+        wb = None
+        last_exc = None
+        for attempt in range(5):
+            try:
+                wb = openpyxl.load_workbook(team_file)
+                break
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(0.8)
+        if wb is None:
+            # File exists but unreadable after retries — do NOT overwrite it.
+            raise RuntimeError(
+                f"Could not open _TeamProduction.xlsx after 5 attempts: {last_exc}"
+            )
     else:
         wb = openpyxl.Workbook()
+        # Remove the default blank sheet
         for s in list(wb.sheetnames):
             del wb[s]
 
-    # Find or create designer sheet
+    # ── Find or create designer sheet ────────────────────────────────────────
     if sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
     else:
         ws = wb.create_sheet(sheet_name)
         ws.sheet_view.showGridLines = False
-        # Header row
         headers = ["Date", "Week", "Cases (%)", "Downtime (%)",
                    "Total (%)", "Cases", "OT Cases"]
         for ci, h in enumerate(headers, 1):
             _hdr(ws.cell(1, ci), h)
         ws.freeze_panes = "A2"
 
-    # Check if this date row already exists (update) or append
+    # ── Find existing row for this date or append ────────────────────────────
     found_row = None
     for row_cells in ws.iter_rows(min_row=2):
         if row_cells[0].value == target_date:
@@ -419,20 +430,44 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
             break
 
     write_row = found_row if found_row else (ws.max_row + 1)
-    row_idx   = write_row - 2   # for alternating bg
+    row_idx   = write_row - 2
     bg = _GREY_ROW if row_idx % 2 == 0 else "FFFFFF"
 
-    _cell(ws.cell(write_row, 1), target_date,             align="center", bg=bg)
-    _cell(ws.cell(write_row, 2), f"W{week_num:02d}",      align="center", bg=bg)
-    _cell(ws.cell(write_row, 3), f"{total_cases_pct:.2f}%", align="right", bg=bg)
-    _cell(ws.cell(write_row, 4), f"{dt_pct:.2f}%",        align="right", bg=bg)
-    _cell(ws.cell(write_row, 5), f"{total_pct:.2f}%",     bold=True,
+    _cell(ws.cell(write_row, 1), target_date,               align="center", bg=bg)
+    _cell(ws.cell(write_row, 2), f"W{week_num:02d}",        align="center", bg=bg)
+    _cell(ws.cell(write_row, 3), f"{total_cases_pct:.2f}%", align="right",  bg=bg)
+    _cell(ws.cell(write_row, 4), f"{dt_pct:.2f}%",          align="right",  bg=bg)
+    _cell(ws.cell(write_row, 5), f"{total_pct:.2f}%",       bold=True,
           bg=_production_color(total_pct), color=_HEADER_FG, align="center")
     _cell(ws.cell(write_row, 6), n_cases,    align="center", bg=bg)
     _cell(ws.cell(write_row, 7), n_ot_cases, align="center", bg=bg)
 
     _autowidth(ws)
-    wb.save(team_file)
+    _save_atomic(wb, team_file)
+
+
+def _save_atomic(wb, final_path: str, retries: int = 5, delay: float = 0.8):
+    """Save workbook directly to final_path, retrying if OneDrive holds a lock.
+
+    We do NOT use a temp-file + os.replace() because that swaps the file inode,
+    which OneDrive interprets as two conflicting versions of the same file.
+    Instead we overwrite in-place with retries so the inode stays the same and
+    OneDrive just sees an updated file with no conflict.
+    """
+    import time
+    os.makedirs(os.path.dirname(final_path) or ".", exist_ok=True)
+    last_exc: Exception = RuntimeError("no attempts made")
+    for attempt in range(max(1, retries)):
+        try:
+            wb.save(final_path)
+            return                      # success
+        except PermissionError as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(delay)
+        except Exception:
+            raise
+    raise last_exc
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -493,12 +528,11 @@ def export_to_sharepoint(target_date: str | None = None) -> tuple[bool, str]:
     out_path  = os.path.join(day_dir, filename)
 
     try:
-        wb.save(out_path)
+        _save_atomic(wb, out_path)
     except Exception as e:
         return False, f"Could not save daily file:\n{e}"
 
     # ── Update shared team summary ────────────────────────────────────────────
-    team_err = ""
     try:
         _update_team_summary(
             productions_dir, designer, target_date,
@@ -506,11 +540,11 @@ def export_to_sharepoint(target_date: str | None = None) -> tuple[bool, str]:
             len(cases), len(ot_cases)
         )
     except Exception as e:
-        team_err = f"\n\n⚠ Team summary could not be updated: {e}"
+        # Return False so the caller knows something went wrong
+        return False, f"Daily report saved but team summary failed:\n{e}"
 
     return True, (
         f"Report saved:\n{out_path}"
         f"\n\nTeam summary updated:\n{productions_dir}\\_TeamProduction.xlsx"
         f"\n\nOneDrive will sync to SharePoint automatically."
-        + team_err
     )

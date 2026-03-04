@@ -71,7 +71,7 @@ def open_browser():
     """
     Launch Chrome via Selenium.
     Selenium 4.6+ automatically downloads the matching ChromeDriver to
-    ~/.cache/selenium/ (or %USERPROFILE%\.cache\selenium on Windows)
+    ~/.cache/selenium/ (or %USERPROFILE%\\.cache\\selenium on Windows)
     without needing admin rights.
 
     Returns (driver, None) on success, (None, error_str) on failure.

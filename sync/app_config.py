@@ -7,9 +7,42 @@ import os
 import getpass
 
 _CONFIG_PATH = os.path.join(os.path.expanduser("~"), "ProductionCalcApp", "config.json")
+def _default_export_folder() -> str:
+    """Try to auto-detect the Teams/SharePoint-synced Reports folder.
+
+    The Teams sync folder is always directly under C:\\Users\\<user>\\<OrgName>\\
+    and does NOT contain 'OneDrive' in its path — that would be the personal
+    OneDrive which is the wrong target.
+    """
+    import glob
+    user = getpass.getuser()
+
+    # Explicit known patterns for Teams SharePoint sync (no OneDrive in path)
+    candidates = [
+        os.path.join("C:\\Users", user, "Envista", "SPARK-GLB-OPS-ICON - Reports"),
+        os.path.join("C:\\Users", user, "Envista", "SPARK-GLB-OPS-ICON - Daily Production", "Reports"),
+    ]
+
+    # Glob for any direct Envista subfolder containing "Reports"
+    # Exclude anything with "OneDrive" in the path — that's personal OneDrive
+    for pattern in [
+        os.path.join("C:\\Users", user, "Envista", "*Reports*"),
+        os.path.join("C:\\Users", user, "Envista", "*", "Reports"),
+    ]:
+        for p in glob.glob(pattern):
+            if "onedrive" not in p.lower():
+                candidates.append(p)
+
+    for path in candidates:
+        if "onedrive" not in path.lower() and os.path.isdir(path):
+            return path
+    return ""
+
+
 _DEFAULTS = {
     "designer_name": getpass.getuser(),
-    "export_folder": "",   # filled by the user on first sync
+    "export_folder": "",   # auto-detected or filled by user on first sync
+    "auto_sync_hours": 1,  # 0 = disabled, otherwise sync every N hours
 }
 
 
@@ -23,6 +56,9 @@ def load_config() -> dict:
             cfg.update(stored)
         except Exception:
             pass
+    # Auto-detect export folder if not set yet
+    if not cfg.get("export_folder"):
+        cfg["export_folder"] = _default_export_folder()
     return cfg
 
 
