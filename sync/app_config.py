@@ -7,6 +7,22 @@ import os
 import getpass
 
 _CONFIG_PATH = os.path.join(os.path.expanduser("~"), "ProductionCalcApp", "config.json")
+
+def get_windows_display_name() -> str:
+    """Return the Windows full display name (e.g. 'Gerardo Lopez').
+    Falls back to the login username if not available."""
+    try:
+        import ctypes
+        GetUserNameEx = ctypes.windll.secur32.GetUserNameExW
+        NameDisplay = 3
+        size = ctypes.pointer(ctypes.c_ulong(0))
+        GetUserNameEx(NameDisplay, None, size)
+        buf = ctypes.create_unicode_buffer(size.contents.value)
+        if GetUserNameEx(NameDisplay, buf, size) and buf.value:
+            return buf.value
+    except Exception:
+        pass
+    return getpass.getuser()
 def _default_export_folder() -> str:
     """Try to auto-detect the Teams/SharePoint-synced Reports folder.
 
@@ -40,9 +56,10 @@ def _default_export_folder() -> str:
 
 
 _DEFAULTS = {
-    "designer_name": getpass.getuser(),
-    "export_folder": "",   # auto-detected or filled by user on first sync
-    "auto_sync_hours": 1,  # 0 = disabled, otherwise sync every N hours
+    "designer_name": "",        # empty = not yet confirmed by user
+    "name_confirmed": False,    # True once user has confirmed their name
+    "export_folder": "",
+    "auto_sync_hours": 0,
 }
 
 
@@ -59,6 +76,9 @@ def load_config() -> dict:
     # Auto-detect export folder if not set yet
     if not cfg.get("export_folder"):
         cfg["export_folder"] = _default_export_folder()
+    # Pre-fill designer name from Windows if never set
+    if not cfg.get("designer_name"):
+        cfg["designer_name"] = get_windows_display_name()
     return cfg
 
 
