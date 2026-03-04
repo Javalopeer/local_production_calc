@@ -2,9 +2,10 @@ import sys
 import os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QScrollArea, QCheckBox,
-    QPushButton, QMessageBox
+    QPushButton, QMessageBox, QLabel, QLineEdit, QDialog,
+    QVBoxLayout, QHBoxLayout, QDialogButtonBox
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QThread, QTimer
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut, QIcon
 from db.database import init_db
 from tabs.utils import load_units_eq_data
@@ -27,7 +28,29 @@ from tabs.tab_history import HistoryTab
 from tabs.tab_overtime import OvertimeTab
 from tabs.tab_standards import StandardsTab
 from tabs.tab_dashboard import DashboardTab
+from tabs.tab_sync import SyncTab
+from PySide6.QtWidgets import QDialog, QVBoxLayout as _QVBox
 
+class _SilentSyncThread(QThread):
+    """Run export_to_sharepoint silently in background after each case save."""
+    done = Signal(bool, str)
+
+    def run(self):
+        try:
+            from sync.sharepoint_sync import export_to_sharepoint, _OPENPYXL_OK
+            from sync.app_config import load_config
+            if not _OPENPYXL_OK:
+                return
+            cfg = load_config()
+            if not cfg.get("name_confirmed") or not cfg.get("export_folder"):
+                return  # silent skip if not configured yet
+            import os as _os
+            if not _os.path.isdir(cfg["export_folder"]):
+                return
+            ok, msg = export_to_sharepoint()
+            self.done.emit(ok, msg)
+        except Exception as e:
+            self.done.emit(False, str(e))
 class MainWindow(QMainWindow):
     themeChanged = Signal(bool)
     def __init__(self, dark_style="", light_style=""):
@@ -48,6 +71,9 @@ class MainWindow(QMainWindow):
         self.overtime_tab = OvertimeTab()
         self.standards_tab = StandardsTab()
         self.dashboard_tab = DashboardTab()
+        self._sync_dialog = None  # created lazily
+        self._sync_thread = None   # background sync thread
+        self._sync_status_label = None  # statusbar indicator
 
         # Connect a themeChanged signal to tabs so they update their local styles
         try:
@@ -101,6 +127,10 @@ class MainWindow(QMainWindow):
         
         # Connect standards tab to refresh Register and OT when standards change
         self.standards_tab.standards_updated.connect(self.on_standards_updated)
+
+        # Auto-sync silently after every case save
+        self.register_tab.case_saved.connect(self._silent_sync)
+        self.overtime_tab.ot_saved.connect(self._silent_sync)
         
         self.tabs.addTab(self.register_tab,  qta.icon('fa5s.edit',            color="#b8ceb1"), "Register")
         self.tabs.addTab(self.overtime_tab,   qta.icon('fa5s.clock',           color='#b8ceb1'), "OT")
@@ -177,9 +207,108 @@ class MainWindow(QMainWindow):
             btn_fdn.clicked.connect(lambda: self._change_font_size(-1))
             self.statusBar().addPermanentWidget(btn_fdn)
             self.statusBar().addPermanentWidget(btn_fup)
+
+            # Sync button
+            btn_sync = _QPB("⬆ Sync")
+            btn_sync.setFixedSize(54, 20)
+            btn_sync.setToolTip("Export to SharePoint")
+            btn_sync.setStyleSheet("font-size: 10px; padding: 1px 3px; font-weight: bold; background:#2E75B6; color:white; border-radius:3px;")
+            btn_sync.clicked.connect(self._open_sync_dialog)
+            self.statusBar().addPermanentWidget(btn_sync)
+
+            # Sync status indicator (last sync time)
+            self._sync_status_label = QLabel("")
+            self._sync_status_label.setStyleSheet("font-size: 10px; color: #888; padding-right: 4px;")
+            self.statusBar().addWidget(self._sync_status_label)
         except Exception:
             pass
 
+    def _open_sync_dialog(self):
+        """Open the Sync panel as a floating dialog."""
+        if self._sync_dialog is None:
+            self._sync_dialog = QDialog(self)
+            self._sync_dialog.setWindowTitle("SharePoint Sync")
+            self._sync_dialog.setMinimumSize(520, 480)
+            layout = QVBoxLayout(self._sync_dialog)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(SyncTab())
+        self._sync_dialog.show()
+        self._sync_dialog.raise_()
+        self._sync_dialog.activateWindow()
+    def _check_first_use(self):
+        """Show name confirmation dialog if the designer hasn't confirmed their name yet."""
+        try:
+            from sync.app_config import load_config, save_config, get_windows_display_name
+            cfg = load_config()
+            if cfg.get("name_confirmed"):
+                return
+            suggested = cfg.get("designer_name") or get_windows_display_name()
+
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Setup — Your Name")
+            dlg.setFixedWidth(380)
+            dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(20, 18, 20, 18)
+            layout.setSpacing(10)
+
+            lbl = QLabel("Your name will appear on all production reports.\n"
+                         "Confirm or change it:")
+            lbl.setWordWrap(True)
+            layout.addWidget(lbl)
+
+            name_edit = QLineEdit(suggested)
+            name_edit.setPlaceholderText("Your full name")
+            layout.addWidget(name_edit)
+
+            btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+            btns.accepted.connect(dlg.accept)
+            layout.addWidget(btns)
+
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                name = name_edit.text().strip() or suggested
+                cfg["designer_name"] = name
+                cfg["name_confirmed"] = True
+                save_config(cfg)
+        except Exception:
+            pass
+
+    def _silent_sync(self):
+        """Run export_to_sharepoint in background after a case is saved. No UI popup on success."""
+        if self._sync_thread and self._sync_thread.isRunning():
+            return  # skip if already running
+        self._sync_thread = _SilentSyncThread()
+        self._sync_thread.done.connect(self._on_silent_sync_done)
+        self._sync_thread.start()
+        if self._sync_status_label:
+            self._sync_status_label.setText("↻ syncing…")
+            self._sync_status_label.setStyleSheet("font-size: 10px; color: #aaa; padding-right: 4px;")
+
+    def _on_silent_sync_done(self, ok: bool, msg: str):
+        if not self._sync_status_label:
+            return
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M")
+        if ok:
+            self._sync_status_label.setText(f"⬆ {ts}")
+            self._sync_status_label.setStyleSheet("font-size: 10px; color: #66bb6a; padding-right: 4px;")
+            self._sync_status_label.setToolTip(f"Last sync: {ts}\n{msg}")
+            self._sync_status_label.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self._sync_status_label.setText(f"\u26a0 sync error")
+            self._sync_status_label.setStyleSheet(
+                "font-size: 10px; color: #ef9a9a; padding-right: 4px;"
+                "text-decoration: underline; cursor: pointer;")
+            self._sync_status_label.setToolTip(f"Click to see error detail\n\n{msg}")
+            self._sync_status_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            # Store msg so mousePressEvent can show it
+            self._sync_status_label.setProperty("sync_error", msg)
+            # Connect click only once
+            try:
+                self._sync_status_label.mousePressEvent = lambda e, m=msg: QMessageBox.warning(
+                    self, "Sync Error", m)
+            except Exception:
+                pass
     def on_standards_updated(self):
         """Reload standards and units_eq in Register, OT and Production tabs when standards are modified"""
         load_units_eq_data(force=True)  # Invalidate shared cache so all tabs pick up new values
@@ -572,6 +701,7 @@ if __name__ == "__main__":
     
     window = MainWindow(dark_style=DARK_STYLE, light_style=LIGHT_STYLE)
     window.show()
+    QTimer.singleShot(400, window._check_first_use)
 
     # Show a brief notice if the app was just self-installed
     if was_just_installed():
