@@ -2,8 +2,7 @@ import sys
 import os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QScrollArea, QCheckBox,
-    QPushButton, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QFileDialog, QMessageBox, QFormLayout
+    QPushButton, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut, QIcon
@@ -18,7 +17,7 @@ def _resource_path(relative: str) -> str:
     return os.path.join(base, relative)
 
 # ============== VERSION ==============
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 DB_SCHEMA_VERSION = 1
 # =====================================
 
@@ -94,6 +93,9 @@ class MainWindow(QMainWindow):
         self.production_tab.case_updated.connect(self.on_production_case_updated)
 
         # Connect OT tab to refresh when cases change
+        self.overtime_tab.ot_saved.connect(self.overtime_tab.load_ot_cases)
+        self.overtime_tab.ot_saved.connect(self.overtime_tab.load_daily_ot_production)
+        self.overtime_tab.ot_saved.connect(self.production_tab.load_data)
         self.overtime_tab.ot_saved.connect(self.history_tab.load_all_cases)
         self.overtime_tab.ot_saved.connect(self.dashboard_tab.refresh)
         
@@ -175,24 +177,6 @@ class MainWindow(QMainWindow):
             btn_fdn.clicked.connect(lambda: self._change_font_size(-1))
             self.statusBar().addPermanentWidget(btn_fdn)
             self.statusBar().addPermanentWidget(btn_fup)
-
-            # SharePoint / OneDrive sync button
-            btn_sync_cfg = QPushButton("⚙")
-            btn_sync_cfg.setFixedSize(22, 20)
-            btn_sync_cfg.setToolTip("Sync settings")
-            btn_sync_cfg.setStyleSheet(
-                "font-size: 11px; padding: 1px 2px;"
-            )
-            btn_sync_cfg.clicked.connect(self._open_sync_settings)
-            btn_sync = QPushButton("Sync ↑")
-            btn_sync.setFixedSize(54, 20)
-            btn_sync.setToolTip("Export to SharePoint / OneDrive")
-            btn_sync.setStyleSheet(
-                "font-size: 10px; padding: 1px 4px; font-weight: bold;"
-            )
-            btn_sync.clicked.connect(self._on_sync_clicked)
-            self.statusBar().addPermanentWidget(btn_sync_cfg)
-            self.statusBar().addPermanentWidget(btn_sync)
         except Exception:
             pass
 
@@ -234,8 +218,17 @@ class MainWindow(QMainWindow):
                 # clear editing marker on production tab
                 self.production_tab.editing_case_id = None
         else:
-            # Just refresh register tab (delete action)
-            self.register_tab.load_daily_production()
+            # Delete action — refresh whichever tab the deletion came from
+            mode = getattr(self.production_tab, 'current_mode', 'reg')
+            if mode == 'ot':
+                self.overtime_tab.load_ot_cases()
+                self.overtime_tab.load_daily_ot_production()
+                self.history_tab.load_all_cases()
+                self.dashboard_tab.refresh()
+            else:
+                self.register_tab.load_daily_production()
+                self.history_tab.load_all_cases()
+                self.dashboard_tab.refresh()
         
         # Refresh history tab
         self.history_tab.load_all_cases()
@@ -265,101 +258,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Clipboard import is only available in the Register and OT tabs.", 4000
             )
-
-    # ── SharePoint / OneDrive sync ────────────────────────────────────────────
-
-    def _on_sync_clicked(self):
-        """Called when the Sync button is pressed."""
-        from sync.app_config import load_config, is_configured
-        if not is_configured():
-            self._open_sync_settings(then_sync=True)
-        else:
-            self._do_sync()
-
-    def _open_sync_settings(self, then_sync=False):
-        """Show the Sync Settings dialog and optionally run sync after saving."""
-        from sync.app_config import load_config, save_config
-        cfg = load_config()
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Sync Settings — SharePoint / OneDrive")
-        dlg.setMinimumWidth(460)
-        layout = QVBoxLayout(dlg)
-
-        info = QLabel(
-            "Set your name and the OneDrive folder that is synced with your"
-            " supervisor's SharePoint.\n"
-            "The app will save an Excel report there — OneDrive uploads it automatically."
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        form = QFormLayout()
-        name_edit = QLineEdit(cfg.get("designer_name", ""))
-        name_edit.setPlaceholderText("Your full name as it will appear in the report")
-        form.addRow("Designer name:", name_edit)
-
-        folder_layout = QHBoxLayout()
-        folder_edit = QLineEdit(cfg.get("export_folder", ""))
-        folder_edit.setPlaceholderText("C:\\Users\\You\\OneDrive - ICON\\Production Reports")
-        browse_btn = QPushButton("Browse…")
-        browse_btn.setFixedWidth(80)
-        def browse():
-            path = QFileDialog.getExistingDirectory(
-                dlg, "Select OneDrive / SharePoint folder",
-                folder_edit.text() or ""
-            )
-            if path:
-                folder_edit.setText(path)
-        browse_btn.clicked.connect(browse)
-        folder_layout.addWidget(folder_edit)
-        folder_layout.addWidget(browse_btn)
-        form.addRow("Export folder:", folder_layout)
-        layout.addLayout(form)
-
-        btns = QHBoxLayout()
-        btns.addStretch()
-        btn_cancel = QPushButton("Cancel")
-        btn_save   = QPushButton("Save")
-        btn_save.setDefault(True)
-        btns.addWidget(btn_cancel)
-        btns.addWidget(btn_save)
-        layout.addLayout(btns)
-
-        btn_cancel.clicked.connect(dlg.reject)
-        def on_save():
-            cfg["designer_name"] = name_edit.text().strip()
-            cfg["export_folder"] = folder_edit.text().strip()
-            save_config(cfg)
-            dlg.accept()
-        btn_save.clicked.connect(on_save)
-
-        if dlg.exec() == QDialog.DialogCode.Accepted and then_sync:
-            self._do_sync()
-
-    def _do_sync(self):
-        """Run the Excel export and show result to user."""
-        from sync.sharepoint_sync import export_to_sharepoint
-        # Use the date selected in the register tab
-        try:
-            target_date = self.register_tab.case_date.date().toString("yyyy-MM-dd")
-        except Exception:
-            target_date = None
-
-        ok, msg = export_to_sharepoint(target_date)
-        if ok:
-            QMessageBox.information(self, "Sync Complete ✓", msg)
-        else:
-            box = QMessageBox(QMessageBox.Icon.Warning, "Sync Failed", msg, parent=self)
-            # If not configured yet, offer to open settings
-            if "not configured" in msg.lower() or "not found" in msg.lower():
-                box.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
-                box.addButton("OK", QMessageBox.ButtonRole.RejectRole)
-                box.exec()
-                if box.clickedButton().text() == "Open Settings":
-                    self._open_sync_settings(then_sync=True)
-            else:
-                box.exec()
 
 if __name__ == "__main__":
     # ── Self-installer: runs before Qt so no QApplication is needed yet ─────
