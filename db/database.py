@@ -5,18 +5,35 @@ import sys
 def get_base_path():
     """Get the base path for data files - works for both dev and PyInstaller exe"""
     if getattr(sys, 'frozen', False):
-        # Running as compiled exe
         return os.path.dirname(sys.executable)
     else:
-        # Running as script
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def get_data_path():
-    """Get the data directory path, creating it if needed"""
-    base = get_base_path()
-    data_dir = os.path.join(base, "data")
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
+    """Resolve the canonical DB folder: %OneDrive%\\ProductionCalcApp\\
+
+    OneDrive syncs this folder automatically, so the same cases.db is
+    accessible from every machine (work PC, home PC, .exe, dev script).
+
+    Fallback chain (in case OneDrive env var is missing):
+      1. %OneDrive%\\ProductionCalcApp
+      2. %USERPROFILE%\\OneDrive\\ProductionCalcApp
+      3. %APPDATA%\\ProductionCalcApp   (last resort, non-synced)
+
+    The folder is created if it doesn't exist, but the DB file itself is
+    NEVER deleted or overwritten — only opened/read/written by SQLite.
+    """
+    onedrive = (
+        os.environ.get("OneDrive")
+        or os.path.join(os.environ.get("USERPROFILE", ""), "OneDrive")
+    )
+    data_dir = os.path.join(onedrive, "ProductionCalcApp")
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except OSError:
+        # Absolute fallback: use AppData if OneDrive is unavailable
+        data_dir = os.path.join(os.environ.get("APPDATA", get_base_path()), "ProductionCalcApp")
+        os.makedirs(data_dir, exist_ok=True)
     return data_dir
 
 DB_PATH = os.path.join(get_data_path(), "cases.db")
