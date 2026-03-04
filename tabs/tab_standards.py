@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from .utils import get_resource_path, get_writable_path, load_units_eq_data
+from .utils import get_resource_path, get_writable_path, load_units_eq_data, DAILY_BASE_MINUTES
 
 
 def card(title, widget):
@@ -374,7 +374,7 @@ class StandardsTab(QWidget):
         
         # Tree widget for displaying standards
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Region / Type", "Std Time (min)", "Equiv. Units"])
+        self.tree.setHeaderLabels(["Region / Type", "Std Time (min)", "UE"])
         self.tree.setAlternatingRowColors(True)
         self.tree.setRootIsDecorated(True)
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
@@ -384,6 +384,7 @@ class StandardsTab(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        header.setStretchLastSection(False)
         self.tree.setColumnWidth(1, 130)
         self.tree.setColumnWidth(2, 120)
         
@@ -468,18 +469,59 @@ class StandardsTab(QWidget):
         self.populate_tree()
 
     def update_theme_labels(self, is_light: bool):
-        """Color tree widget text white in light mode or reset in dark mode."""
+        """Update tree widget colors when theme changes."""
         from PySide6.QtGui import QBrush, QColor
 
-        fg_color = QColor(255, 255, 255) if is_light else QColor(0, 0, 0)
-        bg_css = ' QTreeWidget { background-color: #e6e6e6; } QTreeWidget::item { background-color: #e6e6e6; }'
-        # save original stylesheet once
-        if not hasattr(self.tree, '_saved_style'):
-            self.tree._saved_style = self.tree.styleSheet() or ''
         if is_light:
-            self.tree.setStyleSheet(self.tree._saved_style + bg_css)
+            # Light mode: fondo claro, texto oscuro
+            fg_color = QColor(36, 32, 56)   # #242038
+            tree_css = """
+                QTreeWidget {
+                    background-color: #ffffff;
+                    border: 1px solid #CAC4CE;
+                    border-radius: 6px;
+                    color: #242038;
+                }
+                QTreeWidget::item {
+                    padding: 4px;
+                    color: #242038;
+                }
+                QTreeWidget::item:selected {
+                    background-color: #8D86C9;
+                    color: #ffffff;
+                }
+                QHeaderView::section {
+                    background-color: #8D86C9;
+                    color: #ffffff;
+                    border: 1px solid #CAC4CE;
+                    padding: 6px;
+                    font-weight: bold;
+                }
+            """
         else:
-            self.tree.setStyleSheet(self.tree._saved_style)
+            # Dark mode: fondo oscuro, texto claro
+            fg_color = QColor(230, 230, 230)  # #e6e6e6
+            tree_css = """
+                QTreeWidget {
+                    background-color: #2b2b2b;
+                    border: 1px solid #3c3c3c;
+                    border-radius: 6px;
+                }
+                QTreeWidget::item {
+                    padding: 4px;
+                }
+                QTreeWidget::item:selected {
+                    background-color: #3c3c3c;
+                }
+                QHeaderView::section {
+                    background-color: #3c3c3c;
+                    border: 1px solid #5a5a5a;
+                    padding: 6px;
+                    font-weight: bold;
+                }
+            """
+
+        self.tree.setStyleSheet(tree_css)
 
         def walk(item):
             for i in range(item.childCount()):
@@ -501,15 +543,21 @@ class StandardsTab(QWidget):
         self.tree.clear()
 
         for region, data in sorted(self.standards.items()):
+            # regional base rate at 100% efficiency (used for child UE calc)
+            reg_ue = self.units_eq.get(region, {})
+            base_rate = reg_ue.get("100", 0.0) if isinstance(reg_ue, dict) else 0.0
             region_item = QTreeWidgetItem([region, "", ""])
             region_item.setFont(0, QFont("Segoe UI", 11, QFont.Weight.Bold))
             region_item.setExpanded(True)
 
             if "Aligners" in data:
-                reg_ue = self.units_eq.get(region, {})
                 for case_type, time_value in sorted(data["Aligners"].items()):
-                    ue_val = reg_ue.get(case_type, "")
-                    ue_str = f"{ue_val:.2f}" if isinstance(ue_val, (int, float)) else ""
+                    # UE per single case = (std_time / 408.3) × regional_base_rate
+                    if base_rate and time_value:
+                        ue_per_case = (time_value / DAILY_BASE_MINUTES) * base_rate
+                        ue_str = f"{ue_per_case:.2f}"
+                    else:
+                        ue_str = ""
                     type_item = QTreeWidgetItem([case_type, f"{time_value:.2f}", ue_str])
                     type_item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
                     type_item.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
@@ -621,6 +669,8 @@ class StandardsTab(QWidget):
         ok1 = self.save_standards()
         ok2 = self.save_units_eq()
         if ok1 and ok2:
+            # Bust the module-level cache so every tab reloads fresh values
+            load_units_eq_data(force=True)
             QMessageBox.information(self, "Success", "Standards saved successfully!")
             self.standards_updated.emit()
         else:
@@ -671,6 +721,7 @@ class StandardsTab(QWidget):
     def reload_standards(self):
         """Reload standards and units_eq from file"""
         self.load_standards()
+        load_units_eq_data(force=True)   # bust cache before reloading
         self.load_units_eq()
         self.populate_tree()
         QMessageBox.information(self, "Reloaded", "Standards reloaded from file.")

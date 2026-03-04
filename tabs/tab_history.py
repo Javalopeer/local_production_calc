@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor, QFont, QBrush
 from db.database import get_connection
+from .utils import load_units_eq_data
 import csv
 
 try:
@@ -13,6 +14,9 @@ try:
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
     from openpyxl.chart import BarChart, PieChart, Reference
     from openpyxl.utils.dataframe import dataframe_to_rows
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+    from openpyxl.utils import get_column_letter
+
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
@@ -23,6 +27,7 @@ class HistoryTab(QWidget):
         super().__init__()
         self.all_cases = []
         self.filtered_cases = []
+        self.units_eq = load_units_eq_data()
         self.current_page = 1
         self.items_per_page = 50
         self.total_pages = 1
@@ -393,7 +398,13 @@ class HistoryTab(QWidget):
         total_cases = len(filtered)
         total_time = sum((c[6] or 0) for c in filtered)
         total_value = sum((c[10] or 0) for c in filtered)
-        self.stats_label.setText(f"Total: {total_cases} | Time: {total_time:.0f}m | Value: {total_value:.2f}%")
+        total_ue = sum(
+            (c[10] or 0) * self.units_eq.get(c[3], {}).get("100", 0.0) / 100.0
+            for c in filtered
+        )
+        self.stats_label.setText(
+            f"Total: {total_cases} | Time: {total_time:.0f}m | Value: {total_value:.2f}% | UE: {total_ue:.2f}"
+        )
 
         for idx, case in enumerate(page_items):
             # Zebra striping
@@ -478,94 +489,117 @@ class HistoryTab(QWidget):
             self.table.setItem(idx, 8, value_item)
 
     def export_csv(self):
-        """Export to Excel with charts or CSV as fallback"""
+        """Export to Excel with native table filters, or CSV as fallback"""
         if OPENPYXL_AVAILABLE:
             self.export_excel()
         else:
             self.export_csv_simple()
     
     def export_excel(self):
-        """Export to Excel with formatting and charts"""
+        """Export to Excel with native table filters and Summary sheet."""
+        _ueq = self.units_eq
+        COLUMNS = [
+            ("Case ID",      lambda c: c[1]),
+            ("Doctor",       lambda c: c[2] or "-"),
+            ("Region",       lambda c: c[3]),
+            ("Type",         lambda c: c[4]),
+            ("Date",         lambda c: c[5]),
+            ("Time (min)",   lambda c: round(c[6], 1)),
+            ("Std (min)",    lambda c: round(c[7], 1)),
+            ("Efficiency %", lambda c: round(c[8], 1)),
+            ("Status",       lambda c: c[9]),
+            ("Case Value %", lambda c: round(c[10], 2)),
+            ("UE",           lambda c, _u=_ueq: round((c[10] or 0) * _u.get(c[3], {}).get("100", 0.0) / 100.0, 2)),
+        ]
+        DATA_START = 1  # table header row (row 1)
+
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Export Report", "", "Excel Files (*.xlsx)"
         )
         if not file_path:
             return
-        
         if not file_path.endswith('.xlsx'):
             file_path += '.xlsx'
-        
+
+        export_cases = self.filtered_cases
+
         try:
             wb = Workbook()
-            
-            # ===== SHEET 1: DATA =====
+
+            # ── Sheet 1: Cases Data ─────────────────────────────────────────────
             ws_data = wb.active
             ws_data.title = "Cases Data"
-            
-            # Header styles
-            header_font = Font(bold=True, color="FFFFFF", size=11)
-            header_fill = PatternFill(start_color="4A90D9", end_color="4A90D9", fill_type="solid")
-            header_alignment = Alignment(horizontal="center", vertical="center")
+
+            # Styles
+            ok_fill     = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+            low_fill    = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            header_font = Font(bold=True, color="FFFFFF", size=10)
+            hdr_fill    = PatternFill(start_color="2E75B6", end_color="2E75B6", fill_type="solid")
             thin_border = Border(
-                left=Side(style='thin'),
-                right=Side(style='thin'),
-                top=Side(style='thin'),
-                bottom=Side(style='thin')
+                left=Side(style='thin'), right=Side(style='thin'),
+                top=Side(style='thin'),  bottom=Side(style='thin'),
             )
-            
-            # Headers
-            headers = ["Case ID", "Doctor", "Region", "Type", "Date", 
-                      "Time (min)", "Std (min)", "Efficiency %", "Status", "Case Value %"]
-            for col, header in enumerate(headers, 1):
-                cell = ws_data.cell(row=1, column=col, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
-                cell.border = thin_border
-            
-            # Data rows with conditional formatting
-            ok_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-            low_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-            center_align = Alignment(horizontal="center")
-            
-            for row_idx, case in enumerate(self.filtered_cases, 2):
-                # case: id, case_id, doctor, region, tipo_caso, fecha, tiempo_real, std_time, efficiency, estado, case_value
-                ws_data.cell(row=row_idx, column=1, value=case[1]).alignment = center_align
-                ws_data.cell(row=row_idx, column=2, value=case[2] or "-").alignment = center_align
-                ws_data.cell(row=row_idx, column=3, value=case[3]).alignment = center_align
-                ws_data.cell(row=row_idx, column=4, value=case[4]).alignment = center_align
-                ws_data.cell(row=row_idx, column=5, value=case[5]).alignment = center_align
-                ws_data.cell(row=row_idx, column=6, value=round(case[6], 1)).alignment = center_align
-                ws_data.cell(row=row_idx, column=7, value=round(case[7], 1)).alignment = center_align
-                
-                eff_cell = ws_data.cell(row=row_idx, column=8, value=round(case[8], 1))
-                eff_cell.alignment = center_align
-                
-                status_cell = ws_data.cell(row=row_idx, column=9, value=case[9])
-                status_cell.alignment = center_align
-                
-                ws_data.cell(row=row_idx, column=10, value=round(case[10], 2)).alignment = center_align
-                
-                # Color row based on status
+            center  = Alignment(horizontal="center", vertical="center")
+            ncols   = len(COLUMNS)
+            last_col = get_column_letter(ncols)
+
+            # ── Row 1: Table headers ──────────────────────────────────────────
+            ws_data.row_dimensions[DATA_START].height = 18
+            for col_pos, (label, _) in enumerate(COLUMNS, 1):
+                cell = ws_data.cell(DATA_START, col_pos, label)
+                cell.font      = header_font
+                cell.fill      = hdr_fill
+                cell.alignment = center
+                cell.border    = thin_border
+
+            # ── Rows 2+: Data ─────────────────────────────────────────────────
+            for row_idx, case in enumerate(export_cases, DATA_START + 1):
                 row_fill = ok_fill if case[9] == "OK" else low_fill
-                for col in range(1, 11):
-                    ws_data.cell(row=row_idx, column=col).fill = row_fill
-                    ws_data.cell(row=row_idx, column=col).border = thin_border
-            
-            # Auto-adjust column widths
-            column_widths = [12, 15, 12, 10, 12, 12, 12, 14, 10, 14]
-            for col, width in enumerate(column_widths, 1):
-                ws_data.column_dimensions[chr(64 + col)].width = width
+                for col_pos, (_, extractor) in enumerate(COLUMNS, 1):
+                    cell = ws_data.cell(row_idx, col_pos, extractor(case))
+                    cell.alignment = center
+                    cell.fill      = row_fill
+                    cell.border    = thin_border
+
+            # ── Excel Table (with native filter arrows) ────────────────────────
+            last_data_row = max(DATA_START + len(export_cases), DATA_START + 1)
+            tbl_ref = f"A{DATA_START}:{last_col}{last_data_row}"
+            tbl = Table(displayName="CasesData", ref=tbl_ref)
+            tbl.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium9",
+                showRowStripes=True,
+                showFirstColumn=False,
+                showLastColumn=False,
+                showColumnStripes=False,
+            )
+            ws_data.add_table(tbl)
+
+            # Freeze header row
+            ws_data.freeze_panes = "A2"
+
+            # ── Auto-fit column widths ────────────────────────────────────────
+            for ci in range(1, ncols + 1):
+                col_letter = get_column_letter(ci)
+                max_len = 10
+                for ri in range(DATA_START, last_data_row + 1):
+                    try:
+                        val = ws_data.cell(ri, ci).value
+                        cl = len(str(val)) if val is not None else 0
+                        if cl > max_len:
+                            max_len = cl
+                    except Exception:
+                        pass
+                ws_data.column_dimensions[col_letter].width = max_len + 3
             
             # ===== SHEET 2: SUMMARY & CHARTS =====
             ws_charts = wb.create_sheet("Summary & Charts")
             
             # Calculate summary statistics
-            total_cases = len(self.filtered_cases)
-            ok_cases = sum(1 for c in self.filtered_cases if c[9] == "OK")
+            total_cases = len(export_cases)
+            ok_cases = sum(1 for c in export_cases if c[9] == "OK")
             low_cases = total_cases - ok_cases
-            avg_efficiency = sum(c[8] for c in self.filtered_cases) / total_cases if total_cases > 0 else 0
-            total_value = sum(c[10] for c in self.filtered_cases)
+            avg_efficiency = sum(c[8] for c in export_cases) / total_cases if total_cases > 0 else 0
+            total_value = sum(c[10] for c in export_cases)
             
             # Summary section
             ws_charts['A1'] = "PRODUCTION SUMMARY REPORT"
@@ -587,7 +621,7 @@ class HistoryTab(QWidget):
             
             # Production by Region
             region_stats = {}
-            for case in self.filtered_cases:
+            for case in export_cases:
                 region = case[3]
                 if region not in region_stats:
                     region_stats[region] = {"count": 0, "value": 0, "efficiency": []}

@@ -721,7 +721,7 @@ class DashboardTab(QWidget):
             where += " AND tipo_caso = ?"
             params.append(tipo)
         sql = (
-            f"SELECT fecha, region, tipo_caso, COUNT(*) AS cnt, SUM(efficiency) AS sum_eff "
+            f"SELECT fecha, region, tipo_caso, COUNT(*) AS cnt, SUM(efficiency) AS sum_eff, SUM(case_value) AS sum_cv "
             f"FROM {table} "
             f"WHERE {where} "
             f"GROUP BY fecha, region, tipo_caso "
@@ -733,8 +733,9 @@ class DashboardTab(QWidget):
             conn = get_connection()
             cur  = conn.cursor()
             cur.execute(sql, params)
-            for fecha, reg, tipo_c, cnt, sum_eff in cur.fetchall():
-                ue = get_units_per_case(units_eq, reg or "", tipo_c or "") * (cnt or 0)
+            for fecha, reg, tipo_c, cnt, sum_eff, sum_cv in cur.fetchall():
+                daily_rate = get_units_per_case(units_eq, reg or "", tipo_c or "")
+                ue = (sum_cv or 0.0) * daily_rate / 100.0
                 result.append({
                     "fecha":    fecha,
                     "region":   reg,
@@ -839,15 +840,16 @@ class DashboardTab(QWidget):
             conn = get_connection()
             cur  = conn.cursor()
             cur.execute(
-                "SELECT region, tipo_caso, COUNT(*), SUM(efficiency) "
+                "SELECT region, tipo_caso, COUNT(*), SUM(efficiency), SUM(case_value) "
                 "FROM cases WHERE fecha BETWEEN ? AND ? "
                 "GROUP BY region, tipo_caso",
                 [d_from, d_to],
             )
-            for reg, tipo_c, cnt, s_eff in cur.fetchall():
+            for reg, tipo_c, cnt, s_eff, sum_cv in cur.fetchall():
                 total_cases += cnt or 0
                 sum_eff     += s_eff or 0.0
-                total_ue    += get_units_per_case(units_eq, reg or "", tipo_c or "") * (cnt or 0)
+                daily_rate   = get_units_per_case(units_eq, reg or "", tipo_c or "")
+                total_ue    += (sum_cv or 0.0) * daily_rate / 100.0
             conn.close()
         except Exception:
             pass

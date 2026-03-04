@@ -419,6 +419,11 @@ class RegisterTab(QWidget):
         if not region or not tipo:
             return
 
+        # Auto-set end time to now
+        self.end_time.blockSignals(True)
+        self.end_time.setTime(QTime.currentTime())
+        self.end_time.blockSignals(False)
+
         std_time = self.standards[region]["Aligners"][tipo]
         case_value = self.calculate_case_value(std_time)
 
@@ -472,7 +477,7 @@ class RegisterTab(QWidget):
         
         # Get cases by region+type for equivalent units calculation (only count_production = 1)
         cursor.execute("""
-            SELECT region, tipo_caso, COUNT(*)
+            SELECT region, tipo_caso, SUM(case_value)
             FROM cases
             WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
             GROUP BY region, tipo_caso
@@ -481,11 +486,12 @@ class RegisterTab(QWidget):
         region_cases = cursor.fetchall()
         conn.close()
 
-        # Calculate equivalent units: count × UE per case type
+        # Calculate equivalent units: UE = sum(case_value%) × daily_rate / 100
         total_equivalent_units = 0.0
-        for region, case_type, count in region_cases:
-            if count:
-                total_equivalent_units += count * self.get_units_per_case(region, case_type)
+        for region, case_type, sum_cv in region_cases:
+            if sum_cv:
+                daily_rate = self.get_units_per_case(region, case_type)
+                total_equivalent_units += sum_cv * daily_rate / 100.0
         
         # Get total downtime and calculate as production value
         total_downtime = self.get_daily_downtime(selected_date)

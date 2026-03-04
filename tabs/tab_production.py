@@ -36,9 +36,10 @@ class ProductionTab(QWidget):
         return _ue_lookup(self.units_eq, region, case_type)
 
     def calculate_units_eq(self, region, case_value, case_type=None):
-        """Return UE for one case. Prefers per-type lookup; falls back to region average."""
+        """Return UE for one case.  UE = case_value% × daily_rate / 100."""
         try:
-            return self.get_units_per_case(region, case_type)
+            daily_rate = self.get_units_per_case(region, case_type)
+            return (case_value or 0.0) * daily_rate / 100.0
         except Exception:
             return 0.0
 

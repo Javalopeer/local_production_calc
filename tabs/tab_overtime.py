@@ -4,9 +4,8 @@ import sys
 from PySide6.QtWidgets import (
     QApplication, QWidget, QFormLayout, QComboBox, QLineEdit,
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QDateEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit, QProgressBar, QScrollArea, QDoubleSpinBox, QSpinBox, QFrame
+    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit, QProgressBar, QScrollArea, QDoubleSpinBox, QFrame
 )
-from PySide6.QtWidgets import QAbstractSpinBox
 from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QColor, QBrush
 from db.database import get_connection
@@ -280,16 +279,18 @@ class OvertimeTab(QWidget):
         # hide the overall quick summary — we'll show per-type info next to each spinbox
         self.estimate_label.hide()
 
-        # counts per type area
-        self.estimate_counts_layout = QFormLayout()
+        # counts per type area (VBox so we can add explicit styled rows)
+        self.estimate_counts_layout = QVBoxLayout()
         self.estimate_counts_layout.setSpacing(6)
+        self.estimate_counts_layout.setContentsMargins(0, 0, 0, 0)
         self.estimate_counts_widget = QWidget()
         self.estimate_counts_widget.setLayout(self.estimate_counts_layout)
         # hide until user presses Estimate
         self.estimate_counts_widget.hide()
 
-        # per-type info labels (populated in update_estimate_types)
+        # per-type labels (populated in update_estimate_types)
         self.estimate_info_labels = {}
+        self.estimate_type_labels = {}  # type-name + capacity labels
 
         estimate_panel_layout.addWidget(self.ot_hours_spin)
         estimate_panel_layout.addWidget(estimate_btn)
@@ -587,6 +588,11 @@ class OvertimeTab(QWidget):
         if not region or not tipo:
             return
 
+        # Auto-set end time to now
+        self.end_time.blockSignals(True)
+        self.end_time.setTime(QTime.currentTime())
+        self.end_time.blockSignals(False)
+
         std_time = self.standards[region]["Aligners"][tipo]
         case_value = self.calculate_case_value(std_time)
 
@@ -637,7 +643,7 @@ class OvertimeTab(QWidget):
         
         # Get cases by region+type for equivalent units calculation (only count_production = 1)
         cursor.execute("""
-            SELECT region, tipo_caso, COUNT(*)
+            SELECT region, tipo_caso, COUNT(*), SUM(case_value)
             FROM ot_cases
             WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
             GROUP BY region, tipo_caso
@@ -646,11 +652,13 @@ class OvertimeTab(QWidget):
         region_cases = cursor.fetchall()
         conn.close()
 
-        # Calculate equivalent units: count × UE per case type
+        # Calculate equivalent units: sum(case_value%) × base_rate / 100
+        # (same formula as each row in the table: case_value * base_rate / 100)
         total_equivalent_units = 0.0
-        for region, case_type, count in region_cases:
-            if count:
-                total_equivalent_units += count * self.calculate_units_eq(region, case_type)
+        for region, case_type, count, sum_case_value in region_cases:
+            if count and sum_case_value:
+                base_rate = self.calculate_units_eq(region, case_type)
+                total_equivalent_units += sum_case_value * base_rate / 100.0
         
         self.daily_ot_label.setText(f"OT Production: {total_ot:.2f}%")
         self.ot_units_label.setText(f"OT Equivalent Units: {total_equivalent_units:.2f}")
@@ -691,39 +699,65 @@ class OvertimeTab(QWidget):
         total_equivalent_units = 0.0
         used_minutes = 0.0
 
-        for t, sb in self.estimate_counts.items():
-            cnt = int(sb.value())
+        for t, cnt in self.estimate_counts.items():
             total_cases += cnt
             # use resolved standards key stored during update_estimate_types
             key = getattr(self, 'estimate_key_map', {}).get(t)
             std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
             case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
-            units_per_case = self.calculate_units_eq(region, key)
+            daily_rate = self.calculate_units_eq(region, key)
             total_case_value += cnt * case_value_per
-            total_equivalent_units += cnt * units_per_case
+            # UE = case_value% × daily_rate / 100  (same formula as Register tab)
+            total_equivalent_units += cnt * case_value_per * daily_rate / 100.0
             used_minutes += cnt * float(std_time or 0)
 
         tu_percent = (used_minutes / minutes) * 100.0 if minutes > 0 else 0.0
 
-        # Update per-type info labels with "% · TU · UE"
+        # Query today's OT done counts by case type for the selected region
+        selected_date = self.case_date.date().toString("yyyy-MM-dd")
+        done_by_key: dict = {}
+        try:
+            _conn = get_connection()
+            _cur = _conn.cursor()
+            _cur.execute(
+                "SELECT tipo_caso, COUNT(*) FROM ot_cases WHERE fecha = ? AND region = ? GROUP BY tipo_caso",
+                (selected_date, region),
+            )
+            for _tipo, _cnt in _cur.fetchall():
+                done_by_key[_tipo] = int(_cnt)
+            _conn.close()
+        except Exception:
+            pass
+
+        # Update per-type info labels with std time, done/remaining and UE
         minutes = minutes if minutes > 0 else 1.0
-        for t, sb in self.estimate_counts.items():
-            cnt = int(sb.value())
+        for t, cnt in self.estimate_counts.items():
             key = getattr(self, 'estimate_key_map', {}).get(t)
             std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
             case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
-            units_per_case = self.calculate_units_eq(region, key)
-            cases_value_total = cnt * case_value_per
-            used_min_type = cnt * float(std_time or 0)
-            tu_type = (used_min_type / minutes) * 100.0
-            equiv_units_type = cnt * units_per_case
+            daily_rate = self.calculate_units_eq(region, key)
+            # UE per type = cnt × case_value% × daily_rate / 100
+            equiv_units_type = cnt * case_value_per * daily_rate / 100.0
+            done_count = done_by_key.get(key, 0) if key else 0
+            remaining = max(0, cnt - done_count)
             info_label = self.estimate_info_labels.get(t)
             if info_label:
-                info_label.setText(f"{cases_value_total:.2f}% · TU {tu_type:.1f}% · {equiv_units_type:.2f} UE")
+                std_str = f"{std_time:.0f} min" if std_time else "—"
+                info_label.setText(
+                    f"\u23f1 {std_str}  |  \u2713{done_count} hechos · {remaining} faltan  |  {equiv_units_type:.2f} UE"
+                )
 
         # clear overall label (we use per-type labels now)
         self.estimate_label.clear()
-        return
+
+        # Apply correct theme colors to newly created/updated info labels
+        try:
+            from PySide6.QtGui import QPalette
+            _pal = QApplication.instance().palette()
+            _is_light = _pal.color(QPalette.ColorRole.Window).lightness() > 128
+            self.update_theme_labels(_is_light)
+        except Exception:
+            pass
 
     def update_estimate_types(self):
         """Rebuild the per-type spinboxes based on selected region."""
@@ -785,38 +819,36 @@ class OvertimeTab(QWidget):
             # store mapping for later calculations
             self.estimate_key_map[t] = found_key
             max_cases = int((minutes // float(std_time)) if std_time and minutes > 0 else 0)
-            sb = QSpinBox()
-            # remove up/down buttons for a compact numeric field and make it non-editable
-            sb.setButtonSymbols(QAbstractSpinBox.NoButtons)
-            sb.setReadOnly(True)
-            sb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            sb.setRange(0, max(1, max_cases))
-            # default to max possible so user sees capacity
-            sb.setValue(max_cases)
-            sb.setMaximumWidth(90)
 
-            # per-type info label placed below spinbox
+            # store max capacity as plain int (no spinbox needed — it was read-only)
+            self.estimate_counts[t] = max_cases
+
+            # Build an explicit card row so labels are always themed correctly
+            display_name = found_key or t
+            row_frame = QFrame()
+            row_frame.setFrameShape(QFrame.Shape.StyledPanel)
+            row_layout = QVBoxLayout(row_frame)
+            row_layout.setContentsMargins(6, 4, 6, 4)
+            row_layout.setSpacing(2)
+
+            type_lbl = QLabel(f"<b>{display_name}</b> &nbsp;·&nbsp; {max_cases} posibles")
+            type_lbl.setStyleSheet("font-size:11px; color:#e6e6e6;")
+
             info_label = QLabel("")
-            info_label.setStyleSheet("font-size:11px; color:#222222;")
-            info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-            # container widget to hold spinbox and info label (vertical)
-            container = QWidget()
-            v = QVBoxLayout()
-            v.setContentsMargins(0, 0, 0, 0)
-            v.setSpacing(4)
-            v.addWidget(sb)
-            v.addWidget(info_label)
-            container.setLayout(v)
+            info_label.setStyleSheet("font-size:10px; color:#bdbdbd;")
+            info_label.setWordWrap(True)
 
-            self.estimate_counts_layout.addRow(f"{t}", container)
-            self.estimate_counts[t] = sb
+            row_layout.addWidget(type_lbl)
+            row_layout.addWidget(info_label)
+
+            self.estimate_counts_layout.addWidget(row_frame)
+            self.estimate_type_labels[t] = type_lbl
             self.estimate_info_labels[t] = info_label
 
-        # After building spinboxes, compute quick summary (without UE)
+        # After building rows, compute quick summary
         total_case_value = 0.0
         used_minutes = 0.0
-        for t, sb in self.estimate_counts.items():
-            cnt = int(sb.value())
+        for t, cnt in self.estimate_counts.items():
             key = self.estimate_key_map.get(t)
             std_time = self.standards[region]["Aligners"].get(key, 0) if key else 0
             case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
@@ -824,7 +856,6 @@ class OvertimeTab(QWidget):
             used_minutes += cnt * float(std_time or 0)
 
         tu_percent = (used_minutes / minutes) * 100.0 if minutes > 0 else 0.0
-        # update label without UE (UE shown only on explicit Estimate) — hide case count
         self.estimate_label.setText(f"{total_case_value:.2f}% · TU {tu_percent:.1f}%")
 
     def animate_ot_progress_bar(self, target_value):
@@ -937,7 +968,14 @@ class OvertimeTab(QWidget):
             # per-type info labels
             for lbl in getattr(self, 'estimate_info_labels', {}).values():
                 try:
-                    lbl.setStyleSheet(f"font-size:11px; color:{info_color};")
+                    lbl.setStyleSheet(f"font-size:10px; color:{info_color};")
+                except Exception:
+                    pass
+            # per-type name labels
+            type_lbl_color = '#ffffff' if not light_mode else '#222222'
+            for lbl in getattr(self, 'estimate_type_labels', {}).values():
+                try:
+                    lbl.setStyleSheet(f"font-size:11px; color:{type_lbl_color};")
                 except Exception:
                     pass
             # Update table cell foregrounds to match theme (light text on dark backgrounds, dark on light)
@@ -1112,8 +1150,10 @@ class OvertimeTab(QWidget):
             value_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 6, value_item)
             
-            # Units Equivalent - looked up per case type
-            units_eq = self.calculate_units_eq(region, tipo)
+            # Units Equivalent: case_value% × base_rate / 100
+            # (same formula as Register/Production tabs)
+            base_rate = self.calculate_units_eq(region, tipo)
+            units_eq = case_value * base_rate / 100.0
             units_eq_item = QTableWidgetItem(f"{units_eq:.2f}")
             units_eq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             units_eq_item.setBackground(bg_brush)
@@ -1307,6 +1347,13 @@ class OvertimeTab(QWidget):
         self.end_time.blockSignals(False)
         
         self.ot_saved.emit()
+
+        # Refresh estimate panel so done/remaining counts update automatically
+        if hasattr(self, 'estimate_counts_widget') and self.estimate_counts_widget.isVisible():
+            try:
+                self.calculate_for_hours()
+            except Exception:
+                pass
 
     def edit_selected_ot_case(self):
         """Load selected OT case into form for editing"""
