@@ -19,7 +19,12 @@ from PySide6.QtCore import QDate, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush
 
 from db.database import get_connection
-from .utils import get_resource_path, load_units_eq_data, get_units_per_case
+from .utils import (
+    get_resource_path,
+    load_units_eq_data,
+    get_units_per_case,
+    calculate_equivalent_units,
+)
 
 # ---------------------------------------------------------------------------
 # Palette
@@ -734,8 +739,13 @@ class DashboardTab(QWidget):
             cur  = conn.cursor()
             cur.execute(sql, params)
             for fecha, reg, tipo_c, cnt, sum_eff, sum_cv in cur.fetchall():
-                daily_rate = get_units_per_case(units_eq, reg or "", tipo_c or "")
-                ue = (sum_cv or 0.0) * daily_rate / 100.0
+                ue = calculate_equivalent_units(
+                    units_eq,
+                    reg or "",
+                    tipo_c or "",
+                    (sum_cv or 0.0),
+                    count=(cnt or 0),
+                )
                 result.append({
                     "fecha":    fecha,
                     "region":   reg,
@@ -848,8 +858,13 @@ class DashboardTab(QWidget):
             for reg, tipo_c, cnt, s_eff, sum_cv in cur.fetchall():
                 total_cases += cnt or 0
                 sum_eff     += s_eff or 0.0
-                daily_rate   = get_units_per_case(units_eq, reg or "", tipo_c or "")
-                total_ue    += (sum_cv or 0.0) * daily_rate / 100.0
+                total_ue    += calculate_equivalent_units(
+                    units_eq,
+                    reg or "",
+                    tipo_c or "",
+                    (sum_cv or 0.0),
+                    count=(cnt or 0),
+                )
             conn.close()
         except Exception:
             pass
