@@ -42,6 +42,7 @@ def get_writable_path(relative_path: str) -> str:
 # ── Production formula ────────────────────────────────────────────────────────
 
 DAILY_BASE_MINUTES: float = 408.3  # single source of truth for the base
+DAILY_TARGET_EQ_UNITS: float = 15.0
 
 
 def calculate_case_value(std_time: float) -> float:
@@ -52,6 +53,23 @@ def calculate_case_value(std_time: float) -> float:
     if not std_time:
         return 0.0
     return (std_time / DAILY_BASE_MINUTES) * 100
+
+
+def calculate_downtime_equivalent_units(
+    downtime_minutes: float,
+    target_daily_units: float = DAILY_TARGET_EQ_UNITS,
+) -> float:
+    """Convert downtime minutes to equivalent units.
+
+    Formula: (downtime_minutes / DAILY_BASE_MINUTES) * target_daily_units
+    """
+    try:
+        minutes = float(downtime_minutes or 0.0)
+    except (TypeError, ValueError):
+        minutes = 0.0
+    if minutes <= 0:
+        return 0.0
+    return (minutes / DAILY_BASE_MINUTES) * float(target_daily_units)
 
 
 # ── Units Equivalent data (module-level cache) ────────────────────────────────
@@ -130,3 +148,75 @@ def get_units_per_case(
             return _lookup(reg_dict)
 
     return 0.0
+
+
+def _safe_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_region_units(
+    units_eq: Dict[str, Dict[str, float]],
+    region: str,
+) -> Dict[str, float] | None:
+    if not region:
+        return None
+
+    if region in units_eq and isinstance(units_eq[region], dict):
+        return units_eq[region]
+
+    alt = region.replace(" & Canada", "").replace("Regions ", "").strip()
+    rnorm = _norm(region)
+
+    for key, reg_dict in units_eq.items():
+        if not isinstance(reg_dict, dict):
+            continue
+        key_alt = key.replace("Regions ", "").strip()
+        if key_alt == alt or key == alt:
+            return reg_dict
+
+    for key, reg_dict in units_eq.items():
+        if not isinstance(reg_dict, dict):
+            continue
+        knorm = _norm(key)
+        if knorm and (knorm in rnorm or rnorm in knorm):
+            return reg_dict
+
+    return None
+
+
+def calculate_equivalent_units(
+    units_eq: Dict[str, Dict[str, float]],
+    region: str,
+    case_type: str | None,
+    case_value: float,
+    count: int = 1,
+) -> float:
+    """Calculate equivalent units supporting both UE models.
+
+    Supported models:
+      1) Legacy base-rate model: region has keys like "100", "95", ...
+         UE = case_value% * base_rate / 100
+      2) Per-case model: region has explicit keys by type (e.g. "Primary": 1.15)
+         UE = count * per_case_ue
+    """
+    reg_dict = _resolve_region_units(units_eq, region)
+    if not reg_dict:
+        return 0.0
+
+    safe_count = max(1, int(count or 1))
+
+    if case_type and case_type in reg_dict:
+        explicit = _safe_float(reg_dict.get(case_type))
+        if explicit is not None:
+            return safe_count * explicit
+
+    base_rate = _safe_float(reg_dict.get("100"))
+    if base_rate is None:
+        fallback = get_units_per_case(units_eq, region, case_type)
+        base_rate = _safe_float(fallback) or 0.0
+
+    cv = _safe_float(case_value) or 0.0
+    return safe_count * cv * base_rate / 100.0
