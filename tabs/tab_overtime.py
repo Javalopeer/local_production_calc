@@ -6,12 +6,18 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QDateEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit, QProgressBar, QScrollArea, QDoubleSpinBox, QFrame
 )
-from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import QFont, QColor, QBrush
 from db.database import get_connection
 from datetime import datetime
 from .toggle_switch import ToggleSwitch
-from .utils import get_resource_path, calculate_case_value as _calc_cv, load_units_eq_data, get_units_per_case as _ue_lookup
+from .utils import (
+    get_resource_path,
+    calculate_case_value as _calc_cv,
+    load_units_eq_data,
+    get_units_per_case as _ue_lookup,
+    calculate_equivalent_units,
+)
 
 
 def card(title, widget):
@@ -60,6 +66,8 @@ class OvertimeTab(QWidget):
         super().__init__()
         self.ot_case_ids = []  # Store database IDs for edit/delete
         self.editing_ot_id = None  # Track if we're editing a case
+        self._import_toast = None
+        self._import_toast_timer = None
         self.load_standards()
         self.load_units_eq()
         self.init_ui()
@@ -559,6 +567,50 @@ class OvertimeTab(QWidget):
         except Exception:
             pass
 
+        self._reposition_import_toast()
+
+    def _show_import_toast(self, message: str, duration_ms: int = 4200):
+        """Show a floating top-right toast in OT tab after import."""
+        if self._import_toast is None:
+            self._import_toast = QLabel(self)
+            self._import_toast.setWordWrap(True)
+            self._import_toast.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self._import_toast.setStyleSheet(
+                """
+                QLabel {
+                    background-color: rgba(28, 34, 42, 235);
+                    color: #EAF2FF;
+                    border: 1px solid #2d89ef;
+                    border-radius: 9px;
+                    padding: 8px 10px;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                """
+            )
+
+        self._import_toast.setText(message)
+        self._import_toast.setFixedWidth(min(420, max(280, int(self.width() * 0.42))))
+        self._import_toast.adjustSize()
+        self._reposition_import_toast()
+        self._import_toast.show()
+        self._import_toast.raise_()
+
+        if self._import_toast_timer is None:
+            self._import_toast_timer = QTimer(self)
+            self._import_toast_timer.setSingleShot(True)
+            self._import_toast_timer.timeout.connect(self._import_toast.hide)
+
+        self._import_toast_timer.start(duration_ms)
+
+    def _reposition_import_toast(self):
+        if not self._import_toast or not self._import_toast.isVisible():
+            return
+        margin = 14
+        x = max(margin, self.width() - self._import_toast.width() - margin)
+        y = margin
+        self._import_toast.move(x, y)
+
     def on_case_id_changed(self, text):
         """Auto-set start time when Case ID is first entered"""
         if text and len(text) == 1:  # First character entered
@@ -652,13 +704,17 @@ class OvertimeTab(QWidget):
         region_cases = cursor.fetchall()
         conn.close()
 
-        # Calculate equivalent units: sum(case_value%) × base_rate / 100
-        # (same formula as each row in the table: case_value * base_rate / 100)
+        # Calculate equivalent units supporting both legacy and per-type UE models
         total_equivalent_units = 0.0
         for region, case_type, count, sum_case_value in region_cases:
             if count and sum_case_value:
-                base_rate = self.calculate_units_eq(region, case_type)
-                total_equivalent_units += sum_case_value * base_rate / 100.0
+                total_equivalent_units += calculate_equivalent_units(
+                    self.units_eq,
+                    region,
+                    case_type,
+                    sum_case_value,
+                    count=count,
+                )
         
         self.daily_ot_label.setText(f"OT Production: {total_ot:.2f}%")
         self.ot_units_label.setText(f"OT Equivalent Units: {total_equivalent_units:.2f}")
@@ -699,20 +755,6 @@ class OvertimeTab(QWidget):
         total_equivalent_units = 0.0
         used_minutes = 0.0
 
-        for t, cnt in self.estimate_counts.items():
-            total_cases += cnt
-            # use resolved standards key stored during update_estimate_types
-            key = getattr(self, 'estimate_key_map', {}).get(t)
-            std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
-            case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
-            daily_rate = self.calculate_units_eq(region, key)
-            total_case_value += cnt * case_value_per
-            # UE = case_value% × daily_rate / 100  (same formula as Register tab)
-            total_equivalent_units += cnt * case_value_per * daily_rate / 100.0
-            used_minutes += cnt * float(std_time or 0)
-
-        tu_percent = (used_minutes / minutes) * 100.0 if minutes > 0 else 0.0
-
         # Query today's OT done counts by case type for the selected region
         selected_date = self.case_date.date().toString("yyyy-MM-dd")
         done_by_key: dict = {}
@@ -729,22 +771,53 @@ class OvertimeTab(QWidget):
         except Exception:
             pass
 
+        for t, cnt in self.estimate_counts.items():
+            total_cases += cnt
+            # use resolved standards key stored during update_estimate_types
+            key = getattr(self, 'estimate_key_map', {}).get(t)
+            std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
+            case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
+            done_count = done_by_key.get(key, 0) if key else 0
+            total_count_for_day = cnt + done_count
+            total_case_value += total_count_for_day * case_value_per
+            total_equivalent_units += calculate_equivalent_units(
+                self.units_eq,
+                region,
+                key,
+                case_value_per,
+                count=total_count_for_day,
+            )
+            used_minutes += cnt * float(std_time or 0)
+
+        tu_percent = (used_minutes / minutes) * 100.0 if minutes > 0 else 0.0
+
         # Update per-type info labels with std time, done/remaining and UE
         minutes = minutes if minutes > 0 else 1.0
         for t, cnt in self.estimate_counts.items():
             key = getattr(self, 'estimate_key_map', {}).get(t)
             std_time = self.standards.get(region, {}).get("Aligners", {}).get(key, 0) if key else 0
             case_value_per = self.calculate_case_value(std_time) if std_time else 0.0
-            daily_rate = self.calculate_units_eq(region, key)
-            # UE per type = cnt × case_value% × daily_rate / 100
-            equiv_units_type = cnt * case_value_per * daily_rate / 100.0
+            equiv_units_type = calculate_equivalent_units(
+                self.units_eq,
+                region,
+                key,
+                case_value_per,
+                count=cnt,
+            )
             done_count = done_by_key.get(key, 0) if key else 0
-            remaining = max(0, cnt - done_count)
+            total_possible = cnt + done_count
+            remaining = cnt
+
+            type_label = self.estimate_type_labels.get(t)
+            if type_label:
+                display_name = key or t
+                type_label.setText(f"<b>{display_name}</b> &nbsp;·&nbsp; {total_possible} posibles")
+
             info_label = self.estimate_info_labels.get(t)
             if info_label:
                 std_str = f"{std_time:.0f} min" if std_time else "—"
                 info_label.setText(
-                    f"\u23f1 {std_str}  |  \u2713{done_count} hechos · {remaining} faltan  |  {equiv_units_type:.2f} UE"
+                    f"\u23f1 {std_str}  |  \u2713{done_count} hechos · {remaining} faltan  |  {equiv_units_type:.2f} UE nuevas"
                 )
 
         # clear overall label (we use per-type labels now)
@@ -1150,10 +1223,13 @@ class OvertimeTab(QWidget):
             value_item.setForeground(QBrush(text_color))
             self.ot_table.setItem(row_idx, 6, value_item)
             
-            # Units Equivalent: case_value% × base_rate / 100
-            # (same formula as Register/Production tabs)
-            base_rate = self.calculate_units_eq(region, tipo)
-            units_eq = case_value * base_rate / 100.0
+            units_eq = calculate_equivalent_units(
+                self.units_eq,
+                region,
+                tipo,
+                case_value,
+                count=1,
+            )
             units_eq_item = QTableWidgetItem(f"{units_eq:.2f}")
             units_eq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             units_eq_item.setBackground(bg_brush)
@@ -1228,11 +1304,13 @@ class OvertimeTab(QWidget):
             return
 
         # User confirmed — fill fields
-        filled: list[str] = []
+        imported_case_id = None
+        imported_region = None
+        imported_type = None
 
         if data.get('case_id'):
             self.case_id.setText(data['case_id'])
-            filled.append(f"Case ID: {data['case_id']}")
+            imported_case_id = data['case_id']
 
         if data.get('region'):
             idx = self.region.findText(data['region'])
@@ -1241,25 +1319,30 @@ class OvertimeTab(QWidget):
                 self.region.setCurrentIndex(idx)
                 self.region.blockSignals(False)
                 self.update_case_types()
-                filled.append(f"Region: {data['region']}")
+                imported_region = data['region']
 
         if data.get('tipo'):
             idx = self.tipo.findText(data['tipo'])
             if idx >= 0:
                 self.tipo.setCurrentIndex(idx)
-                filled.append(f"Type: {data['tipo']}")
+                imported_type = data['tipo']
 
         if data.get('doctor'):
             self.doctor.setText(data['doctor'])
-            filled.append(f"Doctor: {data['doctor']}")
 
         self.start_time.setTime(QTime.currentTime())
 
-        self.result_label.setText(
-            "\n".join(filled) + "\nSet times and click Calculate."
-        )
+        summary_parts = [p for p in (imported_case_id, imported_region, imported_type) if p]
+        summary = " | ".join(summary_parts) if summary_parts else "Case imported"
+        self.result_label.setText(f"Imported: {summary}\nClick Calculate.")
         self.result_label.setStyleSheet(
-            "color: #4CAF50; font-size: 12px; font-weight: bold; text-align: center;"
+            "color: #4CAF50; font-size: 11px; font-weight: bold; text-align: center;"
+        )
+
+        self._show_import_toast(
+            "Verify if the case is Stage RX or Bite Sync.\n"
+            "Import currently does not auto-detect this.",
+            duration_ms=4200,
         )
 
     def save_ot_case(self):
