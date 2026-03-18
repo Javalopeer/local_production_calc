@@ -34,6 +34,7 @@ except Exception as _e:
 
 from db.database import DB_PATH
 from sync.app_config import load_config
+from tabs.utils import calculate_downtime_equivalent_units
 
 # ── Colour palette ──────────────────────────────────────────────────────────
 _BLUE       = "2D89EF"
@@ -179,18 +180,92 @@ def _get_monthly_data(year: int, month: int):
 # Fixed case types shown as individual columns in the Dashboard
 FIXED_CASE_TYPES = ["Primary", "Secondary", "CR"]
 
+# Full explicit type list for dashboard/history exports (REG + OT)
+CASE_TYPE_COLUMNS = [
+    "Primary",
+    "Secondary",
+    "CR",
+    "Stage RX Primary",
+    "Stage RX Secondary",
+    "Stage RX CR",
+    "Bite Sync Primary",
+    "Bite Sync Secondary",
+    "Bite Sync CR",
+]
+
+
+def _bucket_case_types(type_counts: dict) -> dict:
+    """Expand raw case-type counts into explicit dashboard columns.
+
+    Returns (counts_by_case_type, other_count) where counts_by_case_type has
+    one entry for each value in CASE_TYPE_COLUMNS.
+    """
+    counts = {name: 0 for name in CASE_TYPE_COLUMNS}
+    other_count = 0
+
+    alias_map = {
+        "bitesync2": "Bite Sync Secondary",
+        "bite sync2": "Bite Sync Secondary",
+        "bitesync3": "Bite Sync CR",
+        "bite sync3": "Bite Sync CR",
+    }
+
+    for raw_type, count in (type_counts or {}).items():
+        n = int(count or 0)
+        t_raw = (raw_type or "").strip()
+        t = t_raw.lower()
+
+        if not t:
+            other_count += n
+            continue
+
+        canonical = None
+        if t_raw in counts:
+            canonical = t_raw
+        elif t in alias_map:
+            canonical = alias_map[t]
+        elif "stage rx" in t:
+            if "primary" in t:
+                canonical = "Stage RX Primary"
+            elif "secondary" in t:
+                canonical = "Stage RX Secondary"
+            elif t.endswith("cr") or " cr" in t:
+                canonical = "Stage RX CR"
+        elif "bite sync" in t:
+            if "primary" in t:
+                canonical = "Bite Sync Primary"
+            elif "secondary" in t:
+                canonical = "Bite Sync Secondary"
+            elif t.endswith("cr") or " cr" in t:
+                canonical = "Bite Sync CR"
+        elif t == "primary":
+            canonical = "Primary"
+        elif t == "secondary":
+            canonical = "Secondary"
+        elif t == "cr":
+            canonical = "CR"
+
+        if canonical and canonical in counts:
+            counts[canonical] += n
+        else:
+            other_count += n
+
+    return counts, other_count
+
 
 def _get_ue_and_types(target_date: str):
     """
     Returns (ue_total, reg_type_counts, ot_type_counts) for target_date.
     reg_type_counts / ot_type_counts are dicts  {tipo_caso: count}.
-    UE = sum(case_value * units_eq[region]['100'] / 100) for count_production=1 cases.
+        UE supports both models:
+            - per-type UE (units_eq[region][tipo])
+            - legacy base-rate UE (units_eq[region]['100'])
     """
     import json as _json
     try:
         _ueq_path = os.path.join(os.path.dirname(__file__),
                                   "..", "data", "units_eq.json")
-        units_eq = _json.load(open(_ueq_path, encoding="utf-8"))
+        units_eq = _json.load(open(_ueq_path, encoding="utf-8-sig"))
     except Exception:
         units_eq = {}
 
@@ -209,19 +284,35 @@ def _get_ue_and_types(target_date: str):
         SELECT tipo_caso FROM ot_cases WHERE fecha = ?
     """, (target_date,))
     ot_rows = cur.fetchall()
+
+    # Downtime total for UE conversion
+    cur.execute("SELECT SUM(duracion) FROM downtimes WHERE fecha = ?", (target_date,))
+    downtime_total_min = cur.fetchone()[0] or 0.0
     conn.close()
 
     ue_total = 0.0
     reg_type_counts: dict = {}
     for region, tipo, case_value, count_prod in reg_rows:
         if count_prod in (1, None):
-            rate = units_eq.get(region, {}).get("100", 0.0)
-            ue_total += (case_value or 0) * rate / 100.0
+            reg_map = units_eq.get(region, {}) if isinstance(units_eq.get(region, {}), dict) else {}
+            if tipo in reg_map:
+                try:
+                    ue_total += float(reg_map.get(tipo) or 0.0)
+                except (TypeError, ValueError):
+                    pass
+            else:
+                try:
+                    rate = float(reg_map.get("100") or 0.0)
+                except (TypeError, ValueError):
+                    rate = 0.0
+                ue_total += (case_value or 0) * rate / 100.0
         reg_type_counts[tipo] = reg_type_counts.get(tipo, 0) + 1
 
     ot_type_counts: dict = {}
     for (tipo,) in ot_rows:
         ot_type_counts[tipo] = ot_type_counts.get(tipo, 0) + 1
+
+    ue_total += calculate_downtime_equivalent_units(downtime_total_min)
 
     return ue_total, reg_type_counts, ot_type_counts
 
@@ -440,37 +531,30 @@ def _rebuild_dashboard(wb, today_str: str):
     Called every time any designer syncs so the supervisor always sees
     up-to-date data without opening individual sheets.
     """
-    # Remove old dashboard if it exists
     if _DASH_SHEET in wb.sheetnames:
         del wb[_DASH_SHEET]
 
-    # Collect designer names (all sheets except the dashboard)
     designer_sheets = [s for s in wb.sheetnames if s != _DASH_SHEET]
 
-    # Create dashboard as first sheet
     ws = wb.create_sheet(_DASH_SHEET, 0)
     ws.sheet_view.showGridLines = False
     ws.sheet_view.showRowColHeaders = True
 
-    # ── Title row ────────────────────────────────────────────────────────────
     refreshed = datetime.now().strftime("%H:%M")
-    ws.merge_cells("A1:H1")
+    ws.merge_cells("A1:G1")
     title_cell = ws.cell(1, 1)
     title_cell.value = f"Production Dashboard  —  {today_str}    (refreshed {refreshed})"
-    title_cell.font  = Font(bold=True, size=13, color="FFFFFF")
-    title_cell.fill  = PatternFill("solid", fgColor=_TITLE_GREY)
+    title_cell.font = Font(bold=True, size=13, color="FFFFFF")
+    title_cell.fill = PatternFill("solid", fgColor=_TITLE_GREY)
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 28
 
-    # ── Column headers ───────────────────────────────────────────────────────
-    col_headers = ["Designer", "Cases (%)", "Downtime (%)",
-                   "Total (%)", "Cases", "OT Cases", "Last Sync", "Status"]
+    col_headers = ["Designer", "Cases (%)", "Downtime (%)", "Total (%)", "Cases", "Last Sync", "Status"]
     for ci, h in enumerate(col_headers, 1):
         _hdr(ws.cell(2, ci), h)
     ws.freeze_panes = "A3"
 
-    # ── Gather today's data from each designer sheet ──────────────────────────
-    rows_data = []  # list of (designer, cases_pct, dt_pct, total_pct, cases, ot_cases, last_sync)
+    rows_data = []
     for sname in sorted(designer_sheets):
         src = wb[sname]
         today_row = None
@@ -478,6 +562,7 @@ def _rebuild_dashboard(wb, today_str: str):
             if row_cells[0].value == today_str:
                 today_row = row_cells
                 break
+
         if today_row is not None:
             def _v(cell):
                 val = cell.value
@@ -487,97 +572,78 @@ def _rebuild_dashboard(wb, today_str: str):
                     except ValueError:
                         return 0.0
                 return val if val is not None else 0
-            cases_pct  = _v(today_row[2])
-            dt_pct     = _v(today_row[3])
-            total_pct  = _v(today_row[4])
-            cases      = today_row[5].value or 0
-            ot_cases   = today_row[6].value or 0
-            last_sync  = today_row[7].value if len(today_row) > 7 else "—"
+
+            cases_pct = _v(today_row[2])
+            dt_pct = _v(today_row[3])
+            total_pct = _v(today_row[4])
+            cases = today_row[5].value or 0
+            ot_cases = today_row[6].value or 0
+            last_sync = today_row[7].value if len(today_row) > 7 else "—"
         else:
             cases_pct = dt_pct = total_pct = cases = ot_cases = 0
             last_sync = "—"
-        rows_data.append((sname, cases_pct, dt_pct, total_pct,
-                          cases, ot_cases, last_sync))
 
-    # ── Write rows ───────────────────────────────────────────────────────────
-    for ri, (designer, cases_pct, dt_pct, total_pct,
-             cases, ot_cases, last_sync) in enumerate(rows_data):
-        row = ri + 3  # rows 1=title, 2=headers, 3+=data
-        bg  = _GREY_ROW if ri % 2 == 0 else "FFFFFF"
-        no_data = (cases == 0 and last_sync == "—")
+        rows_data.append((sname, cases_pct, dt_pct, total_pct, cases, ot_cases, last_sync))
 
-        total_bg    = _production_color(total_pct) if not no_data else "E0E0E0"
-        total_fg    = _HEADER_FG if not no_data else "888888"
-        status_text = "—" if no_data else ("🟢 On Track" if total_pct >= 95
-                                           else "🟡 At Risk" if total_pct >= 85
-                                           else "🔴 Behind")
-        status_bg   = ("E0E0E0" if no_data else
-                       "C8E6C9" if total_pct >= 95 else
-                       "FFF9C4" if total_pct >= 85 else "FFCDD2")
-        status_fg   = "888888" if no_data else "000000"
+    for ri, (designer, cases_pct, dt_pct, total_pct, cases, ot_cases, last_sync) in enumerate(rows_data):
+        row = ri + 3
+        bg = _GREY_ROW if ri % 2 == 0 else "FFFFFF"
+        no_data = (cases == 0 and ot_cases == 0 and last_sync == "—")
 
-        _cell(ws.cell(row, 1), designer,                    bold=True, bg=bg)
-        _cell(ws.cell(row, 2), f"{cases_pct:.1f}%" if not no_data else "—",
-              align="right", bg=bg)
-        _cell(ws.cell(row, 3), f"{dt_pct:.1f}%"   if not no_data else "—",
-              align="right", bg=bg)
-        _cell(ws.cell(row, 4), f"{total_pct:.1f}%" if not no_data else "—",
-              bold=True, color=total_fg, bg=total_bg, align="center")
-        _cell(ws.cell(row, 5), cases    if not no_data else "—", align="center", bg=bg)
-        _cell(ws.cell(row, 6), ot_cases if not no_data else "—", align="center", bg=bg)
-        _cell(ws.cell(row, 7), last_sync or "—", align="center", bg=bg)
-        _cell(ws.cell(row, 8), status_text, bold=True,
-              color=status_fg, bg=status_bg, align="center")
+        total_bg = _production_color(total_pct) if not no_data else "E0E0E0"
+        total_fg = _HEADER_FG if not no_data else "888888"
+        status_text = "—" if no_data else (
+            "🟢 On Track" if total_pct >= 95 else "🟡 At Risk" if total_pct >= 85 else "🔴 Behind"
+        )
+        status_bg = (
+            "E0E0E0" if no_data else
+            "C8E6C9" if total_pct >= 95 else
+            "FFF9C4" if total_pct >= 85 else "FFCDD2"
+        )
+        status_fg = "888888" if no_data else "000000"
 
-    # ── Team totals row ───────────────────────────────────────────────────────
-    active = [r for r in rows_data if not (r[4] == 0 and r[6] == "—")]
+        _cell(ws.cell(row, 1), designer, bold=True, bg=bg)
+        _cell(ws.cell(row, 2), f"{cases_pct:.1f}%" if not no_data else "—", align="right", bg=bg)
+        _cell(ws.cell(row, 3), f"{dt_pct:.1f}%" if not no_data else "—", align="right", bg=bg)
+        _cell(ws.cell(row, 4), f"{total_pct:.1f}%" if not no_data else "—", bold=True, color=total_fg, bg=total_bg, align="center")
+        _cell(ws.cell(row, 5), cases if not no_data else "—", align="center", bg=bg)
+        _cell(ws.cell(row, 6), last_sync or "—", align="center", bg=bg)
+        _cell(ws.cell(row, 7), status_text, bold=True, color=status_fg, bg=status_bg, align="center")
+
+    active = [r for r in rows_data if not (r[4] == 0 and r[5] == 0 and r[6] == "—")]
     if active:
         total_row = len(rows_data) + 3
         n = len(active)
-        avg_cases  = sum(r[1] for r in active) / n
-        avg_dt     = sum(r[2] for r in active) / n
-        avg_total  = sum(r[3] for r in active) / n
-        sum_cases  = sum(r[4] for r in active)
-        sum_ot     = sum(r[5] for r in active)
-        TOTALS_BG  = "2D2D2D"
+        avg_cases = sum(r[1] for r in active) / n
+        avg_dt = sum(r[2] for r in active) / n
+        avg_total = sum(r[3] for r in active) / n
+        sum_cases = sum(r[4] for r in active)
+        TOTALS_BG = "2D2D2D"
 
-        _hdr(ws.cell(total_row, 1), f"TEAM AVG  ({n} designers)",
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws.cell(total_row, 2), f"{avg_cases:.1f}%",
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws.cell(total_row, 3), f"{avg_dt:.1f}%",
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws.cell(total_row, 4), f"{avg_total:.1f}%",
-             bg=_production_color(avg_total), color=_HEADER_FG)
-        _hdr(ws.cell(total_row, 5), sum_cases,
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws.cell(total_row, 6), sum_ot,
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws.cell(total_row, 7), "",  bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws.cell(total_row, 8), "",  bg=TOTALS_BG, color=_HEADER_FG)
+        _hdr(ws.cell(total_row, 1), f"TEAM AVG  ({n} designers)", bg=TOTALS_BG, color=_HEADER_FG)
+        _hdr(ws.cell(total_row, 2), f"{avg_cases:.1f}%", bg=TOTALS_BG, color=_HEADER_FG)
+        _hdr(ws.cell(total_row, 3), f"{avg_dt:.1f}%", bg=TOTALS_BG, color=_HEADER_FG)
+        _hdr(ws.cell(total_row, 4), f"{avg_total:.1f}%", bg=_production_color(avg_total), color=_HEADER_FG)
+        _hdr(ws.cell(total_row, 5), sum_cases, bg=TOTALS_BG, color=_HEADER_FG)
+        _hdr(ws.cell(total_row, 6), "", bg=TOTALS_BG, color=_HEADER_FG)
+        _hdr(ws.cell(total_row, 7), "", bg=TOTALS_BG, color=_HEADER_FG)
 
     _autowidth(ws, extra=6)
 
 
 def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     """
-    Read ALL _Summary_*.xlsx files and write _Dashboard.xlsx with two sheets:
-      Sheet 1 "Dashboard" — snapshot for today_str, one row per designer
-                            Columns (13): Designer | Cases(%) | DT(%) | Total(%) |
-                                          UE | Reg Cases | OT Cases |
-                                          Primary | Secondary | CR | OT Primary |
-                                          Last Sync | Status
-      Sheet 2 "History"   — ALL dates × ALL designers, flat filterable table
-                            Columns (12): Date | Designer | Total(%) | UE |
-                                          Reg Cases | OT Cases | Primary |
-                                          Secondary | CR | Other | OT Primary |
-                                          Status
-    Summary file column layout (15 cols, new format):
-      0 Date  1 Week  2 Cases%  3 DT%  4 Total%
-      5 Reg Cases  6 OT Cases  7 UE
-      8 Primary  9 Secondary  10 CR  11 Other(Reg)
-      12 OT Primary  13 OT Other  14 Last Sync
-    Old 8-col files handled gracefully via bounds checks.
+        Read ALL _Summary_*.xlsx files and write _Dashboard.xlsx with two sheets:
+            - "Dashboard": snapshot for today_str, one row per designer
+            - "History": flat table for all dates/designers
+
+        Both sheets show all explicit case types in CASE_TYPE_COLUMNS for REG and OT,
+        plus Reg Other / OT Other and status columns.
+
+        Summary compatibility:
+            - New schema (29 cols): explicit REG+OT case types
+            - Previous schema (21 cols): bucketed Stage RX / Bite Sync
+            - Older schema (15 cols): reduced type columns
     """
     import glob as _glob
     from openpyxl.utils import get_column_letter as _gcl
@@ -610,12 +676,56 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
 
     # ── Load all data from every summary file ────────────────────────────────
     # Entry tuple indices:
-    #  0 designer  1 date  2 week  3 cases_pct  4 dt_pct  5 total_pct
-    #  6 reg_cases 7 ot_cases  8 ue
-    #  9 primary  10 secondary  11 cr  12 other_reg
-    #  13 ot_primary  14 ot_other  15 last_sync
-    all_rows   = []
+    #  0 designer 1 date 2 week 3 cases_pct 4 dt_pct 5 total_pct
+    #  6 reg_cases 7 ot_cases 8 ue
+    #  9 reg_explicit(dict) 10 reg_other
+    #  11 ot_explicit(dict) 12 ot_other
+    #  13 last_sync
+    all_rows = []
     today_data = {}   # designer → entry tuple for today_str
+
+    def _parse_summary_type_counts(row_values):
+        reg_explicit = {name: 0 for name in CASE_TYPE_COLUMNS}
+        ot_explicit = {name: 0 for name in CASE_TYPE_COLUMNS}
+        reg_other = 0
+        ot_other = 0
+        last_sync = "—"
+
+        # New explicit schema (29 cols)
+        if len(row_values) >= 29:
+            for i, case_type in enumerate(CASE_TYPE_COLUMNS):
+                reg_explicit[case_type] = _num(row_values, 8 + i)
+            reg_other = _num(row_values, 17)
+            for i, case_type in enumerate(CASE_TYPE_COLUMNS):
+                ot_explicit[case_type] = _num(row_values, 18 + i)
+            ot_other = _num(row_values, 27)
+            last_sync = row_values[28] if row_values[28] else "—"
+            return reg_explicit, reg_other, ot_explicit, ot_other, last_sync
+
+        # Previous bucket schema (21 cols)
+        if len(row_values) >= 21:
+            reg_explicit["Primary"] = _num(row_values, 8)
+            reg_explicit["Secondary"] = _num(row_values, 9)
+            reg_explicit["CR"] = _num(row_values, 10)
+            reg_other = _num(row_values, 11) + _num(row_values, 12) + _num(row_values, 13)
+
+            ot_explicit["Primary"] = _num(row_values, 14)
+            ot_explicit["Secondary"] = _num(row_values, 15)
+            ot_explicit["CR"] = _num(row_values, 16)
+            ot_other = _num(row_values, 17) + _num(row_values, 18) + _num(row_values, 19)
+
+            last_sync = row_values[20] if row_values[20] else "—"
+            return reg_explicit, reg_other, ot_explicit, ot_other, last_sync
+
+        # Old schema (15 cols)
+        reg_explicit["Primary"] = _num(row_values, 8)
+        reg_explicit["Secondary"] = _num(row_values, 9)
+        reg_explicit["CR"] = _num(row_values, 10)
+        reg_other = _num(row_values, 11)
+        ot_explicit["Primary"] = _num(row_values, 12)
+        ot_other = _num(row_values, 13)
+        last_sync = row_values[14] if len(row_values) > 14 and row_values[14] else "—"
+        return reg_explicit, reg_other, ot_explicit, ot_other, last_sync
 
     for sf in summary_files:
         try:
@@ -634,18 +744,13 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
                 reg_cases  = _num(row, 5)
                 ot_cases   = _num(row, 6)
                 ue         = _flt(row, 7)
-                primary    = _num(row, 8)
-                secondary  = _num(row, 9)
-                cr         = _num(row, 10)
-                other_reg  = _num(row, 11)
-                ot_primary = _num(row, 12)
-                ot_other   = _num(row, 13)
-                last_sync  = row[14] if len(row) > 14 and row[14] else (
-                             row[7]  if len(row) > 7  and row[7]  else "—")
+                reg_explicit, reg_other, ot_explicit, ot_other, last_sync = _parse_summary_type_counts(row)
+
                 entry = (designer_name, d_str, week, cases_pct, dt_pct,
                          total_pct, reg_cases, ot_cases, ue,
-                         primary, secondary, cr, other_reg,
-                         ot_primary, ot_other, last_sync)
+                         reg_explicit, reg_other,
+                         ot_explicit, ot_other,
+                         last_sync)
                 all_rows.append(entry)
                 if d_str == today_str:
                     today_data[designer_name] = entry
@@ -656,7 +761,10 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     # Build snapshot: include all known designers (blank row if no data today)
     all_designers = sorted({r[0] for r in all_rows})
     _blank = lambda d: (d, today_str, "", 0.0, 0.0, 0.0,
-                        0, 0, 0.0, 0, 0, 0, 0, 0, 0, "—")
+                        0, 0, 0.0,
+                        {name: 0 for name in CASE_TYPE_COLUMNS}, 0,
+                        {name: 0 for name in CASE_TYPE_COLUMNS}, 0,
+                        "—")
     today_rows = [today_data.get(d) or _blank(d) for d in all_designers]
 
     wb = openpyxl.Workbook()
@@ -664,10 +772,16 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 1 — Dashboard (today_str snapshot)
     # ════════════════════════════════════════════════════════════════════════
-    # Columns: Designer | Cases% | DT% | Total% | UE | Reg | OT |
-    #          Primary | Secondary | CR | Other | OT Primary | OT Other |
+    # Columns: Designer | Cases% | DT% | Total% | UE | Reg |
+    #          Reg <all CASE_TYPE_COLUMNS> | Reg Other |
     #          Last Sync | Status
-    DASH_COLS = 15
+    dash_headers = [
+        "Designer", "Cases (%)", "Downtime (%)", "Total (%)",
+        "UE", "Reg Cases",
+    ] + [f"Reg {name}" for name in CASE_TYPE_COLUMNS] + [
+        "Reg Other", "Last Sync", "Status"
+    ]
+    DASH_COLS = len(dash_headers)
     ws_dash = wb.active
     ws_dash.title = "Dashboard"
     ws_dash.sheet_view.showGridLines = False
@@ -682,67 +796,78 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     tc.alignment = Alignment(horizontal="center", vertical="center")
     ws_dash.row_dimensions[1].height = 28
 
-    dash_headers = ["Designer", "Cases (%)", "Downtime (%)", "Total (%)",
-                    "UE", "Reg Cases", "OT Cases",
-                    "Primary", "Secondary", "CR", "Other",
-                    "OT Primary", "OT Other",
-                    "Last Sync", "Status"]
     for ci, h in enumerate(dash_headers, 1):
         _hdr(ws_dash.cell(2, ci), h)
     ws_dash.freeze_panes = "A3"
 
     for ri, entry in enumerate(today_rows):
-        (designer_name, _d, _w, cases_pct, dt_pct, total_pct,
-         reg_cases, ot_cases, ue,
-         primary, secondary, cr, other_reg,
-         ot_primary, ot_other, last_sync) = entry
-        row     = ri + 3
-        bg      = _GREY_ROW if ri % 2 == 0 else "FFFFFF"
-        no_data = (reg_cases == 0 and last_sync == "—")
+        (
+            designer_name,
+            _d,
+            _w,
+            cases_pct,
+            dt_pct,
+            total_pct,
+            reg_cases,
+            ot_cases,
+            ue,
+            reg_explicit,
+            reg_other,
+            ot_explicit,
+            ot_other,
+            last_sync,
+        ) = entry
+        row = ri + 3
+        bg = _GREY_ROW if ri % 2 == 0 else "FFFFFF"
+        no_data = (reg_cases == 0 and ot_cases == 0 and last_sync == "—")
 
-        total_bg    = _production_color(total_pct) if not no_data else "E0E0E0"
-        total_fg    = _HEADER_FG if not no_data else "888888"
-        status_text = ("—" if no_data else
-                       "On Track" if total_pct >= 95 else
-                       "At Risk"  if total_pct >= 85 else "Behind")
-        status_bg   = ("E0E0E0" if no_data else
-                       "C8E6C9" if total_pct >= 95 else
-                       "FFF9C4" if total_pct >= 85 else "FFCDD2")
-        status_fg   = "888888" if no_data else "000000"
+        total_bg = _production_color(total_pct) if not no_data else "E0E0E0"
+        total_fg = _HEADER_FG if not no_data else "888888"
+        status_text = (
+            "—" if no_data else
+            "On Track" if total_pct >= 95 else
+            "At Risk" if total_pct >= 85 else "Behind"
+        )
+        status_bg = (
+            "E0E0E0" if no_data else
+            "C8E6C9" if total_pct >= 95 else
+            "FFF9C4" if total_pct >= 85 else "FFCDD2"
+        )
+        status_fg = "888888" if no_data else "000000"
         dash = "—"
 
-        _cell(ws_dash.cell(row,  1), designer_name, bold=True, bg=bg)
-        _cell(ws_dash.cell(row,  2),
-              f"{cases_pct:.1f}%" if not no_data else dash, align="right",  bg=bg)
-        _cell(ws_dash.cell(row,  3),
-              f"{dt_pct:.1f}%"   if not no_data else dash, align="right",  bg=bg)
-        _cell(ws_dash.cell(row,  4),
-              f"{total_pct:.1f}%" if not no_data else dash,
-              bold=True, color=total_fg, bg=total_bg, align="center")
-        _cell(ws_dash.cell(row,  5),
-              f"{ue:.2f}" if not no_data else dash, align="right", bg=bg)
-        _cell(ws_dash.cell(row,  6),
-              reg_cases  if not no_data else dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row,  7),
-              ot_cases   if not no_data else dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row,  8),
-              primary    if not no_data else dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row,  9),
-              secondary  if not no_data else dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row, 10),
-              cr         if not no_data else dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row, 11),
-              other_reg  if not no_data else dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row, 12),
-              ot_primary if not no_data else dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row, 13),
-              ot_other   if not no_data else dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row, 14), last_sync or dash, align="center", bg=bg)
-        _cell(ws_dash.cell(row, 15), status_text, bold=True,
-              color=status_fg, bg=status_bg, align="center")
+        _cell(ws_dash.cell(row, 1), designer_name, bold=True, bg=bg)
+        _cell(ws_dash.cell(row, 2), f"{cases_pct:.1f}%" if not no_data else dash, align="right", bg=bg)
+        _cell(ws_dash.cell(row, 3), f"{dt_pct:.1f}%" if not no_data else dash, align="right", bg=bg)
+        _cell(
+            ws_dash.cell(row, 4),
+            f"{total_pct:.1f}%" if not no_data else dash,
+            bold=True,
+            color=total_fg,
+            bg=total_bg,
+            align="center",
+        )
+        _cell(ws_dash.cell(row, 5), f"{ue:.2f}" if not no_data else dash, align="right", bg=bg)
+        _cell(ws_dash.cell(row, 6), reg_cases if not no_data else dash, align="center", bg=bg)
+
+        write_col = 7
+        for case_type in CASE_TYPE_COLUMNS:
+            _cell(
+                ws_dash.cell(row, write_col),
+                reg_explicit.get(case_type, 0) if not no_data else dash,
+                align="center",
+                bg=bg,
+            )
+            write_col += 1
+
+        _cell(ws_dash.cell(row, write_col), reg_other if not no_data else dash, align="center", bg=bg)
+        write_col += 1
+        _cell(ws_dash.cell(row, write_col), last_sync or dash, align="center", bg=bg)
+        write_col += 1
+        _cell(ws_dash.cell(row, write_col), status_text, bold=True, color=status_fg, bg=status_bg, align="center")
 
     # Team averages row
-    active_today = [e for e in today_rows if not (e[6] == 0 and e[15] == "—")]
+    active_today = [e for e in today_rows if not (e[6] == 0 and e[7] == 0 and e[13] == "—")]
     if active_today:
         tr = len(today_rows) + 3
         n  = len(active_today)
@@ -763,24 +888,34 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
              bg=TOTALS_BG, color=_HEADER_FG)
         _hdr(ws_dash.cell(tr,  6), sum(e[6]  for e in active_today),
              bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr,  7), sum(e[7]  for e in active_today),
+        write_col = 7
+        for case_type in CASE_TYPE_COLUMNS:
+            _hdr(ws_dash.cell(tr, write_col),
+                 sum(e[9].get(case_type, 0) for e in active_today),
+                 bg=TOTALS_BG, color=_HEADER_FG)
+            write_col += 1
+        _hdr(ws_dash.cell(tr, write_col), sum(e[10] for e in active_today),
              bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr,  8), sum(e[9]  for e in active_today),
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr,  9), sum(e[10] for e in active_today),
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr, 10), sum(e[11] for e in active_today),
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr, 11), sum(e[12] for e in active_today),
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr, 12), sum(e[13] for e in active_today),
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr, 13), sum(e[14] for e in active_today),
-             bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr, 14), "", bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr, 15), "", bg=TOTALS_BG, color=_HEADER_FG)
+        write_col += 1
+        _hdr(ws_dash.cell(tr, write_col), "", bg=TOTALS_BG, color=_HEADER_FG)
+        write_col += 1
+        _hdr(ws_dash.cell(tr, write_col), "", bg=TOTALS_BG, color=_HEADER_FG)
 
-    _autowidth(ws_dash, extra=6)
+    _autowidth(ws_dash, extra=1)
+    for ci in range(1, DASH_COLS + 1):
+        col = _gcl(ci)
+        if ci == 1:
+            ws_dash.column_dimensions[col].width = 18
+        elif ci in (2, 3, 4):
+            ws_dash.column_dimensions[col].width = 11
+        elif ci == 5:
+            ws_dash.column_dimensions[col].width = 8
+        elif ci == 6:
+            ws_dash.column_dimensions[col].width = 9
+        elif ci in (DASH_COLS - 1, DASH_COLS):
+            ws_dash.column_dimensions[col].width = 10
+        else:
+            ws_dash.column_dimensions[col].width = min(ws_dash.column_dimensions[col].width, 12)
 
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 2 — History (all dates × all designers, filterable table)
@@ -792,7 +927,13 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     # ════════════════════════════════════════════════════════════════════════
     import datetime as _dt
 
-    HIST_COLS = 12
+    hist_headers = [
+        "Date", "Designer", "Total (%)", "UE",
+        "Reg Cases",
+    ] + [f"Reg {name}" for name in CASE_TYPE_COLUMNS] + [
+        "Reg Other", "Status"
+    ]
+    HIST_COLS = len(hist_headers)
     HDR_ROW   = 3   # table header row
     DATA_ROW  = 4   # first data row
 
@@ -848,10 +989,6 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     ws_hist.row_dimensions[2].height = 4
 
     # ── Row 3: column headers ────────────────────────────────────────────
-    hist_headers = ["Date", "Designer", "Total (%)", "UE",
-                    "Reg Cases", "OT Cases",
-                    "Primary", "Secondary", "CR", "Other",
-                    "OT Primary", "Status"]
     for ci, h in enumerate(hist_headers, 1):
         _hdr(ws_hist.cell(HDR_ROW, ci), h)
     ws_hist.freeze_panes = f"A{DATA_ROW}"
@@ -864,8 +1001,9 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     for ri, entry in enumerate(sorted_rows):
         (designer_name, d_str, _w, cases_pct, dt_pct, total_pct,
          reg_cases, ot_cases, ue,
-         primary, secondary, cr, other_reg,
-         ot_primary, ot_other, last_sync) = entry
+         reg_explicit, reg_other,
+         ot_explicit, ot_other,
+         last_sync) = entry
         row      = ri + DATA_ROW
         bg       = _GREY_ROW if ri % 2 == 0 else "FFFFFF"
         total_bg = _production_color(total_pct)
@@ -879,15 +1017,21 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
         _cell(ws_hist.cell(row,  3), f"{total_pct:.1f}%",
               bold=True, color=_HEADER_FG, bg=total_bg, align="center")
         _cell(ws_hist.cell(row,  4), f"{ue:.2f}",         align="right", bg=bg)
-        _cell(ws_hist.cell(row,  5), reg_cases,           align="center", bg=bg)
-        _cell(ws_hist.cell(row,  6), ot_cases,            align="center", bg=bg)
-        _cell(ws_hist.cell(row,  7), primary,             align="center", bg=bg)
-        _cell(ws_hist.cell(row,  8), secondary,           align="center", bg=bg)
-        _cell(ws_hist.cell(row,  9), cr,                  align="center", bg=bg)
-        _cell(ws_hist.cell(row, 10), other_reg,           align="center", bg=bg)
-        _cell(ws_hist.cell(row, 11), ot_primary,          align="center", bg=bg)
-        _cell(ws_hist.cell(row, 12), status_text, bold=True,
-              bg=status_bg, align="center")
+        _cell(ws_hist.cell(row,  5), reg_cases, align="center", bg=bg)
+
+        write_col = 6
+        for case_type in CASE_TYPE_COLUMNS:
+            _cell(
+                ws_hist.cell(row, write_col),
+                reg_explicit.get(case_type, 0),
+                align="center",
+                bg=bg,
+            )
+            write_col += 1
+
+        _cell(ws_hist.cell(row, write_col), reg_other, align="center", bg=bg)
+        write_col += 1
+        _cell(ws_hist.cell(row, write_col), status_text, bold=True, bg=status_bg, align="center")
 
     # ── Excel Table + pre-applied date filter ────────────────────────────
     if sorted_rows:
@@ -907,14 +1051,41 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
         fc.filters = Filters(filter=[today_str])
         ws_hist.auto_filter.filterColumn = [fc]
 
-    _autowidth(ws_hist, extra=4)
+    _autowidth(ws_hist, extra=1)
+    for ci in range(1, HIST_COLS + 1):
+        col = _gcl(ci)
+        if ci in (1, 2):
+            ws_hist.column_dimensions[col].width = 13
+        elif ci in (3,):
+            ws_hist.column_dimensions[col].width = 10
+        elif ci in (4, 5):
+            ws_hist.column_dimensions[col].width = 9
+        elif ci == HIST_COLS:
+            ws_hist.column_dimensions[col].width = 10
+        else:
+            ws_hist.column_dimensions[col].width = min(ws_hist.column_dimensions[col].width, 12)
 
     dashboard_path = os.path.join(productions_dir, "_Dashboard.xlsx")
     try:
-        os.remove(dashboard_path)
-    except FileNotFoundError:
-        pass
-    _save_atomic(wb, dashboard_path)
+        try:
+            os.remove(dashboard_path)
+        except FileNotFoundError:
+            pass
+        _save_atomic(wb, dashboard_path)
+    except PermissionError:
+        # If dashboard is open/locked (Excel, preview, etc.), skip silently.
+        # Daily and summary files were already saved.
+        return
+
+    # Save a dated snapshot so each day keeps its own dashboard file.
+    # If snapshot is locked, skip silently as well.
+    snapshots_dir = os.path.join(productions_dir, "Dashboards")
+    os.makedirs(snapshots_dir, exist_ok=True)
+    snapshot_path = os.path.join(snapshots_dir, f"_Dashboard_{today_str}.xlsx")
+    try:
+        _save_atomic(wb, snapshot_path)
+    except PermissionError:
+        return
 
 
 def _update_team_summary(productions_dir: str, designer: str, target_date: str,
@@ -970,10 +1141,13 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
 
     # ── Step 2: Build fresh workbook with all rows ────────────────────────────
     # Column layout (1-indexed):
-    # 1:Date 2:Week 3:Cases% 4:DT% 5:Total% 6:RegCases 7:OTCases
-    # 8:UE  9:Primary 10:Secondary 11:CR 12:OtherReg 13:OTPrimary 14:OTOther
-    # 15:LastSync
-    NCOLS = 15
+    # 1:Date 2:Week 3:Cases% 4:DT% 5:Total% 6:RegCases 7:OTCases 8:UE
+    # 9..17: Reg explicit CASE_TYPE_COLUMNS
+    # 18:Reg Other
+    # 19..27: OT explicit CASE_TYPE_COLUMNS
+    # 28:OT Other
+    # 29:LastSync
+    NCOLS = 29
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = safe_name
@@ -981,8 +1155,10 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
     col_headers = [
         "Date", "Week", "Cases (%)", "Downtime (%)", "Total (%)",
         "Reg Cases", "OT Cases", "UE",
-        "Primary", "Secondary", "CR", "Other (Reg)",
-        "OT Primary", "OT Other", "Last Sync"
+    ] + [f"Reg {name}" for name in CASE_TYPE_COLUMNS] + [
+        "Reg Other",
+    ] + [f"OT {name}" for name in CASE_TYPE_COLUMNS] + [
+        "OT Other", "Last Sync"
     ]
     for ci, h in enumerate(col_headers, 1):
         _hdr(ws.cell(1, ci), h)
@@ -999,11 +1175,9 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
                   align="center" if ci in (1, 2, 6, 7, 15) else "right",
                   bg=bg)
 
-    # Compute today's type counts
-    other_reg = sum(v for k, v in reg_type_counts.items()
-                    if k not in FIXED_CASE_TYPES)
-    ot_primary = ot_type_counts.get("Primary", 0)
-    ot_other   = sum(v for k, v in ot_type_counts.items() if k != "Primary")
+    # Compute today's explicit type counts (REG + OT)
+    reg_explicit, reg_other = _bucket_case_types(reg_type_counts)
+    ot_explicit, ot_other = _bucket_case_types(ot_type_counts)
 
     # Write today's fresh data
     today_ri  = len(history_rows)
@@ -1019,17 +1193,18 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
     _cell(ws.cell(write_row,  6), n_cases,                   align="center", bg=bg)
     _cell(ws.cell(write_row,  7), n_ot_cases,                align="center", bg=bg)
     _cell(ws.cell(write_row,  8), round(ue_total, 2),        align="right",  bg=bg)
-    _cell(ws.cell(write_row,  9), reg_type_counts.get("Primary", 0),
-          align="center", bg=bg)
-    _cell(ws.cell(write_row, 10), reg_type_counts.get("Secondary", 0),
-          align="center", bg=bg)
-    _cell(ws.cell(write_row, 11), reg_type_counts.get("CR", 0),
-          align="center", bg=bg)
-    _cell(ws.cell(write_row, 12), other_reg,                 align="center", bg=bg)
-    _cell(ws.cell(write_row, 13), ot_primary,                align="center", bg=bg)
-    _cell(ws.cell(write_row, 14), ot_other,                  align="center", bg=bg)
-    _cell(ws.cell(write_row, 15), datetime.now().strftime("%H:%M"),
-          align="center", bg=bg)
+    write_col = 9
+    for case_type in CASE_TYPE_COLUMNS:
+        _cell(ws.cell(write_row, write_col), reg_explicit.get(case_type, 0), align="center", bg=bg)
+        write_col += 1
+    _cell(ws.cell(write_row, write_col), reg_other, align="center", bg=bg)
+    write_col += 1
+    for case_type in CASE_TYPE_COLUMNS:
+        _cell(ws.cell(write_row, write_col), ot_explicit.get(case_type, 0), align="center", bg=bg)
+        write_col += 1
+    _cell(ws.cell(write_row, write_col), ot_other, align="center", bg=bg)
+    write_col += 1
+    _cell(ws.cell(write_row, write_col), datetime.now().strftime("%H:%M"), align="center", bg=bg)
 
     _autowidth(ws)
     wb.save(summary_file)   # fresh file, no lock possible
