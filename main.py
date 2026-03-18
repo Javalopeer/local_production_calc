@@ -18,7 +18,7 @@ def _resource_path(relative: str) -> str:
     return os.path.join(base, relative)
 
 # ============== VERSION ==============
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.4"
 DB_SCHEMA_VERSION = 1
 # =====================================
 
