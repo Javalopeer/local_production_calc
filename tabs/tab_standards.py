@@ -9,7 +9,13 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from .utils import get_resource_path, get_writable_path, load_units_eq_data, DAILY_BASE_MINUTES
+from .utils import (
+    get_resource_path,
+    get_writable_path,
+    load_units_eq_data,
+    DAILY_BASE_MINUTES,
+    DAILY_TARGET_EQ_UNITS,
+)
 
 
 def card(title, widget):
@@ -313,6 +319,25 @@ class StandardsTab(QWidget):
         """Load equivalent units from JSON file"""
         self.units_eq = load_units_eq_data()
 
+    def recalculate_units_eq_from_standards(self):
+        """Rebuild units_eq from current standard times using the shared UE target."""
+        recalculated = {}
+        for region, data in (self.standards or {}).items():
+            aligners = data.get("Aligners", {}) if isinstance(data, dict) else {}
+            if not isinstance(aligners, dict):
+                continue
+
+            recalculated[region] = {}
+            for case_type, time_value in aligners.items():
+                try:
+                    std_time = float(time_value)
+                except (TypeError, ValueError):
+                    continue
+                ue_value = (std_time / DAILY_BASE_MINUTES) * DAILY_TARGET_EQ_UNITS
+                recalculated[region][case_type] = round(ue_value, 3)
+
+        self.units_eq = recalculated
+
     def save_standards(self):
         """Save standards to JSON file"""
         standards_path = get_writable_path(os.path.join("data", "standards.json"))
@@ -543,21 +568,14 @@ class StandardsTab(QWidget):
         self.tree.clear()
 
         for region, data in sorted(self.standards.items()):
-            # regional base rate at 100% efficiency (used for child UE calc)
-            reg_ue = self.units_eq.get(region, {})
-            base_rate = reg_ue.get("100", 0.0) if isinstance(reg_ue, dict) else 0.0
             region_item = QTreeWidgetItem([region, "", ""])
             region_item.setFont(0, QFont("Segoe UI", 11, QFont.Weight.Bold))
             region_item.setExpanded(True)
 
             if "Aligners" in data:
                 for case_type, time_value in sorted(data["Aligners"].items()):
-                    # UE per single case = (std_time / 408.3) × regional_base_rate
-                    if base_rate and time_value:
-                        ue_per_case = (time_value / DAILY_BASE_MINUTES) * base_rate
-                        ue_str = f"{ue_per_case:.2f}"
-                    else:
-                        ue_str = ""
+                    ue_per_case = self._resolve_ue_value(region, case_type, time_value)
+                    ue_str = f"{ue_per_case:.2f}" if ue_per_case is not None else ""
                     type_item = QTreeWidgetItem([case_type, f"{time_value:.2f}", ue_str])
                     type_item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
                     type_item.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
@@ -578,7 +596,7 @@ class StandardsTab(QWidget):
         region = item.parent().text(0)
         case_type = item.text(0)
         current_time = self.standards.get(region, {}).get("Aligners", {}).get(case_type, 0)
-        current_ue = self.units_eq.get(region, {}).get(case_type, 0)
+        current_ue = self._resolve_ue_value(region, case_type, current_time) or 0
 
         dialog = EditStandardDialog(region, case_type, current_time, current_ue, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -592,6 +610,35 @@ class StandardsTab(QWidget):
                     self.units_eq[region] = {}
                 self.units_eq[region][case_type] = new_ue
                 item.setText(2, f"{new_ue:.2f}")
+
+    def _resolve_ue_value(self, region, case_type, time_value):
+        """Return UE value for display/edit, preferring explicit per-case values.
+
+        Priority:
+          1) units_eq[region][case_type] (if present)
+          2) (std_time / 408.3) * units_eq[region]["100"] (legacy fallback)
+        """
+        reg_ue = self.units_eq.get(region, {})
+        if isinstance(reg_ue, dict):
+            explicit = reg_ue.get(case_type)
+            if isinstance(explicit, (int, float)):
+                return float(explicit)
+            if explicit is not None:
+                try:
+                    return float(explicit)
+                except (TypeError, ValueError):
+                    pass
+
+            base_rate = reg_ue.get("100", 0.0)
+            try:
+                base_rate = float(base_rate)
+            except (TypeError, ValueError):
+                base_rate = 0.0
+
+            if base_rate and time_value:
+                return (float(time_value) / DAILY_BASE_MINUTES) * base_rate
+
+        return None
     
     def edit_selected(self):
         """Edit the currently selected item"""
@@ -698,8 +745,25 @@ class StandardsTab(QWidget):
                 
                 if valid:
                     self.standards = new_standards
+
+                    recalc_reply = QMessageBox.question(
+                        self,
+                        "Recalculate Equivalent Units?",
+                        "Do you want to recalculate UE values from the imported standard times?\n\n"
+                        "Formula used: UE = (Std Time / 408.3) * 15",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes,
+                    )
+                    if recalc_reply == QMessageBox.StandardButton.Yes:
+                        self.recalculate_units_eq_from_standards()
+
                     self.populate_tree()
-                    QMessageBox.information(self, "Success", "Standards imported successfully!")
+                    QMessageBox.information(
+                        self,
+                        "Success",
+                        "Standards imported successfully!\n"
+                        "Click 'Save Changes' to persist standards and UE files.",
+                    )
                 else:
                     QMessageBox.warning(self, "Error", "Invalid JSON format. Expected structure:\n{\n  \"Region\": {\n    \"Aligners\": {\n      \"Type\": value\n    }\n  }\n}")
             except Exception as e:
