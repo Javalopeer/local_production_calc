@@ -7,7 +7,11 @@ from PySide6.QtGui import QColor, QFont, QBrush
 from db.database import get_connection
 from datetime import datetime, timedelta
 from collections import Counter
-from .utils import load_units_eq_data, get_units_per_case as _ue_lookup
+from .utils import (
+    load_units_eq_data,
+    get_units_per_case as _ue_lookup,
+    calculate_equivalent_units,
+)
 
 
 class ProductionTab(QWidget):
@@ -36,10 +40,15 @@ class ProductionTab(QWidget):
         return _ue_lookup(self.units_eq, region, case_type)
 
     def calculate_units_eq(self, region, case_value, case_type=None):
-        """Return UE for one case.  UE = case_value% × daily_rate / 100."""
+        """Return UE for one case supporting both UE models."""
         try:
-            daily_rate = self.get_units_per_case(region, case_type)
-            return (case_value or 0.0) * daily_rate / 100.0
+            return calculate_equivalent_units(
+                self.units_eq,
+                region,
+                case_type,
+                case_value,
+                count=1,
+            )
         except Exception:
             return 0.0
 
@@ -469,6 +478,11 @@ class ProductionTab(QWidget):
 
         # Count rows needed (date header + type-breakdown row + cases)
         total_rows = sum(2 + len(cases) for cases in grouped.values())
+
+        # Reset any previous row spans/content before drawing current page.
+        # Without this, spans from a prior page can leak and visually break rows.
+        self.table.clearSpans()
+        self.table.clearContents()
         self.table.setRowCount(total_rows)
         
         # Clear the row to db_id mapping
