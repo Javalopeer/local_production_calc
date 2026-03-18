@@ -10,9 +10,16 @@ from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
     QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QDateEdit, QTextEdit, QScrollArea
 )
-from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve, QTimer
 from db.database import get_connection
-from .utils import get_resource_path, calculate_case_value as _calc_cv, load_units_eq_data, get_units_per_case as _ue_lookup
+from .utils import (
+    get_resource_path,
+    calculate_case_value as _calc_cv,
+    load_units_eq_data,
+    get_units_per_case as _ue_lookup,
+    calculate_equivalent_units,
+    calculate_downtime_equivalent_units,
+)
 from datetime import datetime
 from .downtime_manager import DowntimeManager
 from .toggle_switch import ToggleSwitch
@@ -81,6 +88,8 @@ class RegisterTab(QWidget):
     def __init__(self):
         super().__init__()
         self.editing_case_id = None  # Track if we're editing a case
+        self._import_toast = None
+        self._import_toast_timer = None
 
         self.load_standards()
         self.load_units_eq()
@@ -358,6 +367,50 @@ class RegisterTab(QWidget):
             self.left_widget.setFixedWidth(responsive_width)
             self.right_widget.setFixedWidth(responsive_width)
 
+        self._reposition_import_toast()
+
+    def _show_import_toast(self, message: str, duration_ms: int = 4200):
+        """Show a floating top-right toast in Register tab after import."""
+        if self._import_toast is None:
+            self._import_toast = QLabel(self)
+            self._import_toast.setWordWrap(True)
+            self._import_toast.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self._import_toast.setStyleSheet(
+                """
+                QLabel {
+                    background-color: rgba(28, 34, 42, 235);
+                    color: #EAF2FF;
+                    border: 1px solid #2d89ef;
+                    border-radius: 9px;
+                    padding: 8px 10px;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                """
+            )
+
+        self._import_toast.setText(message)
+        self._import_toast.setFixedWidth(min(420, max(280, int(self.width() * 0.42))))
+        self._import_toast.adjustSize()
+        self._reposition_import_toast()
+        self._import_toast.show()
+        self._import_toast.raise_()
+
+        if self._import_toast_timer is None:
+            self._import_toast_timer = QTimer(self)
+            self._import_toast_timer.setSingleShot(True)
+            self._import_toast_timer.timeout.connect(self._import_toast.hide)
+
+        self._import_toast_timer.start(duration_ms)
+
+    def _reposition_import_toast(self):
+        if not self._import_toast or not self._import_toast.isVisible():
+            return
+        margin = 14
+        x = max(margin, self.width() - self._import_toast.width() - margin)
+        y = margin
+        self._import_toast.move(x, y)
+
     def load_standards(self):
         standards_path = get_resource_path(os.path.join("data", "standards.json"))
         with open(standards_path, "r") as f:
@@ -477,7 +530,7 @@ class RegisterTab(QWidget):
         
         # Get cases by region+type for equivalent units calculation (only count_production = 1)
         cursor.execute("""
-            SELECT region, tipo_caso, SUM(case_value)
+            SELECT region, tipo_caso, COUNT(*), SUM(case_value)
             FROM cases
             WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
             GROUP BY region, tipo_caso
@@ -486,12 +539,17 @@ class RegisterTab(QWidget):
         region_cases = cursor.fetchall()
         conn.close()
 
-        # Calculate equivalent units: UE = sum(case_value%) × daily_rate / 100
+        # Calculate equivalent units supporting both legacy and per-type UE models
         total_equivalent_units = 0.0
-        for region, case_type, sum_cv in region_cases:
-            if sum_cv:
-                daily_rate = self.get_units_per_case(region, case_type)
-                total_equivalent_units += sum_cv * daily_rate / 100.0
+        for region, case_type, count, sum_cv in region_cases:
+            if count and sum_cv:
+                total_equivalent_units += calculate_equivalent_units(
+                    self.units_eq,
+                    region,
+                    case_type,
+                    sum_cv,
+                    count=count,
+                )
         
         # Get total downtime and calculate as production value
         total_downtime = self.get_daily_downtime(selected_date)
@@ -506,8 +564,15 @@ class RegisterTab(QWidget):
             display_label += f" (Cases: {total_cases:.2f}% + Downtime: {downtime_value:.2f}%)"
         
         self.daily_production_label.setText(display_label)
-        # Equivalent Units = cases only (downtime counts toward production % but not UE)
+        downtime_equivalent_units = calculate_downtime_equivalent_units(total_downtime)
+        total_equivalent_units += downtime_equivalent_units
+
         eq_label = f"Equivalent Units: {total_equivalent_units:.2f}"
+        if downtime_equivalent_units > 0:
+            eq_label += (
+                f" (Cases: {total_equivalent_units - downtime_equivalent_units:.2f}"
+                f" + Downtime: {downtime_equivalent_units:.2f})"
+            )
         self.equivalent_units_label.setText(eq_label)
         
         # Update progress bar with animation - NO CAP, allow any value
@@ -658,11 +723,13 @@ class RegisterTab(QWidget):
             return
 
         # User confirmed — fill fields
-        filled: list[str] = []
+        imported_case_id = None
+        imported_region = None
+        imported_type = None
 
         if data.get('case_id'):
             self.case_id.setText(data['case_id'])
-            filled.append(f"Case ID: {data['case_id']}")
+            imported_case_id = data['case_id']
 
         if data.get('region'):
             idx = self.region.findText(data['region'])
@@ -671,25 +738,30 @@ class RegisterTab(QWidget):
                 self.region.setCurrentIndex(idx)
                 self.region.blockSignals(False)
                 self.update_case_types()
-                filled.append(f"Region: {data['region']}")
+                imported_region = data['region']
 
         if data.get('tipo'):
             idx = self.tipo.findText(data['tipo'])
             if idx >= 0:
                 self.tipo.setCurrentIndex(idx)
-                filled.append(f"Type: {data['tipo']}")
+                imported_type = data['tipo']
 
         if data.get('doctor'):
             self.doctor.setText(data['doctor'])
-            filled.append(f"Doctor: {data['doctor']}")
 
         self.start_time.setTime(QTime.currentTime())
 
-        self.result_label.setText(
-            "\n".join(filled) + "\nSet times and click Calculate."
-        )
+        summary_parts = [p for p in (imported_case_id, imported_region, imported_type) if p]
+        summary = " | ".join(summary_parts) if summary_parts else "Case imported"
+        self.result_label.setText(f"Imported: {summary}\nClick Calculate.")
         self.result_label.setStyleSheet(
-            "color: #4CAF50; font-size: 12px; font-weight: bold; text-align: center;"
+            "color: #4CAF50; font-size: 11px; font-weight: bold; text-align: center;"
+        )
+
+        self._show_import_toast(
+            "Verify if the case is Stage RX or Bite Sync.\n"
+            "Import currently does not auto-detect this.",
+            duration_ms=4200,
         )
 
     def save_case(self):
