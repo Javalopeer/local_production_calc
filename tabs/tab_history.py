@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor, QFont, QBrush
 from db.database import get_connection
-from .utils import load_units_eq_data
+from .utils import load_units_eq_data, calculate_equivalent_units
 import csv
 
 try:
@@ -399,7 +399,13 @@ class HistoryTab(QWidget):
         total_time = sum((c[6] or 0) for c in filtered)
         total_value = sum((c[10] or 0) for c in filtered)
         total_ue = sum(
-            (c[10] or 0) * self.units_eq.get(c[3], {}).get("100", 0.0) / 100.0
+            calculate_equivalent_units(
+                self.units_eq,
+                c[3],
+                c[4],
+                (c[10] or 0),
+                count=1,
+            )
             for c in filtered
         )
         self.stats_label.setText(
@@ -509,7 +515,7 @@ class HistoryTab(QWidget):
             ("Efficiency %", lambda c: round(c[8], 1)),
             ("Status",       lambda c: c[9]),
             ("Case Value %", lambda c: round(c[10], 2)),
-            ("UE",           lambda c, _u=_ueq: round((c[10] or 0) * _u.get(c[3], {}).get("100", 0.0) / 100.0, 2)),
+            ("UE",           lambda c, _u=_ueq: round(calculate_equivalent_units(_u, c[3], c[4], (c[10] or 0), count=1), 2)),
         ]
         DATA_START = 1  # table header row (row 1)
 
