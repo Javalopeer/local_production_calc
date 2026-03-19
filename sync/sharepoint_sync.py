@@ -1131,9 +1131,19 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
                 if row[0] and row[0] != target_date:
                     history_rows.append(row)
             old_wb.close()
-        except Exception:
-            pass  # corrupt / locked — lose old history rather than crash
-        # Delete so we can write a clean file without any lock issues
+        except Exception as _read_exc:
+            # SAFETY: if we cannot read the existing file (locked by OneDrive,
+            # open in Excel, or corrupt) we must NOT delete it — that would
+            # permanently erase all historical rows.  Surface the error so the
+            # caller knows the sync did not complete.
+            raise PermissionError(
+                f"Cannot read the existing summary file — it may be open in "
+                f"Excel or locked by OneDrive.\n\n"
+                f"File: {summary_file}\n\n"
+                f"Close the file (and wait for OneDrive to finish syncing), "
+                f"then try again.\n\nDetail: {_read_exc}"
+            ) from _read_exc
+        # Read succeeded — safe to delete and rewrite
         try:
             os.remove(summary_file)
         except Exception:

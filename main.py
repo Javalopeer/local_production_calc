@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QThread, QTimer
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut, QIcon
-from db.database import init_db
+from db.database import init_db, migrate_legacy_db
 from tabs.utils import load_units_eq_data
 import qtawesome as qta
 
@@ -394,6 +394,10 @@ if __name__ == "__main__":
     if check_and_install():
         sys.exit(0)
 
+    # ── One-time legacy DB migration (pre-OneDrive path → OneDrive path) ────
+    # Must run BEFORE init_db() so the data is in place before any schema work.
+    _migration_msg = migrate_legacy_db()
+
     init_db()
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(_resource_path(os.path.join("data", "app_icon.ico"))))
@@ -708,6 +712,16 @@ if __name__ == "__main__":
         window.statusBar().showMessage(
             "✓ Production Calc installed — shortcut created on your Desktop.", 8000
         )
+
+    # Notify the user if their data was automatically migrated from the old location
+    if _migration_msg:
+        def _show_migration_notice():
+            QMessageBox.information(
+                window,
+                "Datos migrados a OneDrive",
+                _migration_msg
+            )
+        QTimer.singleShot(800, _show_migration_notice)
 
     sys.exit(app.exec())
 

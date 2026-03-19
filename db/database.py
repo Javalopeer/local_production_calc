@@ -41,6 +41,177 @@ DB_PATH = os.path.join(get_data_path(), "cases.db")
 # Current schema version - increment when making DB changes
 CURRENT_SCHEMA_VERSION = 1
 
+
+def _get_legacy_db_candidates() -> list:
+    """Return all possible legacy DB paths, in priority order.
+
+    Different versions of the app placed cases.db in different locations:
+      1. %LOCALAPPDATA%\\ProductionCalcApp\\data\\cases.db   (self-installer era)
+      2. %USERPROFILE%\\ProductionCalcApp\\cases.db          (config-folder era)
+      3. %APPDATA%\\ProductionCalcApp\\cases.db              (AppData fallback)
+      4. <exe folder>\\data\\cases.db                        (very first versions, run from desktop)
+    """
+    candidates = []
+    local_app   = os.environ.get("LOCALAPPDATA", "")
+    user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+    app_data    = os.environ.get("APPDATA", "")
+
+    if local_app:
+        candidates.append(os.path.join(local_app,   "ProductionCalcApp", "data", "cases.db"))
+    candidates.append(    os.path.join(user_profile, "ProductionCalcApp", "cases.db"))
+    if app_data:
+        candidates.append(os.path.join(app_data,    "ProductionCalcApp", "cases.db"))
+    candidates.append(    os.path.join(get_base_path(), "data", "cases.db"))
+
+    # Remove duplicates while preserving order, and skip DB_PATH itself
+    seen = set()
+    result = []
+    for p in candidates:
+        norm = os.path.normcase(os.path.abspath(p))
+        if norm not in seen and norm != os.path.normcase(os.path.abspath(DB_PATH)):
+            seen.add(norm)
+            result.append(p)
+    return result
+
+
+def _db_has_data(path: str) -> bool:
+    """Return True if the SQLite file at *path* contains at least one row
+    in 'cases', 'ot_cases', or 'downtimes'."""
+    try:
+        conn = sqlite3.connect(path)
+        cur  = conn.cursor()
+        for table in ("cases", "ot_cases", "downtimes"):
+            try:
+                cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
+                if cur.fetchone():
+                    conn.close()
+                    return True
+            except sqlite3.OperationalError:
+                pass  # table doesn't exist yet — not an error
+        conn.close()
+    except Exception:
+        pass
+    return False
+
+
+def _merge_from(legacy: str) -> dict:
+    """Insert rows from *legacy* that don't already exist in DB_PATH.
+    Returns counts dict {cases, ot_cases, downtimes}."""
+    counts = {"cases": 0, "ot_cases": 0, "downtimes": 0}
+    src = sqlite3.connect(legacy)
+    dst = sqlite3.connect(DB_PATH)
+    src.row_factory = sqlite3.Row
+    src_cur = src.cursor()
+    dst_cur = dst.cursor()
+
+    for table in ("cases", "ot_cases"):
+        try:
+            src_cur.execute(f"SELECT * FROM {table}")
+        except sqlite3.OperationalError:
+            continue
+        for row in src_cur.fetchall():
+            r = dict(row)
+            dst_cur.execute(
+                f"SELECT 1 FROM {table} WHERE case_id=? AND fecha=? AND hora_inicio=?",
+                (r.get("case_id"), r.get("fecha"), r.get("hora_inicio"))
+            )
+            if dst_cur.fetchone():
+                continue
+            cols = [k for k in r if k != "id"]
+            dst_cur.execute(
+                f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?'*len(cols))})",
+                [r[c] for c in cols]
+            )
+            counts[table] += 1
+
+    try:
+        src_cur.execute("SELECT * FROM downtimes")
+        for row in src_cur.fetchall():
+            r = dict(row)
+            dst_cur.execute(
+                "SELECT 1 FROM downtimes WHERE fecha=? AND hora_inicio=?",
+                (r.get("fecha"), r.get("hora_inicio"))
+            )
+            if dst_cur.fetchone():
+                continue
+            cols = [k for k in r if k != "id"]
+            dst_cur.execute(
+                f"INSERT INTO downtimes ({', '.join(cols)}) VALUES ({', '.join('?'*len(cols))})",
+                [r[c] for c in cols]
+            )
+            counts["downtimes"] += 1
+    except sqlite3.OperationalError:
+        pass
+
+    dst.commit()
+    src.close()
+    dst.close()
+    return counts
+
+
+def migrate_legacy_db() -> str:
+    """Migrate or merge any legacy cases.db files into the current DB_PATH.
+
+    Checks all known legacy locations in priority order and merges each one
+    that has data.  Safe to run on every startup — already-migrated rows are
+    skipped via duplicate detection.
+
+    Returns a human-readable message describing what happened (empty string
+    if nothing was done).
+    """
+    import shutil
+
+    candidates = [p for p in _get_legacy_db_candidates()
+                  if os.path.exists(p) and _db_has_data(p)]
+    if not candidates:
+        return ""
+
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+    messages = []
+
+    for legacy in candidates:
+        # ── Scenario A: new DB is empty → fast file copy ─────────────────────
+        if not os.path.exists(DB_PATH) or not _db_has_data(DB_PATH):
+            try:
+                shutil.copy2(legacy, DB_PATH)
+                messages.append(
+                    f"Datos copiados desde:\n  {legacy}"
+                )
+            except Exception as exc:
+                messages.append(
+                    f"Datos encontrados en:\n  {legacy}\n"
+                    f"No se pudieron copiar automáticamente ({exc}).\n"
+                    f"Copia manualmente a:\n  {DB_PATH}"
+                )
+            continue
+
+        # ── Scenario B: both have data → row-level merge ──────────────────────
+        try:
+            counts = _merge_from(legacy)
+            total = sum(counts.values())
+            if total > 0:
+                messages.append(
+                    f"Datos combinados desde:\n  {legacy}\n"
+                    f"  • Casos regulares: {counts['cases']}\n"
+                    f"  • Casos OT: {counts['ot_cases']}\n"
+                    f"  • Downtimes: {counts['downtimes']}"
+                )
+        except Exception as exc:
+            messages.append(
+                f"Datos encontrados en:\n  {legacy}\n"
+                f"No se pudo hacer el merge automáticamente ({exc}).\n"
+                f"Contacta al administrador para combinarlo manualmente."
+            )
+
+    if not messages:
+        return ""
+
+    header = "Migración de datos completada\n" + "─" * 40 + "\n\n"
+    footer = f"\n\nDestino: {DB_PATH}\n(sincronizado con OneDrive automáticamente)"
+    return header + "\n\n".join(messages) + footer
+
+
 def get_connection():
     return sqlite3.connect(DB_PATH)
 
