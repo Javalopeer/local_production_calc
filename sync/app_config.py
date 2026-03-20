@@ -9,7 +9,7 @@ import getpass
 _CONFIG_PATH = os.path.join(os.path.expanduser("~"), "ProductionCalcApp", "config.json")
 
 def get_windows_display_name() -> str:
-    """Return the Windows full display name (e.g. 'Gerardo Lopez').
+    """Return the Windows full display name (e.g. 'Gerardo Gomez').
     Falls back to the login username if not available."""
     try:
         import ctypes
@@ -39,8 +39,7 @@ def _default_export_folder() -> str:
         os.path.join("C:\\Users", user, "Envista", "SPARK-GLB-OPS-ICON - Daily Production", "Reports"),
     ]
 
-    # Glob for any direct Envista subfolder containing "Reports"
-    # Exclude anything with "OneDrive" in the path — that's personal OneDrive
+
     for pattern in [
         os.path.join("C:\\Users", user, "Envista", "*Reports*"),
         os.path.join("C:\\Users", user, "Envista", "*", "Reports"),
@@ -56,8 +55,8 @@ def _default_export_folder() -> str:
 
 
 _DEFAULTS = {
-    "designer_name": "",        # empty = not yet confirmed by user
-    "name_confirmed": False,    # True once user has confirmed their name
+    "designer_name": "",        
+    "name_confirmed": False,   
     "export_folder": "",
     "auto_sync_hours": 0,
 }

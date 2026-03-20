@@ -136,7 +136,7 @@ def _get_daily_data(target_date: str):
     """, (target_date,))
     total_cases_pct = cur.fetchone()[0] or 0.0
 
-    cur.execute("SELECT SUM(duracion) FROM downtimes WHERE fecha = ?", (target_date,))
+    cur.execute("SELECT SUM(duracion) FROM downtimes WHERE fecha = ? AND (status = 'approved' OR status IS NULL)", (target_date,))
     total_downtime_min = cur.fetchone()[0] or 0.0
 
     conn.close()
@@ -158,7 +158,7 @@ def _get_monthly_data(year: int, month: int):
 
     cur.execute("""
         SELECT fecha, SUM(duracion)
-        FROM downtimes WHERE fecha LIKE ?
+        FROM downtimes WHERE fecha LIKE ? AND (status = 'approved' OR status IS NULL)
         GROUP BY fecha ORDER BY fecha
     """, (prefix,))
     monthly_dt = {r[0]: r[1] or 0.0 for r in cur.fetchall()}
@@ -285,19 +285,19 @@ def _get_ue_and_types(target_date: str):
     """, (target_date,))
     ot_rows = cur.fetchall()
 
-    # Downtime total for UE conversion
-    cur.execute("SELECT SUM(duracion) FROM downtimes WHERE fecha = ?", (target_date,))
+    # Downtime total for UE conversion (only approved downtimes count)
+    cur.execute("SELECT SUM(duracion) FROM downtimes WHERE fecha = ? AND (status = 'approved' OR status IS NULL)", (target_date,))
     downtime_total_min = cur.fetchone()[0] or 0.0
     conn.close()
 
-    ue_total = 0.0
+    ue_cases = 0.0
     reg_type_counts: dict = {}
     for region, tipo, case_value, count_prod in reg_rows:
         if count_prod in (1, None):
             reg_map = units_eq.get(region, {}) if isinstance(units_eq.get(region, {}), dict) else {}
             if tipo in reg_map:
                 try:
-                    ue_total += float(reg_map.get(tipo) or 0.0)
+                    ue_cases += float(reg_map.get(tipo) or 0.0)
                 except (TypeError, ValueError):
                     pass
             else:
@@ -305,16 +305,16 @@ def _get_ue_and_types(target_date: str):
                     rate = float(reg_map.get("100") or 0.0)
                 except (TypeError, ValueError):
                     rate = 0.0
-                ue_total += (case_value or 0) * rate / 100.0
+                ue_cases += (case_value or 0) * rate / 100.0
         reg_type_counts[tipo] = reg_type_counts.get(tipo, 0) + 1
 
     ot_type_counts: dict = {}
     for (tipo,) in ot_rows:
         ot_type_counts[tipo] = ot_type_counts.get(tipo, 0) + 1
 
-    ue_total += calculate_downtime_equivalent_units(downtime_total_min)
+    ue_total = ue_cases + calculate_downtime_equivalent_units(downtime_total_min)
 
-    return ue_total, reg_type_counts, ot_type_counts
+    return ue_cases, ue_total, reg_type_counts, ot_type_counts
 
 
 # ── Sheet builders ───────────────────────────────────────────────────────────
@@ -691,7 +691,18 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
         ot_other = 0
         last_sync = "—"
 
-        # New explicit schema (29 cols)
+        # New explicit schema (30 cols): UE(Total) at 7, UE(Cases) at 8
+        if len(row_values) >= 30:
+            for i, case_type in enumerate(CASE_TYPE_COLUMNS):
+                reg_explicit[case_type] = _num(row_values, 9 + i)
+            reg_other = _num(row_values, 18)
+            for i, case_type in enumerate(CASE_TYPE_COLUMNS):
+                ot_explicit[case_type] = _num(row_values, 19 + i)
+            ot_other = _num(row_values, 28)
+            last_sync = row_values[29] if row_values[29] else "—"
+            return reg_explicit, reg_other, ot_explicit, ot_other, last_sync
+
+        # Previous explicit schema (29 cols)
         if len(row_values) >= 29:
             for i, case_type in enumerate(CASE_TYPE_COLUMNS):
                 reg_explicit[case_type] = _num(row_values, 8 + i)
@@ -744,10 +755,12 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
                 reg_cases  = _num(row, 5)
                 ot_cases   = _num(row, 6)
                 ue         = _flt(row, 7)
+                ue_cases   = _flt(row, 8) if len(row) >= 30 else 0.0
                 reg_explicit, reg_other, ot_explicit, ot_other, last_sync = _parse_summary_type_counts(row)
 
                 entry = (designer_name, d_str, week, cases_pct, dt_pct,
                          total_pct, reg_cases, ot_cases, ue,
+                         ue_cases,
                          reg_explicit, reg_other,
                          ot_explicit, ot_other,
                          last_sync)
@@ -762,6 +775,7 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     all_designers = sorted({r[0] for r in all_rows})
     _blank = lambda d: (d, today_str, "", 0.0, 0.0, 0.0,
                         0, 0, 0.0,
+                        0.0,
                         {name: 0 for name in CASE_TYPE_COLUMNS}, 0,
                         {name: 0 for name in CASE_TYPE_COLUMNS}, 0,
                         "—")
@@ -772,12 +786,12 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     # ════════════════════════════════════════════════════════════════════════
     # SHEET 1 — Dashboard (today_str snapshot)
     # ════════════════════════════════════════════════════════════════════════
-    # Columns: Designer | Cases% | DT% | Total% | UE | Reg |
+    # Columns: Designer | Cases% | DT% | Total% | UE(Cases) | UE(Total) | Reg |
     #          Reg <all CASE_TYPE_COLUMNS> | Reg Other |
     #          Last Sync | Status
     dash_headers = [
         "Designer", "Cases (%)", "Downtime (%)", "Total (%)",
-        "UE", "Reg Cases",
+        "UE (Cases)", "UE (w/ DT)", "Reg Cases",
     ] + [f"Reg {name}" for name in CASE_TYPE_COLUMNS] + [
         "Reg Other", "Last Sync", "Status"
     ]
@@ -811,6 +825,7 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
             reg_cases,
             ot_cases,
             ue,
+            ue_cases,
             reg_explicit,
             reg_other,
             ot_explicit,
@@ -847,10 +862,11 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
             bg=total_bg,
             align="center",
         )
-        _cell(ws_dash.cell(row, 5), f"{ue:.2f}" if not no_data else dash, align="right", bg=bg)
-        _cell(ws_dash.cell(row, 6), reg_cases if not no_data else dash, align="center", bg=bg)
+        _cell(ws_dash.cell(row, 5), f"{ue_cases:.2f}" if not no_data else dash, align="right", bg=bg)
+        _cell(ws_dash.cell(row, 6), f"{ue:.2f}" if not no_data else dash, align="right", bg=bg)
+        _cell(ws_dash.cell(row, 7), reg_cases if not no_data else dash, align="center", bg=bg)
 
-        write_col = 7
+        write_col = 8
         for case_type in CASE_TYPE_COLUMNS:
             _cell(
                 ws_dash.cell(row, write_col),
@@ -867,7 +883,7 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
         _cell(ws_dash.cell(row, write_col), status_text, bold=True, color=status_fg, bg=status_bg, align="center")
 
     # Team averages row
-    active_today = [e for e in today_rows if not (e[6] == 0 and e[7] == 0 and e[13] == "—")]
+    active_today = [e for e in today_rows if not (e[6] == 0 and e[7] == 0 and e[14] == "—")]
     if active_today:
         tr = len(today_rows) + 3
         n  = len(active_today)
@@ -884,17 +900,20 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
         _hdr(ws_dash.cell(tr,  4), f"{avg_total:.1f}%",
              bg=_production_color(avg_total), color=_HEADER_FG)
         _hdr(ws_dash.cell(tr,  5),
+             f"{sum(e[9]  for e in active_today):.2f}",
+             bg=TOTALS_BG, color=_HEADER_FG)
+        _hdr(ws_dash.cell(tr,  6),
              f"{sum(e[8]  for e in active_today):.2f}",
              bg=TOTALS_BG, color=_HEADER_FG)
-        _hdr(ws_dash.cell(tr,  6), sum(e[6]  for e in active_today),
+        _hdr(ws_dash.cell(tr,  7), sum(e[6]  for e in active_today),
              bg=TOTALS_BG, color=_HEADER_FG)
-        write_col = 7
+        write_col = 8
         for case_type in CASE_TYPE_COLUMNS:
             _hdr(ws_dash.cell(tr, write_col),
-                 sum(e[9].get(case_type, 0) for e in active_today),
+                 sum(e[10].get(case_type, 0) for e in active_today),
                  bg=TOTALS_BG, color=_HEADER_FG)
             write_col += 1
-        _hdr(ws_dash.cell(tr, write_col), sum(e[10] for e in active_today),
+        _hdr(ws_dash.cell(tr, write_col), sum(e[11] for e in active_today),
              bg=TOTALS_BG, color=_HEADER_FG)
         write_col += 1
         _hdr(ws_dash.cell(tr, write_col), "", bg=TOTALS_BG, color=_HEADER_FG)
@@ -908,9 +927,9 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
             ws_dash.column_dimensions[col].width = 18
         elif ci in (2, 3, 4):
             ws_dash.column_dimensions[col].width = 11
-        elif ci == 5:
-            ws_dash.column_dimensions[col].width = 8
-        elif ci == 6:
+        elif ci in (5, 6):
+            ws_dash.column_dimensions[col].width = 10
+        elif ci == 7:
             ws_dash.column_dimensions[col].width = 9
         elif ci in (DASH_COLS - 1, DASH_COLS):
             ws_dash.column_dimensions[col].width = 10
@@ -928,7 +947,8 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     import datetime as _dt
 
     hist_headers = [
-        "Date", "Designer", "Total (%)", "UE",
+        "Date", "Designer", "Cases (%)", "Downtime (%)", "Total (%)",
+        "UE (Cases)", "UE (w/ DT)",
         "Reg Cases",
     ] + [f"Reg {name}" for name in CASE_TYPE_COLUMNS] + [
         "Reg Other", "Status"
@@ -1001,6 +1021,7 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     for ri, entry in enumerate(sorted_rows):
         (designer_name, d_str, _w, cases_pct, dt_pct, total_pct,
          reg_cases, ot_cases, ue,
+         ue_cases,
          reg_explicit, reg_other,
          ot_explicit, ot_other,
          last_sync) = entry
@@ -1014,12 +1035,15 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
 
         _cell(ws_hist.cell(row,  1), d_str,              align="center", bg=bg)
         _cell(ws_hist.cell(row,  2), designer_name,       bold=True,     bg=bg)
-        _cell(ws_hist.cell(row,  3), f"{total_pct:.1f}%",
+        _cell(ws_hist.cell(row,  3), f"{cases_pct:.1f}%", align="right", bg=bg)
+        _cell(ws_hist.cell(row,  4), f"{dt_pct:.1f}%",    align="right", bg=bg)
+        _cell(ws_hist.cell(row,  5), f"{total_pct:.1f}%",
               bold=True, color=_HEADER_FG, bg=total_bg, align="center")
-        _cell(ws_hist.cell(row,  4), f"{ue:.2f}",         align="right", bg=bg)
-        _cell(ws_hist.cell(row,  5), reg_cases, align="center", bg=bg)
+        _cell(ws_hist.cell(row,  6), f"{ue_cases:.2f}",   align="right", bg=bg)
+        _cell(ws_hist.cell(row,  7), f"{ue:.2f}",          align="right", bg=bg)
+        _cell(ws_hist.cell(row,  8), reg_cases, align="center", bg=bg)
 
-        write_col = 6
+        write_col = 9
         for case_type in CASE_TYPE_COLUMNS:
             _cell(
                 ws_hist.cell(row, write_col),
@@ -1056,9 +1080,11 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
         col = _gcl(ci)
         if ci in (1, 2):
             ws_hist.column_dimensions[col].width = 13
-        elif ci in (3,):
+        elif ci in (3, 4, 5):
+            ws_hist.column_dimensions[col].width = 11
+        elif ci in (6, 7):
             ws_hist.column_dimensions[col].width = 10
-        elif ci in (4, 5):
+        elif ci == 8:
             ws_hist.column_dimensions[col].width = 9
         elif ci == HIST_COLS:
             ws_hist.column_dimensions[col].width = 10
@@ -1093,7 +1119,8 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
                          n_cases: int, n_ot_cases: int,
                          ue_total: float = 0.0,
                          reg_type_counts: dict | None = None,
-                         ot_type_counts:  dict | None = None):
+                         ot_type_counts:  dict | None = None,
+                         ue_cases: float = 0.0):
     """
     NEW ARCHITECTURE — no shared-file lock problem:
 
@@ -1151,20 +1178,21 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
 
     # ── Step 2: Build fresh workbook with all rows ────────────────────────────
     # Column layout (1-indexed):
-    # 1:Date 2:Week 3:Cases% 4:DT% 5:Total% 6:RegCases 7:OTCases 8:UE
-    # 9..17: Reg explicit CASE_TYPE_COLUMNS
-    # 18:Reg Other
-    # 19..27: OT explicit CASE_TYPE_COLUMNS
-    # 28:OT Other
-    # 29:LastSync
-    NCOLS = 29
+    # 1:Date 2:Week 3:Cases% 4:DT% 5:Total% 6:RegCases 7:OTCases
+    # 8:UE(Total) 9:UE(Cases)
+    # 10..18: Reg explicit CASE_TYPE_COLUMNS
+    # 19:Reg Other
+    # 20..28: OT explicit CASE_TYPE_COLUMNS
+    # 29:OT Other
+    # 30:LastSync
+    NCOLS = 30
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = safe_name
     ws.sheet_view.showGridLines = False
     col_headers = [
         "Date", "Week", "Cases (%)", "Downtime (%)", "Total (%)",
-        "Reg Cases", "OT Cases", "UE",
+        "Reg Cases", "OT Cases", "UE (Total)", "UE (Cases)",
     ] + [f"Reg {name}" for name in CASE_TYPE_COLUMNS] + [
         "Reg Other",
     ] + [f"OT {name}" for name in CASE_TYPE_COLUMNS] + [
@@ -1203,7 +1231,8 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
     _cell(ws.cell(write_row,  6), n_cases,                   align="center", bg=bg)
     _cell(ws.cell(write_row,  7), n_ot_cases,                align="center", bg=bg)
     _cell(ws.cell(write_row,  8), round(ue_total, 2),        align="right",  bg=bg)
-    write_col = 9
+    _cell(ws.cell(write_row,  9), round(ue_cases, 2),        align="right",  bg=bg)
+    write_col = 10
     for case_type in CASE_TYPE_COLUMNS:
         _cell(ws.cell(write_row, write_col), reg_explicit.get(case_type, 0), align="center", bg=bg)
         write_col += 1
@@ -1315,13 +1344,14 @@ def export_to_sharepoint(target_date: str | None = None) -> tuple[bool, str]:
         return False, f"Could not save daily file:\n{e}"
 
     # ── Update shared team summary ────────────────────────────────────────────
-    ue_total, reg_type_counts, ot_type_counts = _get_ue_and_types(target_date)
+    ue_cases, ue_total, reg_type_counts, ot_type_counts = _get_ue_and_types(target_date)
     try:
         _update_team_summary(
             productions_dir, designer, target_date,
             total_cases_pct, total_downtime_min,
             len(cases), len(ot_cases),
-            ue_total, reg_type_counts, ot_type_counts
+            ue_total, reg_type_counts, ot_type_counts,
+            ue_cases=ue_cases,
         )
     except Exception as e:
         # Return False so the caller knows something went wrong

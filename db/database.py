@@ -285,9 +285,15 @@ def init_db():
             hora_inicio TEXT,
             hora_fin TEXT,
             razon TEXT,
-            duracion REAL
+            duracion REAL,
+            status TEXT DEFAULT 'approved'
         )
     """)
+    # Migrate existing DBs that lack the status column
+    try:
+        cursor.execute("ALTER TABLE downtimes ADD COLUMN status TEXT DEFAULT 'approved'")
+    except:
+        pass
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ot_cases (
