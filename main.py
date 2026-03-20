@@ -1,5 +1,6 @@
 import sys
 import os
+from datetime import datetime, date
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QScrollArea, QCheckBox,
     QPushButton, QMessageBox, QLabel, QLineEdit, QDialog,
@@ -10,6 +11,23 @@ from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut, QIcon
 from db.database import init_db, migrate_legacy_db
 from tabs.utils import load_units_eq_data
 import qtawesome as qta
+
+try:
+    from sync.daily_performance import (
+        init_performance_table,
+        get_daily_metrics,
+        record_daily_snapshot,
+        has_pending_justification,
+        mark_success_shown,
+        was_success_shown,
+        save_justification,
+        export_justification,
+    )
+    from tabs.performance_popups import SuccessPopup, JustificationPopup
+    _PERF_OK = True
+except Exception as _perf_err:
+    print(f"[main] Performance module unavailable: {_perf_err}")
+    _PERF_OK = False
 
 
 def _resource_path(relative: str) -> str:
@@ -131,6 +149,13 @@ class MainWindow(QMainWindow):
         # Auto-sync silently after every case save
         self.register_tab.case_saved.connect(self._silent_sync)
         self.overtime_tab.ot_saved.connect(self._silent_sync)
+
+        # Performance check after each case save
+        self._justification_blocking = False  # True while justification popup is open
+        if _PERF_OK:
+            self.register_tab.case_saved.connect(self._check_performance_after_save)
+            self.overtime_tab.ot_saved.connect(self._check_performance_after_save)
+            self._start_eod_timer()
         
         self.tabs.addTab(self.register_tab,  qta.icon('fa5s.edit',            color="#b8ceb1"), "Register")
         self.tabs.addTab(self.overtime_tab,   qta.icon('fa5s.clock',           color='#b8ceb1'), "OT")
@@ -235,6 +260,100 @@ class MainWindow(QMainWindow):
         self._sync_dialog.show()
         self._sync_dialog.raise_()
         self._sync_dialog.activateWindow()
+    # ── Daily performance logic ────────────────────────────────────────────
+
+    def _start_eod_timer(self):
+        """Schedule a check at 3:05 PM for below-target justification."""
+        if not _PERF_OK:
+            return
+        self._eod_timer = QTimer(self)
+        self._eod_timer.setInterval(30_000)  # check every 30 seconds
+        self._eod_timer.timeout.connect(self._check_eod_trigger)
+        self._eod_timer.start()
+
+    def _check_eod_trigger(self):
+        """Fires every 30s — at or after 3:15 PM, show justification popup once."""
+        now = datetime.now()
+        if now.hour < 15 or (now.hour == 15 and now.minute < 15):
+            return  # not yet 3:15 PM
+        today_str = date.today().isoformat()
+        metrics = get_daily_metrics(today_str)
+        record_daily_snapshot(today_str, metrics)
+        if metrics["met_target"]:
+            return  # on target, nothing to do
+        # Stop the timer so the popup only appears once per day
+        self._eod_timer.stop()
+        self._show_justification_popup(today_str, metrics)
+
+    def _check_performance_after_save(self):
+        """After saving a case, check if the target was just reached."""
+        if not _PERF_OK:
+            return
+        today_str = date.today().isoformat()
+        metrics = get_daily_metrics(today_str)
+        record_daily_snapshot(today_str, metrics)
+        if metrics["met_target"] and not was_success_shown(today_str):
+            mark_success_shown(today_str)
+            dlg = SuccessPopup(metrics, today_str, parent=self)
+            dlg.exec()
+
+    def _check_pending_justification_on_start(self):
+        """On app startup, block usage if there's an old unjustified day."""
+        if not _PERF_OK:
+            return
+        pending_date = has_pending_justification()
+        if not pending_date:
+            return
+        metrics = get_daily_metrics(pending_date)
+        self._show_justification_popup(pending_date, metrics)
+
+    def _show_justification_popup(self, fecha: str, metrics: dict):
+        """Show the justification popup and handle submission."""
+        self._justification_blocking = True
+        dlg = JustificationPopup(metrics, fecha, parent=self)
+        dlg.exec()
+        text = dlg.justification_text
+        if text:
+            save_justification(fecha, text)
+            # Export to shared Excel
+            try:
+                from sync.app_config import load_config
+                cfg = load_config()
+                designer = cfg.get("designer_name", "")
+                export_justification(designer, fecha, metrics, text)
+            except Exception as exc:
+                print(f"[main] Justification export failed: {exc}")
+        self._justification_blocking = False
+
+    def closeEvent(self, event):
+        """Prevent closing while a justification is required."""
+        if self._justification_blocking:
+            event.ignore()
+            return
+        # Check if there's an end-of-day justification pending right now
+        if _PERF_OK:
+            now = datetime.now()
+            if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+                today_str = date.today().isoformat()
+                metrics = get_daily_metrics(today_str)
+                record_daily_snapshot(today_str, metrics)
+                if not metrics["met_target"]:
+                    # Check if already submitted today
+                    from db.database import get_connection
+                    conn = get_connection()
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT justification_submitted FROM daily_performance WHERE fecha = ?",
+                        (today_str,),
+                    )
+                    row = cur.fetchone()
+                    conn.close()
+                    if not row or not row[0]:
+                        event.ignore()
+                        self._show_justification_popup(today_str, metrics)
+                        return
+        event.accept()
+
     def _check_first_use(self):
         """Show name confirmation dialog if the designer hasn't confirmed their name yet."""
         try:
@@ -399,6 +518,8 @@ if __name__ == "__main__":
     _migration_msg = migrate_legacy_db()
 
     init_db()
+    if _PERF_OK:
+        init_performance_table()
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(_resource_path(os.path.join("data", "app_icon.ico"))))
 
@@ -706,6 +827,10 @@ if __name__ == "__main__":
     window = MainWindow(dark_style=DARK_STYLE, light_style=LIGHT_STYLE)
     window.show()
     QTimer.singleShot(400, window._check_first_use)
+
+    # Check for pending justifications from previous days
+    if _PERF_OK:
+        QTimer.singleShot(1000, window._check_pending_justification_on_start)
 
     # Show a brief notice if the app was just self-installed
     if was_just_installed():
