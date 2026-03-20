@@ -456,7 +456,7 @@ class RegisterTab(QWidget):
         cursor.execute("""
             SELECT SUM(duracion)
             FROM downtimes
-            WHERE fecha = ?
+            WHERE fecha = ? AND (status = 'approved' OR status IS NULL)
         """, (date,))
         
         result = cursor.fetchone()

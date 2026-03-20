@@ -27,6 +27,23 @@ def card(title, widget):
     return box
 
 
+def case_type_sort_key(case_type: str):
+    """Sort case types in the business-required order for UI display/editing."""
+    order = {
+        "primary": 0,
+        "secondary": 1,
+        "cr": 2,
+        "stage rx primary": 3,
+        "stage rx secondary": 4,
+        "stage rx cr": 5,
+        "bite sync primary": 6,
+        "bite sync secondary": 7,
+        "bite sync cr": 8,
+    }
+    normalized = (case_type or "").strip().lower()
+    return (order.get(normalized, 999), normalized)
+
+
 class EditStandardDialog(QDialog):
     """Dialog for editing a standard time and equivalent units value"""
     def __init__(self, region, case_type, current_time, current_ue, parent=None):
@@ -240,7 +257,7 @@ class AddRegionDialog(QDialog):
                     if type_name not in types:
                         ue_val = reg_ue.get(type_name, round((time_value / 408.3) * 14.0, 3))
                         types[type_name] = (time_value, ue_val)
-        return dict(sorted(types.items()))
+        return dict(sorted(types.items(), key=lambda item: case_type_sort_key(item[0])))
     
     def validate_and_accept(self):
         region = self.region_input.text().strip()
@@ -573,7 +590,9 @@ class StandardsTab(QWidget):
             region_item.setExpanded(True)
 
             if "Aligners" in data:
-                for case_type, time_value in sorted(data["Aligners"].items()):
+                for case_type, time_value in sorted(
+                    data["Aligners"].items(), key=lambda item: case_type_sort_key(item[0])
+                ):
                     ue_per_case = self._resolve_ue_value(region, case_type, time_value)
                     ue_str = f"{ue_per_case:.2f}" if ue_per_case is not None else ""
                     type_item = QTreeWidgetItem([case_type, f"{time_value:.2f}", ue_str])
