@@ -17,8 +17,8 @@ Flow:
 """
 
 import os
-import subprocess
 import time
+from datetime import datetime
 
 from db.database import get_connection
 from sync.app_config import load_config
@@ -72,51 +72,24 @@ def get_approval_path() -> str | None:
 
 
 def _force_onedrive_refresh(path: str) -> None:
-    """Force OneDrive to download the latest cloud version of a file.
+    """Hint OneDrive to check for updates.
 
-    Strategy: rename the local copy to a backup, which makes OneDrive
-    re-download the file from the cloud.  If the new file appears within
-    a few seconds, we use it.  Otherwise, restore the backup so nothing
-    is lost.
+    Previous rename-based approach was counter-productive: OneDrive synced
+    the rename to the cloud, creating conflicts.  Now we just stat the
+    parent directory and the file itself, which is enough for OneDrive's
+    file-system watcher to notice activity on the folder.
     """
     if not os.path.exists(path):
         return
-    bak = path + ".bak_sync"
     try:
-        old_mtime = os.path.getmtime(path)
-        # Move local copy out of the way — OneDrive will recreate from cloud
-        os.rename(path, bak)
-
-        # Wait for OneDrive to re-download (up to ~4 seconds)
-        for _ in range(8):
-            time.sleep(0.5)
-            if os.path.exists(path):
-                break
-
-        if os.path.exists(path):
-            # OneDrive re-created it — remove backup
-            new_mtime = os.path.getmtime(path)
-            try:
-                os.remove(bak)
-            except OSError:
-                pass
-            if new_mtime != old_mtime:
-                print("[downtime_approval] OneDrive delivered fresh file.")
-            else:
-                print("[downtime_approval] OneDrive re-synced (same content).")
-        else:
-            # OneDrive didn't recreate — restore backup
-            os.rename(bak, path)
-            print("[downtime_approval] OneDrive didn't re-sync, restored local copy.")
+        parent = os.path.dirname(path)
+        os.listdir(parent)          # triggers FS watcher on the folder
+        os.stat(path)               # access the file metadata
+        mtime = os.path.getmtime(path)
+        mod_dt = datetime.fromtimestamp(mtime)
+        print(f"[downtime_approval] File last modified: {mod_dt:%H:%M:%S}")
     except Exception as exc:
-        # Restore backup if something went wrong
-        print(f"[downtime_approval] OneDrive refresh failed: {exc}")
-        if not os.path.exists(path):
-            try:
-                if os.path.exists(bak):
-                    os.rename(bak, path)
-            except OSError:
-                pass
+        print(f"[downtime_approval] refresh hint: {exc}")
 
 
 # ── export ────────────────────────────────────────────────────────────────────
@@ -138,7 +111,65 @@ def export_pending_downtimes(designer_name: str) -> bool:
     if not path:
         return False
 
-    # ── fetch this designer's pending rows from DB ───────────────────────────
+    # ── load existing file and absorb any approvals BEFORE querying DB ─────
+    #    This prevents the race condition where a supervisor approves a row
+    #    in the Excel, but our next export overwrites it back to 'pending'
+    #    because the poll hasn't run yet.
+    other_rows         = []   # pending sheet: (designer, id, date, start, end, dur, reason, status)
+    other_history_rows = []   # history sheet: same shape
+    absorbed = 0
+    if os.path.exists(path):
+        try:
+            wb_old = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            # ── approval sheet ────────────────────────────────────────────────
+            ws_old = wb_old.active
+            for r in ws_old.iter_rows(min_row=2, values_only=True):
+                if not r or r[0] is None:
+                    continue
+                row_designer = str(r[0] or "").strip()
+                # Skip placeholder rows
+                if row_designer.startswith("("):
+                    continue
+                if row_designer.lower() == designer_name.strip().lower():
+                    # Check if the supervisor changed the status
+                    try:
+                        row_id = int(r[1])
+                        status = str(r[7] or "").strip().lower()
+                        if status in (STATUS_APPROVED, STATUS_REJECTED):
+                            conn_abs = get_connection()
+                            cur_abs  = conn_abs.cursor()
+                            cur_abs.execute(
+                                "UPDATE downtimes SET status = ? WHERE id = ? AND status = 'pending'",
+                                (status, row_id),
+                            )
+                            if cur_abs.rowcount > 0:
+                                absorbed += 1
+                                print(f"[downtime_approval] Absorbed {status} for ID {row_id} during export.")
+                            conn_abs.commit()
+                            conn_abs.close()
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    other_rows.append(r)
+            # ── history sheet ─────────────────────────────────────────────────
+            if "History" in wb_old.sheetnames:
+                ws_hist_old = wb_old["History"]
+                for r in ws_hist_old.iter_rows(min_row=2, values_only=True):
+                    if not r or r[0] is None:
+                        continue
+                    row_designer = str(r[0] or "").strip()
+                    if row_designer.startswith("("):
+                        continue
+                    if row_designer.lower() != designer_name.strip().lower():
+                        other_history_rows.append(r)
+            wb_old.close()
+        except Exception as exc:
+            print(f"[downtime_approval] Could not read existing file (will overwrite): {exc}")
+
+    if absorbed > 0:
+        print(f"[downtime_approval] Absorbed {absorbed} approval(s) from file before export.")
+
+    # ── fetch this designer's pending rows from DB (AFTER absorbing) ─────────
     conn = get_connection()
     cur  = conn.cursor()
     cur.execute("""
@@ -160,38 +191,6 @@ def export_pending_downtimes(designer_name: str) -> bool:
     """)
     all_my_downtimes = cur2.fetchall()
     conn2.close()
-
-    # ── load existing file and keep other designers' rows ────────────────────
-    other_rows         = []   # pending sheet: (designer, id, date, start, end, dur, reason, status)
-    other_history_rows = []   # history sheet: same shape
-    if os.path.exists(path):
-        try:
-            wb_old = openpyxl.load_workbook(path, read_only=True, data_only=True)
-            # ── approval sheet ────────────────────────────────────────────────
-            ws_old = wb_old.active
-            for r in ws_old.iter_rows(min_row=2, values_only=True):
-                if not r or r[0] is None:
-                    continue
-                row_designer = str(r[0] or "").strip()
-                # Skip placeholder rows
-                if row_designer.startswith("("):
-                    continue
-                if row_designer.lower() != designer_name.strip().lower():
-                    other_rows.append(r)
-            # ── history sheet ─────────────────────────────────────────────────
-            if "History" in wb_old.sheetnames:
-                ws_hist_old = wb_old["History"]
-                for r in ws_hist_old.iter_rows(min_row=2, values_only=True):
-                    if not r or r[0] is None:
-                        continue
-                    row_designer = str(r[0] or "").strip()
-                    if row_designer.startswith("("):
-                        continue
-                    if row_designer.lower() != designer_name.strip().lower():
-                        other_history_rows.append(r)
-            wb_old.close()
-        except Exception as exc:
-            print(f"[downtime_approval] Could not read existing file (will overwrite): {exc}")
 
     # ── build workbook ───────────────────────────────────────────────────────
     wb = openpyxl.Workbook()

@@ -244,6 +244,37 @@ def save_justification(fecha: str, text: str):
 
 # ── Excel export ─────────────────────────────────────────────────────────────
 
+def _get_over_standard_cases(fecha: str) -> list:
+    """Return cases where tiempo_real > std_time for the given date.
+
+    Each row: (case_id, region, tipo_caso, doctor, hora_inicio, hora_fin,
+               tiempo_real, std_time, difference)
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT case_id, region, tipo_caso, doctor,
+               hora_inicio, hora_fin, tiempo_real, std_time
+        FROM cases
+        WHERE fecha = ?
+          AND (count_production = 1 OR count_production IS NULL)
+          AND tiempo_real > std_time
+          AND std_time > 0
+        ORDER BY (tiempo_real - std_time) DESC
+    """, (fecha,))
+    rows = cur.fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        case_id, region, tipo, doctor, h_ini, h_fin, t_real, t_std = r
+        diff = round((t_real or 0) - (t_std or 0), 2)
+        result.append((case_id, region, tipo, doctor or "",
+                        h_ini or "", h_fin or "",
+                        round(t_real or 0, 2), round(t_std or 0, 2), diff))
+    return result
+
+
 def export_justification(designer_name: str, fecha: str, metrics: dict, justification: str) -> bool:
     """Append justification to the shared Excel file."""
     if not _OPENPYXL_OK:
@@ -265,6 +296,7 @@ def export_justification(designer_name: str, fecha: str, metrics: dict, justific
 
     # Load existing or create new
     existing_rows = []
+    existing_over = []
     if os.path.exists(path):
         try:
             wb_old = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -272,6 +304,15 @@ def export_justification(designer_name: str, fecha: str, metrics: dict, justific
             for r in ws_old.iter_rows(min_row=2, values_only=True):
                 if r and r[0] is not None:
                     existing_rows.append(r)
+            # Read existing over-standard rows (other designers/dates)
+            if "Over-Standard Cases" in wb_old.sheetnames:
+                ws_old2 = wb_old["Over-Standard Cases"]
+                for r in ws_old2.iter_rows(min_row=2, values_only=True):
+                    if r and r[0] is not None:
+                        r_designer = str(r[0] or "").strip().lower()
+                        r_date = str(r[1] or "").strip()
+                        if r_designer != designer_name.strip().lower() or r_date != fecha:
+                            existing_over.append(r)
             wb_old.close()
         except Exception:
             pass
@@ -331,11 +372,74 @@ def export_justification(designer_name: str, fecha: str, metrics: dict, justific
         ws.column_dimensions[col_letter].width = width
     ws.row_dimensions[1].height = 22
     ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:H{row_idx}"
 
-    # Protect entire sheet — read-only for everyone
+    # Protect entire sheet — read-only but allow filtering
     ws.protection.sheet = True
     ws.protection.password = "spark2026"
+    ws.protection.autoFilter = False
+    ws.protection.sort = False
     ws.protection.enable()
+
+    # ── Sheet 2: Over-standard cases ─────────────────────────────────────────
+    over_cases = _get_over_standard_cases(fecha)
+
+    ws2 = wb.create_sheet("Over-Standard Cases")
+    ws2.sheet_view.showGridLines = False
+
+    over_headers = [
+        "Designer", "Date", "Case ID", "Region", "Case Type",
+        "Doctor", "Start", "End", "Actual (min)", "Standard (min)", "Over (min)",
+    ]
+    over_hdr_fill = PatternFill("solid", fgColor="C62828")
+    for col, h in enumerate(over_headers, 1):
+        cell = ws2.cell(1, col, h)
+        cell.fill = over_hdr_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = _thin()
+        cell.protection = _locked
+
+    ov_row_fill = PatternFill("solid", fgColor="FFEBEE")
+    ov_idx = 2
+
+    # Write existing over-standard rows (other designers/dates)
+    for r in existing_over:
+        for c, val in enumerate(r, 1):
+            cell = ws2.cell(ov_idx, c, val)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.fill = ov_row_fill
+            cell.border = _thin()
+            cell.protection = _locked
+        ov_idx += 1
+
+    # Write current designer's over-standard cases
+    for case_row in over_cases:
+        case_id, region, tipo, doctor, h_ini, h_fin, t_real, t_std, diff = case_row
+        vals = [designer_name, fecha, case_id, region, tipo,
+                doctor, h_ini, h_fin, t_real, t_std, diff]
+        for c, val in enumerate(vals, 1):
+            cell = ws2.cell(ov_idx, c, val)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.fill = ov_row_fill
+            cell.border = _thin()
+            cell.protection = _locked
+        ov_idx += 1
+
+    # Column widths for over-standard sheet
+    ov_widths = {"A": 22, "B": 14, "C": 14, "D": 16, "E": 16,
+                 "F": 22, "G": 10, "H": 10, "I": 14, "J": 14, "K": 14}
+    for col_letter, width in ov_widths.items():
+        ws2.column_dimensions[col_letter].width = width
+    ws2.row_dimensions[1].height = 22
+    ws2.freeze_panes = "A2"
+    ws2.auto_filter.ref = f"A1:K{ov_idx}"
+
+    ws2.protection.sheet = True
+    ws2.protection.password = "spark2026"
+    ws2.protection.autoFilter = False
+    ws2.protection.sort = False
+    ws2.protection.enable()
 
     # Save with retry
     for attempt in range(3):

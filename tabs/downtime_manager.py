@@ -3,7 +3,7 @@ import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTimeEdit, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QComboBox, QMessageBox,
-    QHeaderView
+    QHeaderView, QDialog, QTextEdit, QDialogButtonBox, QVBoxLayout, QLabel
 )
 from PySide6.QtCore import QTime, QDate, QTimer, Qt
 from PySide6.QtGui import QColor
@@ -20,6 +20,12 @@ try:
 except Exception as _approval_err:
     print(f"[downtime_manager] Approval module unavailable: {_approval_err}")
     _APPROVAL_OK = False
+
+try:
+    from sync.teams_notify import notify_downtime_submitted
+    _TEAMS_OK = True
+except Exception:
+    _TEAMS_OK = False
 
 
 class DowntimeManager(QWidget):
@@ -223,23 +229,25 @@ class DowntimeManager(QWidget):
         if duration < 0:
             duration += 24 * 60
 
+        detalle = self._get_downtime_detail()
+        if detalle is None:
+            return  # Cancelado por el usuario
+
         conn = get_connection()
         cursor = conn.cursor()
-
         cursor.execute("""
-            INSERT INTO downtimes (fecha, hora_inicio, hora_fin, razon, duracion, status)
-            VALUES (?, ?, ?, ?, ?, 'pending')
+            INSERT INTO downtimes (fecha, hora_inicio, hora_fin, razon, duracion, status, detalle)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
         """, (
             self.current_date,
             start,
             end,
             reason,
-            duration
+            duration,
+            detalle
         ))
-
         conn.commit()
         conn.close()
-
         self.load_downtimes()
         self.downtime_start.setTime(QTime.currentTime())
         self.downtime_end.setTime(QTime.currentTime())
@@ -247,18 +255,53 @@ class DowntimeManager(QWidget):
         # Export pending entries to approval Excel
         if _APPROVAL_OK:
             cfg = load_config()
-            export_pending_downtimes(cfg.get("designer_name", ""))
+            designer = cfg.get("designer_name", "")
+            export_pending_downtimes(designer)
+            # Send Teams notification to supervisors
+            if _TEAMS_OK:
+                notify_downtime_submitted(
+                    designer=designer,
+                    fecha=self.current_date,
+                    start=start,
+                    end=end,
+                    duration=duration,
+                    reason=reason,
+                    detalle=detalle,
+                )
 
         # Trigger callback to update production
         if self.on_update_callback:
             self.on_update_callback()
+
+    def _get_downtime_detail(self) -> str:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Detalle del Downtime")
+        layout = QVBoxLayout(dialog)
+        label = QLabel("Por favor describe el motivo del downtime (obligatorio):")
+        layout.addWidget(label)
+        text_edit = QTextEdit()
+        text_edit.setPlaceholderText("Ejemplo: 'El sistema CMS estuvo caído por mantenimiento desde las 10:00 hasta las 10:30.'")
+        layout.addWidget(text_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        while True:
+            if dialog.exec() == QDialog.Accepted:
+                detalle = text_edit.toPlainText().strip()
+                if len(detalle) < 10:
+                    QMessageBox.warning(self, "Detalle requerido", "Por favor ingresa al menos 10 caracteres de detalle.")
+                    continue
+                return detalle
+            else:
+                return None
 
     def load_downtimes(self):
         conn = get_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT id, hora_inicio, hora_fin, duracion, razon, status
+            SELECT id, hora_inicio, hora_fin, duracion, razon, status, detalle
             FROM downtimes
             WHERE fecha = ?
             ORDER BY hora_inicio DESC
@@ -282,7 +325,7 @@ class DowntimeManager(QWidget):
         }
 
         for idx, row in enumerate(rows):
-            row_id, start, end, duration, reason, status = row
+            row_id, start, end, duration, reason, status, detalle = row
             status = (status or "approved").lower()
 
             values = [start, end, str(duration), reason, _STATUS_LABELS.get(status, status)]

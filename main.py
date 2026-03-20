@@ -154,7 +154,6 @@ class MainWindow(QMainWindow):
         self._justification_blocking = False  # True while justification popup is open
         if _PERF_OK:
             self.register_tab.case_saved.connect(self._check_performance_after_save)
-            self.overtime_tab.ot_saved.connect(self._check_performance_after_save)
             self._start_eod_timer()
         
         self.tabs.addTab(self.register_tab,  qta.icon('fa5s.edit',            color="#b8ceb1"), "Register")

@@ -59,6 +59,7 @@ _DEFAULTS = {
     "name_confirmed": False,   
     "export_folder": "",
     "auto_sync_hours": 0,
+    "teams_webhook": "",
 }
 
 

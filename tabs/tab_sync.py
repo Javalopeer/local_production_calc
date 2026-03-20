@@ -82,6 +82,15 @@ class SyncTab(QWidget):
         self.folder_hint.setStyleSheet("color: #66bb6a; font-size: 10px;")
         form.addRow("", self.folder_hint)
 
+        # Teams Webhook for downtime notifications
+        self.webhook_url = QLineEdit()
+        self.webhook_url.setPlaceholderText("https://... (Teams Incoming Webhook URL for downtime alerts)")
+        form.addRow("Teams Webhook:", self.webhook_url)
+
+        webhook_hint = QLabel("Optional — notifies supervisors in Teams when a downtime is submitted.")
+        webhook_hint.setStyleSheet("color: #888; font-size: 10px;")
+        form.addRow("", webhook_hint)
+
         save_btn = QPushButton("Save Settings")
         save_btn.setFixedWidth(130)
         save_btn.clicked.connect(self._save_settings)
@@ -153,6 +162,7 @@ class SyncTab(QWidget):
         try:
             cfg = load_config()
             self.designer_name.setText(cfg.get("designer_name", ""))
+            self.webhook_url.setText(cfg.get("teams_webhook", ""))
             folder = cfg.get("export_folder", "")
             self.export_folder.setText(folder)
             if folder:
@@ -172,6 +182,7 @@ class SyncTab(QWidget):
             cfg = load_config()
             cfg["designer_name"] = self.designer_name.text().strip()
             cfg["export_folder"] = self.export_folder.text().strip()
+            cfg["teams_webhook"] = self.webhook_url.text().strip()
             save_config(cfg)
             self._log("✓ Settings saved.")
         except Exception as e:
