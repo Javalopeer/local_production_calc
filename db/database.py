@@ -289,9 +289,21 @@ def init_db():
             status TEXT DEFAULT 'approved'
         )
     """)
-    # Migrate existing DBs that lack the status column
+    # Migrate existing DBs that lack the status or detalle columns
     try:
         cursor.execute("ALTER TABLE downtimes ADD COLUMN status TEXT DEFAULT 'approved'")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE downtimes ADD COLUMN detalle TEXT DEFAULT ''")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE downtimes ADD COLUMN responded_by TEXT DEFAULT ''")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE downtimes ADD COLUMN responded_at TEXT DEFAULT ''")
     except:
         pass
 
