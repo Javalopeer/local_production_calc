@@ -10,6 +10,10 @@ from PySide6.QtCore import Qt, Signal, QThread, QTimer
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut, QIcon
 from db.database import init_db, migrate_legacy_db
 from tabs.utils import load_units_eq_data
+from tabs.breaks_dialog import (
+    init_breaks_table, BreaksDialog, get_breaks,
+    get_breaks_answered_today, set_break_attendance, _to_minutes,
+)
 import qtawesome as qta
 
 try:
@@ -123,6 +127,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.themeChanged.connect(self.standards_tab.update_theme_labels)
+        except Exception:
+            pass
+        try:
             self.themeChanged.connect(self.dashboard_tab.update_theme_labels)
         except Exception:
             pass
@@ -155,13 +163,22 @@ class MainWindow(QMainWindow):
         if _PERF_OK:
             self.register_tab.case_saved.connect(self._check_performance_after_save)
             self._start_eod_timer()
+
+        # Break reminder timer — asks "going on break?" ~10 min before each break
+        self._break_reminder_shown = set()  # (fecha, break_id) already asked today
+        self._start_break_reminder_timer()
         
-        self.tabs.addTab(self.register_tab,  qta.icon('fa5s.edit',            color="#b8ceb1"), "Register")
-        self.tabs.addTab(self.overtime_tab,   qta.icon('fa5s.clock',           color='#b8ceb1'), "OT")
-        self.tabs.addTab(self.production_tab, qta.icon('fa5s.chart-bar',       color='#b8ceb1'), "Production")
-        self.tabs.addTab(self.history_tab,    qta.icon('fa5s.history',         color='#b8ceb1'), "History")
-        self.tabs.addTab(self.standards_tab,  qta.icon('fa5s.cog',             color='#b8ceb1'), "Standards")
-        self.tabs.addTab(self.dashboard_tab,  qta.icon('fa5s.tachometer-alt',  color='#b8ceb1'), "Dashboard")
+        self._tab_icons = [
+            'fa5s.edit', 'fa5s.clock', 'fa5s.chart-bar',
+            'fa5s.history', 'fa5s.cog', 'fa5s.tachometer-alt',
+        ]
+        _ic = "#b8ceb1"
+        self.tabs.addTab(self.register_tab,  qta.icon(self._tab_icons[0], color=_ic), "Register")
+        self.tabs.addTab(self.overtime_tab,   qta.icon(self._tab_icons[1], color=_ic), "OT")
+        self.tabs.addTab(self.production_tab, qta.icon(self._tab_icons[2], color=_ic), "Production")
+        self.tabs.addTab(self.history_tab,    qta.icon(self._tab_icons[3], color=_ic), "History")
+        self.tabs.addTab(self.standards_tab,  qta.icon(self._tab_icons[4], color=_ic), "Standards")
+        self.tabs.addTab(self.dashboard_tab,  qta.icon(self._tab_icons[5], color=_ic), "Dashboard")
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabBar().setUsesScrollButtons(True)
 
@@ -181,6 +198,18 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(640, 550)  # Minimum width 640px
         self.setMaximumSize(900, screen_height)  # Maximum height = monitor height
         self.resize(900, 700)  # Default size 900x700
+        # Breaks configuration button in status bar
+        try:
+            btn_breaks = QPushButton()
+            btn_breaks.setIcon(qta.icon('fa5s.utensils', color='#FFA726'))
+            btn_breaks.setToolTip("Configure break times")
+            btn_breaks.setFixedSize(28, 20)
+            btn_breaks.setStyleSheet("padding: 1px 3px; border-radius: 3px;")
+            btn_breaks.clicked.connect(self._open_breaks_dialog)
+            self.statusBar().addPermanentWidget(btn_breaks)
+        except Exception:
+            pass
+
         # Theme toggle checkbox in status bar
         try:
             light_chk = QCheckBox("Light")
@@ -188,6 +217,10 @@ class MainWindow(QMainWindow):
             def on_theme_toggled(checked):
                 self._is_light = checked
                 self._apply_style()
+                # Update tab icons for contrast
+                _icon_color = "#242038" if checked else "#b8ceb1"
+                for i, name in enumerate(self._tab_icons):
+                    self.tabs.setTabIcon(i, qta.icon(name, color=_icon_color))
                 # Emit a single signal so tabs update themselves (clean approach)
                 try:
                     self.themeChanged.emit(checked)
@@ -236,7 +269,7 @@ class MainWindow(QMainWindow):
             btn_sync = _QPB("⬆ Sync")
             btn_sync.setFixedSize(54, 20)
             btn_sync.setToolTip("Export to SharePoint")
-            btn_sync.setStyleSheet("font-size: 10px; padding: 1px 3px; font-weight: bold; background:#2E75B6; color:white; border-radius:3px;")
+            btn_sync.setStyleSheet("font-size: 10px; padding: 1px 3px; font-weight: bold; border-radius:3px;")
             btn_sync.clicked.connect(self._open_sync_dialog)
             self.statusBar().addPermanentWidget(btn_sync)
 
@@ -246,6 +279,11 @@ class MainWindow(QMainWindow):
             self.statusBar().addWidget(self._sync_status_label)
         except Exception:
             pass
+
+    def _open_breaks_dialog(self):
+        """Open the breaks configuration dialog."""
+        dlg = BreaksDialog(self)
+        dlg.exec()
 
     def _open_sync_dialog(self):
         """Open the Sync panel as a floating dialog."""
@@ -261,6 +299,11 @@ class MainWindow(QMainWindow):
         self._sync_dialog.activateWindow()
     # ── Daily performance logic ────────────────────────────────────────────
 
+    @staticmethod
+    def _is_weekday() -> bool:
+        """Return True if today is Monday–Friday."""
+        return date.today().weekday() < 5  # 0=Mon, 4=Fri
+
     def _start_eod_timer(self):
         """Schedule a check at 3:05 PM for below-target justification."""
         if not _PERF_OK:
@@ -270,23 +313,87 @@ class MainWindow(QMainWindow):
         self._eod_timer.timeout.connect(self._check_eod_trigger)
         self._eod_timer.start()
 
+    # ── Break reminder ─────────────────────────────────────────────────────
+    def _start_break_reminder_timer(self):
+        """Check every 60s if a break starts in ~10 minutes and ask the user."""
+        self._break_timer = QTimer(self)
+        self._break_timer.setInterval(60_000)  # every 60 seconds
+        self._break_timer.timeout.connect(self._check_break_reminder)
+        self._break_timer.start()
+
+    def _check_break_reminder(self):
+        """If a configured break starts in ≤10 minutes, show a popup asking
+        whether the user is going on that break."""
+        now = datetime.now()
+        today_str = date.today().isoformat()
+        now_mins = now.hour * 60 + now.minute
+
+        breaks = get_breaks()
+        answered = get_breaks_answered_today(today_str)
+
+        for bid, name, b_start_str, _b_end_str in breaks:
+            if bid in answered:
+                continue  # already answered today
+            key = (today_str, bid)
+            if key in self._break_reminder_shown:
+                continue  # already shown popup this session
+            b_start = _to_minutes(b_start_str)
+            # Show popup when we are 0–10 minutes before the break starts
+            mins_until = b_start - now_mins
+            if 0 <= mins_until <= 10:
+                self._break_reminder_shown.add(key)
+                self._show_break_popup(today_str, bid, name, b_start_str, _b_end_str)
+
+    def _show_break_popup(self, fecha: str, break_id: int, name: str,
+                          start: str, end: str):
+        """Small popup: 'Are you going on break <name> (HH:mm – HH:mm)?'"""
+        result = QMessageBox.question(
+            self,
+            "Break Reminder",
+            f"Are you going on break?\n\n"
+            f"{name}  ({start} – {end})\n\n"
+            f"If YES, break time will be subtracted from\n"
+            f"any case that overlaps with this period.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        took = result == QMessageBox.StandardButton.Yes
+        set_break_attendance(fecha, break_id, took)
+
     def _check_eod_trigger(self):
         """Fires every 30s — at or after 3:15 PM, show justification popup once."""
+        if not self._is_weekday():
+            return  # skip weekends
         now = datetime.now()
         if now.hour < 15 or (now.hour == 15 and now.minute < 15):
             return  # not yet 3:15 PM
         today_str = date.today().isoformat()
+        # Check if justification was already submitted today
+        from db.database import get_connection
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT justification_submitted FROM daily_performance WHERE fecha = ?",
+            (today_str,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            return  # already submitted, don't show again
         metrics = get_daily_metrics(today_str)
         record_daily_snapshot(today_str, metrics)
         if metrics["met_target"]:
             return  # on target, nothing to do
+        # Skip if zero production (person wasn't producing today)
+        if metrics["production_pct"] == 0 and metrics["equivalent_units"] == 0:
+            return
         # Stop the timer so the popup only appears once per day
         self._eod_timer.stop()
         self._show_justification_popup(today_str, metrics)
 
     def _check_performance_after_save(self):
         """After saving a case, check if the target was just reached."""
-        if not _PERF_OK:
+        if not _PERF_OK or not self._is_weekday():
             return
         today_str = date.today().isoformat()
         metrics = get_daily_metrics(today_str)
@@ -298,7 +405,7 @@ class MainWindow(QMainWindow):
 
     def _check_pending_justification_on_start(self):
         """On app startup, block usage if there's an old unjustified day."""
-        if not _PERF_OK:
+        if not _PERF_OK or not self._is_weekday():
             return
         pending_date = has_pending_justification()
         if not pending_date:
@@ -330,13 +437,13 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         # Check if there's an end-of-day justification pending right now
-        if _PERF_OK:
+        if _PERF_OK and self._is_weekday():
             now = datetime.now()
             if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
                 today_str = date.today().isoformat()
                 metrics = get_daily_metrics(today_str)
                 record_daily_snapshot(today_str, metrics)
-                if not metrics["met_target"]:
+                if not metrics["met_target"] and (metrics["production_pct"] > 0 or metrics["equivalent_units"] > 0):
                     # Check if already submitted today
                     from db.database import get_connection
                     conn = get_connection()
@@ -517,6 +624,7 @@ if __name__ == "__main__":
     _migration_msg = migrate_legacy_db()
 
     init_db()
+    init_breaks_table()
     if _PERF_OK:
         init_performance_table()
     app = QApplication(sys.argv)
@@ -748,17 +856,18 @@ if __name__ == "__main__":
     }
 
     QTabBar::tab {
-        background: #8D86C9;
-        padding: 6px 10px;
+        background: #CAC4CE;
+        padding: 4px 6px;
         border-radius: 6px;
-        margin-left: 6px;
-        margin-right: 2px;
+        margin-left: 3px;
+        margin-right: 1px;
         margin-top: 8px;
         margin-bottom: 4px;
-        border: 1px solid #8D86C9;
-        color: white;
+        border: 1px solid #CAC4CE;
+        color: #242038;
         font-weight: 500;
-        min-width: 64px;
+        font-size: 11px;
+        min-width: 40px;
     }
 
     QTabBar::tab:hover {
@@ -767,9 +876,9 @@ if __name__ == "__main__":
     }
 
     QTabBar::tab:selected {
-        background: #8D86C9;
+        background: #725AC1;
         color: white;
-        border: 1px solid #8D86C9;
+        border: 1px solid #725AC1;
     }
 
     QGroupBox {
@@ -826,6 +935,18 @@ if __name__ == "__main__":
     window = MainWindow(dark_style=DARK_STYLE, light_style=LIGHT_STYLE)
     window.show()
     QTimer.singleShot(400, window._check_first_use)
+
+    # Cleanup old Excel exports in background (runs once per day, never touches DB)
+    def _run_cleanup():
+        import threading
+        def _bg():
+            try:
+                from sync.cleanup import run_cleanup
+                run_cleanup()
+            except Exception as exc:
+                print(f"[main] Cleanup error: {exc}")
+        threading.Thread(target=_bg, daemon=True).start()
+    QTimer.singleShot(3000, _run_cleanup)
 
     # Check for pending justifications from previous days
     if _PERF_OK:
