@@ -76,6 +76,11 @@ class OvertimeTab(QWidget):
         standards_path = get_resource_path(os.path.join("data", "standards.json"))
         with open(standards_path, "r") as f:
             self.standards = json.load(f)
+        # Ensure "New Impressions" mirrors "Secondary" in every region
+        for _r, _d in self.standards.items():
+            _a = _d.get("Aligners", {}) if isinstance(_d, dict) else {}
+            if isinstance(_a, dict) and "Secondary" in _a:
+                _a["New Impressions"] = _a["Secondary"]
 
     def load_units_eq(self):
         self.units_eq = load_units_eq_data()
@@ -188,12 +193,11 @@ class OvertimeTab(QWidget):
         )
         import_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1a5c2a;
-                color: #7ec890;
+                background-color: #4CAF50;
+                color: white;
             }
             QPushButton:hover {
-                background-color: #236b32;
-                color: #a8e6b8;
+                background-color: #388E3C;
             }
         """)
         import_btn.clicked.connect(self._on_import_case)
@@ -1356,8 +1360,16 @@ class OvertimeTab(QWidget):
         end = self.end_time.time()
 
         tiempo_real = start.secsTo(end) / 60
-        if tiempo_real <= 0:
-            self.result_label.setText("Invalid time")
+        if tiempo_real < 1:
+            self.result_label.setText("Invalid time (minimum 1 minute)")
+            return
+
+        # Subtract only breaks the user confirmed they took today
+        from tabs.breaks_dialog import calculate_break_overlap
+        break_mins = calculate_break_overlap(start.toString("HH:mm"), end.toString("HH:mm"), fecha=case_date)
+        tiempo_real -= break_mins
+        if tiempo_real < 1:
+            self.result_label.setText("Case falls entirely within break time")
             return
 
         if not case_id.strip():

@@ -7,7 +7,7 @@ from PySide6.QtCore import QDate, Qt, QThread, Signal
 from PySide6.QtGui import QFont
 
 try:
-    from sync.app_config import load_config, save_config
+    from sync.app_config import load_config, save_config, save_shared_config
     from sync.sharepoint_sync import export_to_sharepoint
     _SYNC_AVAILABLE = True
 except Exception as _e:
@@ -94,8 +94,7 @@ class SyncTab(QWidget):
         save_btn = QPushButton("Save Settings")
         save_btn.setFixedWidth(130)
         save_btn.clicked.connect(self._save_settings)
-        save_btn.setStyleSheet("QPushButton { background: #2E75B6; color: white; border-radius: 4px; padding: 4px 12px; }"
-                               "QPushButton:hover { background: #1F5C9E; }")
+        save_btn.setStyleSheet("QPushButton { border-radius: 4px; padding: 4px 12px; }")
         form.addRow("", save_btn)
 
         root.addWidget(settings_box)
@@ -184,7 +183,15 @@ class SyncTab(QWidget):
             cfg["export_folder"] = self.export_folder.text().strip()
             cfg["teams_webhook"] = self.webhook_url.text().strip()
             save_config(cfg)
-            self._log("✓ Settings saved.")
+            # Also save webhook to shared folder so all team members get it
+            if cfg.get("teams_webhook") and cfg.get("export_folder"):
+                shared = {"teams_webhook": cfg["teams_webhook"]}
+                if save_shared_config(shared):
+                    self._log("✓ Settings saved (webhook shared with team).")
+                else:
+                    self._log("✓ Settings saved (shared config could not be updated).")
+            else:
+                self._log("✓ Settings saved.")
         except Exception as e:
             self._log(f"Error saving settings: {e}", error=True)
 

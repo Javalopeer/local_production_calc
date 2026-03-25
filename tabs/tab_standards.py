@@ -322,6 +322,21 @@ class StandardsTab(QWidget):
         self.load_units_eq()
         self.init_ui()
     
+    @staticmethod
+    def _inject_new_impressions(standards: dict):
+        """Ensure every region has 'New Impressions' = same value as 'Secondary'.
+
+        Called after loading/importing standards so the type is always present
+        even if the JSON doesn't contain it explicitly.
+        """
+        for region, data in standards.items():
+            aligners = data.get("Aligners", {}) if isinstance(data, dict) else {}
+            if not isinstance(aligners, dict):
+                continue
+            sec_val = aligners.get("Secondary")
+            if sec_val is not None:
+                aligners["New Impressions"] = sec_val
+
     def load_standards(self):
         """Load standards from JSON file"""
         standards_path = get_resource_path(os.path.join("data", "standards.json"))
@@ -331,6 +346,7 @@ class StandardsTab(QWidget):
         except Exception as e:
             print(f"Error loading standards: {e}")
             self.standards = {}
+        self._inject_new_impressions(self.standards)
 
     def load_units_eq(self):
         """Load equivalent units from JSON file"""
@@ -434,6 +450,7 @@ class StandardsTab(QWidget):
         self.tree.setStyleSheet("""
             QTreeWidget {
                 background-color: #2b2b2b;
+                alternate-background-color: #333338;
                 border: 1px solid #3c3c3c;
                 border-radius: 6px;
             }
@@ -453,56 +470,8 @@ class StandardsTab(QWidget):
         
         main_layout.addWidget(self.tree)
         
-        # Action buttons
-        action_layout = QHBoxLayout()
-        action_layout.addStretch()
-        
-        add_region_btn = QPushButton("Add Region")
-        add_region_btn.setMaximumWidth(100)
-        add_region_btn.clicked.connect(self.add_region)
-        action_layout.addWidget(add_region_btn)
-        
-        add_type_btn = QPushButton("Add Type")
-        add_type_btn.setMaximumWidth(100)
-        add_type_btn.clicked.connect(self.add_type)
-        action_layout.addWidget(add_type_btn)
-        
-        edit_btn = QPushButton("Edit")
-        edit_btn.setMaximumWidth(100)
-        edit_btn.clicked.connect(self.edit_selected)
-        action_layout.addWidget(edit_btn)
-        
-        delete_btn = QPushButton("Delete")
-        delete_btn.setMaximumWidth(110)
-        delete_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #F44336;
-            }
-            QPushButton:hover {
-                background-color: #D32F2F;
-            }
-        """)
-        delete_btn.clicked.connect(self.delete_selected)
-        action_layout.addWidget(delete_btn)
-        
-        save_btn = QPushButton("Save Changes")
-        save_btn.setMaximumWidth(110)
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-            }
-            QPushButton:hover {
-                background-color: #388E3C;
-            }
-        """)
-        save_btn.clicked.connect(self.save_changes)
-        action_layout.addWidget(save_btn)
-        
-        action_layout.addStretch()
-        main_layout.addLayout(action_layout)
-        
         # Info label
-        info_label = QLabel("Double-click a type to edit its value. Changes are applied to Register and OT tabs after saving.")
+        info_label = QLabel("Double-click a type to view its details.")
         info_label.setStyleSheet("color: #888; font-size: 11px;")
         info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(info_label)
@@ -520,6 +489,7 @@ class StandardsTab(QWidget):
             tree_css = """
                 QTreeWidget {
                     background-color: #ffffff;
+                    alternate-background-color: #f0eef5;
                     border: 1px solid #CAC4CE;
                     border-radius: 6px;
                     color: #242038;
@@ -546,6 +516,7 @@ class StandardsTab(QWidget):
             tree_css = """
                 QTreeWidget {
                     background-color: #2b2b2b;
+                    alternate-background-color: #333338;
                     border: 1px solid #3c3c3c;
                     border-radius: 6px;
                 }
@@ -603,32 +574,41 @@ class StandardsTab(QWidget):
             self.tree.addTopLevelItem(region_item)
     
     def on_item_double_clicked(self, item, column):
-        """Handle double-click to edit a type"""
-        if item.parent() is not None:  # It's a type item, not a region
-            self.edit_item(item)
-    
-    def edit_item(self, item):
-        """Edit a standard time and UE value"""
+        """Handle double-click to view type details (read-only)."""
         if item.parent() is None:
-            return
+            return  # region row, ignore
 
         region = item.parent().text(0)
         case_type = item.text(0)
         current_time = self.standards.get(region, {}).get("Aligners", {}).get(case_type, 0)
         current_ue = self._resolve_ue_value(region, case_type, current_time) or 0
 
-        dialog = EditStandardDialog(region, case_type, current_time, current_ue, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_time = dialog.get_time()
-            new_ue = dialog.get_ue()
-            if new_time is not None and new_time > 0:
-                self.standards[region]["Aligners"][case_type] = new_time
-                item.setText(1, f"{new_time:.2f}")
-            if new_ue is not None and new_ue >= 0:
-                if region not in self.units_eq:
-                    self.units_eq[region] = {}
-                self.units_eq[region][case_type] = new_ue
-                item.setText(2, f"{new_ue:.2f}")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Standard Details")
+        dlg.setFixedWidth(420)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        lbl = QLabel(
+            f"<b>Region:</b>  {region}<br>"
+            f"<b>Type:</b>  {case_type}<br><br>"
+            f"<b>Std Time:</b>  {current_time:.2f} min<br>"
+            f"<b>Equiv. Units:</b>  {current_ue:.2f}"
+        )
+        lbl.setStyleSheet("font-size: 13px;")
+        layout.addWidget(lbl)
+
+        ok_btn = QPushButton("OK")
+        ok_btn.setFixedWidth(80)
+        ok_btn.clicked.connect(dlg.accept)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        dlg.exec()
 
     def _resolve_ue_value(self, region, case_type, time_value):
         """Return UE value for display/edit, preferring explicit per-case values.
@@ -764,6 +744,7 @@ class StandardsTab(QWidget):
                 
                 if valid:
                     self.standards = new_standards
+                    self._inject_new_impressions(self.standards)
 
                     recalc_reply = QMessageBox.question(
                         self,

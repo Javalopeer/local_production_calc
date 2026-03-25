@@ -1,11 +1,12 @@
 import os
+import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTimeEdit, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QComboBox, QMessageBox,
     QHeaderView, QDialog, QTextEdit, QDialogButtonBox, QVBoxLayout, QLabel
 )
-from PySide6.QtCore import QTime, QDate, QTimer, Qt
+from PySide6.QtCore import QTime, QDate, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from db.database import get_connection
 from sync.app_config import load_config
@@ -29,8 +30,11 @@ except Exception:
 
 
 class DowntimeManager(QWidget):
+    _poll_result_ready = Signal(int)
+
     def __init__(self, parent=None, on_update_callback=None):
         super().__init__(parent)
+        self._poll_result_ready.connect(self._handle_poll_result)
         self.on_update_callback = on_update_callback
         self.delete_mode = False
         self.edit_mode = False
@@ -49,10 +53,20 @@ class DowntimeManager(QWidget):
         self._poll_timer.timeout.connect(self._poll_approvals)
         self._poll_timer.start()
 
+    def _handle_poll_result(self, updated: int):
+        """Handle poll results on the main thread (via signal)."""
+        if updated > 0:
+            self.load_downtimes()
+            if self.on_update_callback:
+                self.on_update_callback()
+            try:
+                from sync.sharepoint_sync import export_to_sharepoint
+                threading.Thread(target=export_to_sharepoint, daemon=True).start()
+            except Exception:
+                pass
+
     def _poll_approvals(self, silent: bool = True):
-        """Poll the shared approval Excel for supervisor responses.
-        Read-only — never writes the file, so we don't overwrite the
-        supervisor's pending edits on their OneDrive copy."""
+        """Poll the shared approval Excel for supervisor responses."""
         if not _APPROVAL_OK:
             if not silent:
                 QMessageBox.warning(self, "Unavailable",
@@ -60,19 +74,30 @@ class DowntimeManager(QWidget):
             return
         cfg = load_config()
         designer = cfg.get("designer_name", "")
-        updated = poll_and_process_responses(designer)
-        if updated > 0:
-            self.load_downtimes()
-            if self.on_update_callback:
-                self.on_update_callback()
-            if not silent:
+
+        def _bg_poll():
+            try:
+                return poll_and_process_responses(designer)
+            except Exception as exc:
+                print(f"[downtime_manager] Poll error: {exc}")
+                return 0
+
+        if silent:
+            def _run():
+                result = _bg_poll()
+                if result > 0:
+                    self._poll_result_ready.emit(result)
+            threading.Thread(target=_run, daemon=True).start()
+        else:
+            updated = _bg_poll()
+            if updated > 0:
+                self._handle_poll_result(updated)
                 QMessageBox.information(self, "Approvals",
                     f"{updated} downtime(s) updated from the approval file.")
-        elif not silent:
-            # Show diagnostic info so the user can tell if OneDrive synced
-            details = self._approval_file_info(designer)
-            QMessageBox.information(self, "Approvals",
-                f"No new approvals or rejections found.\n\n{details}")
+            else:
+                details = self._approval_file_info(designer)
+                QMessageBox.information(self, "Approvals",
+                    f"No new approvals or rejections found.\n\n{details}")
 
     def _approval_file_info(self, designer: str) -> str:
         """Return a short diagnostic string about the approval file."""
@@ -173,8 +198,8 @@ class DowntimeManager(QWidget):
         # Table
         self.table = QTableWidget()
         self.table.setAlternatingRowColors(True)
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Start", "End", "Dur.(min)", "Reason", "Status"])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Start", "End", "Dur.(min)", "Reason", "Status", "Responded By"])
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -186,10 +211,12 @@ class DowntimeManager(QWidget):
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(0, 52)
         self.table.setColumnWidth(1, 52)
         self.table.setColumnWidth(2, 72)
         self.table.setColumnWidth(4, 70)
+        self.table.setColumnWidth(5, 120)
         main_layout.addWidget(self.table)
 
         # Buttons layout - centered
@@ -246,28 +273,29 @@ class DowntimeManager(QWidget):
             duration,
             detalle
         ))
+        dt_id = cursor.lastrowid
         conn.commit()
         conn.close()
         self.load_downtimes()
         self.downtime_start.setTime(QTime.currentTime())
         self.downtime_end.setTime(QTime.currentTime())
 
-        # Export pending entries to approval Excel
-        if _APPROVAL_OK:
+        # Export + Teams notification in background to avoid blocking UI
+        if _APPROVAL_OK or _TEAMS_OK:
             cfg = load_config()
             designer = cfg.get("designer_name", "")
-            export_pending_downtimes(designer)
-            # Send Teams notification to supervisors
-            if _TEAMS_OK:
-                notify_downtime_submitted(
-                    designer=designer,
-                    fecha=self.current_date,
-                    start=start,
-                    end=end,
-                    duration=duration,
-                    reason=reason,
-                    detalle=detalle,
-                )
+            _date = self.current_date
+            def _bg_export():
+                if _APPROVAL_OK:
+                    export_pending_downtimes(designer)
+                if _TEAMS_OK:
+                    notify_downtime_submitted(
+                        designer=designer, fecha=_date,
+                        start=start, end=end, duration=duration,
+                        reason=reason, detalle=detalle,
+                        dt_id=dt_id,
+                    )
+            threading.Thread(target=_bg_export, daemon=True).start()
 
         # Trigger callback to update production
         if self.on_update_callback:
@@ -275,33 +303,33 @@ class DowntimeManager(QWidget):
 
     def _get_downtime_detail(self) -> str:
         dialog = QDialog(self)
-        dialog.setWindowTitle("Detalle del Downtime")
+        dialog.setWindowTitle("Detalle")
+        dialog.setFixedSize(320, 150)
         layout = QVBoxLayout(dialog)
-        label = QLabel("Por favor describe el motivo del downtime (obligatorio):")
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        label = QLabel("Describe el motivo del downtime:")
+        label.setStyleSheet("font-size: 11px;")
         layout.addWidget(label)
         text_edit = QTextEdit()
-        text_edit.setPlaceholderText("Ejemplo: 'El sistema CMS estuvo caído por mantenimiento desde las 10:00 hasta las 10:30.'")
+        text_edit.setPlaceholderText("Ej: 'Sistema CMS caído por mantenimiento'")
+        text_edit.setMaximumHeight(60)
         layout.addWidget(text_edit)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         layout.addWidget(buttons)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
-        while True:
-            if dialog.exec() == QDialog.Accepted:
-                detalle = text_edit.toPlainText().strip()
-                if len(detalle) < 10:
-                    QMessageBox.warning(self, "Detalle requerido", "Por favor ingresa al menos 10 caracteres de detalle.")
-                    continue
-                return detalle
-            else:
-                return None
+        if dialog.exec() == QDialog.Accepted:
+            return text_edit.toPlainText().strip()
+        return None
 
     def load_downtimes(self):
         conn = get_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT id, hora_inicio, hora_fin, duracion, razon, status, detalle
+            SELECT id, hora_inicio, hora_fin, duracion, razon, status, detalle,
+                   responded_by, responded_at
             FROM downtimes
             WHERE fecha = ?
             ORDER BY hora_inicio DESC
@@ -325,13 +353,38 @@ class DowntimeManager(QWidget):
         }
 
         for idx, row in enumerate(rows):
-            row_id, start, end, duration, reason, status, detalle = row
+            row_id, start, end, duration, reason, status, detalle, resp_by, resp_at = row
             status = (status or "approved").lower()
+            resp_by = resp_by or ""
+            resp_at = resp_at or ""
 
-            values = [start, end, str(duration), reason, _STATUS_LABELS.get(status, status)]
+            # Format responded_by with timestamp if available
+            resp_display = resp_by
+            if resp_at and resp_by:
+                # Show just the date/time portion if it's a full ISO timestamp
+                try:
+                    dt = datetime.fromisoformat(resp_at.replace("Z", "+00:00"))
+                    resp_display = f"{resp_by} ({dt.strftime('%m/%d %H:%M')})"
+                except (ValueError, TypeError):
+                    resp_display = f"{resp_by} ({resp_at})"
+
+            values = [start, end, str(duration), reason, _STATUS_LABELS.get(status, status), resp_display]
+
+            tooltip = detalle if detalle else reason
+            # Build a detailed tooltip for the Responded By column
+            resp_tooltip = ""
+            if resp_by:
+                resp_tooltip = f"Responded by: {resp_by}"
+                if resp_at:
+                    resp_tooltip += f"\nDate/Time: {resp_at}"
+                resp_tooltip += f"\nDecision: {_STATUS_LABELS.get(status, status)}"
 
             for col, val in enumerate(values):
                 item = QTableWidgetItem(str(val))
+                if col == 5 and resp_tooltip:
+                    item.setToolTip(resp_tooltip)
+                else:
+                    item.setToolTip(tooltip)
                 # Only colour the Status cell (col 4); highlight entire row when editing
                 if self.edit_mode and idx == self.current_edit_row:
                     item.setBackground(QColor(70, 130, 180))
@@ -410,10 +463,11 @@ class DowntimeManager(QWidget):
         self.downtime_reason.setCurrentIndex(0)
         self.current_edit_row = -1
 
-        # Re-export pending entries (now includes this edited row)
+        # Re-export pending entries in background (now includes this edited row)
         if _APPROVAL_OK:
             cfg = load_config()
-            export_pending_downtimes(cfg.get("designer_name", ""))
+            _designer = cfg.get("designer_name", "")
+            threading.Thread(target=export_pending_downtimes, args=(_designer,), daemon=True).start()
 
         # Trigger callback to update production
         if self.on_update_callback:
@@ -476,7 +530,7 @@ class DowntimeManager(QWidget):
     def update_button_colors(self):
         """Update button colors based on mode"""
         if self.delete_mode:
-            # Delete mode active
+            # Delete mode active - red delete button, default edit button
             self.delete_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #B71C1C;
@@ -488,19 +542,9 @@ class DowntimeManager(QWidget):
                     background-color: #C62828;
                 }
             """)
-            self.edit_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2d89ef;
-                    border: none;
-                    border-radius: 6px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #1e6fd9;
-                }
-            """)
+            self.edit_btn.setStyleSheet("")
         elif self.edit_mode:
-            # Edit mode active - highlight edit button as "Save"
+            # Edit mode active - green save button, default delete button
             self.edit_btn.setText("Save")
             self.edit_btn.setStyleSheet("""
                 QPushButton {
@@ -514,42 +558,12 @@ class DowntimeManager(QWidget):
                     background-color: #388E3C;
                 }
             """)
-            self.delete_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2d89ef;
-                    border: none;
-                    border-radius: 6px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #1e6fd9;
-                }
-            """)
+            self.delete_btn.setStyleSheet("")
         else:
-            # Normal mode
+            # Normal mode - use global theme styles
             self.edit_btn.setText("Edit")
-            self.delete_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2d89ef;
-                    border: none;
-                    border-radius: 6px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #1e6fd9;
-                }
-            """)
-            self.edit_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2d89ef;
-                    border: none;
-                    border-radius: 6px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #1e6fd9;
-                }
-            """)
+            self.delete_btn.setStyleSheet("")
+            self.edit_btn.setStyleSheet("")
 
     def delete_downtime_at_row(self, row):
         """Delete downtime at specific row with confirmation"""

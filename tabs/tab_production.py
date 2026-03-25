@@ -11,6 +11,8 @@ from .utils import (
     load_units_eq_data,
     get_units_per_case as _ue_lookup,
     calculate_equivalent_units,
+    calculate_downtime_equivalent_units,
+    DAILY_BASE_MINUTES,
 )
 
 
@@ -23,7 +25,7 @@ class ProductionTab(QWidget):
         self.case_db_ids = {}  # Map table rows to database IDs
         self.current_mode = "reg"  # "reg" for regular cases, "ot" for OT cases
         self.current_page = 1
-        self.items_per_page = 50  # Number of cases per page
+        self.days_per_page = 2  # Show 2 complete day blocks per page
         self.total_pages = 1
         self.filtered_cases = []  # Store filtered cases for pagination
         self.load_units_eq()
@@ -382,15 +384,15 @@ class ProductionTab(QWidget):
 
         if self.current_mode == "reg":
             cursor.execute("""
-                SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin, 
-                       tiempo_real, efficiency, estado, case_value, count_production
+                SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin,
+                       tiempo_real, efficiency, estado, case_value, count_production, comments
                 FROM cases
                 ORDER BY id DESC
             """)
         else:  # OT mode
             cursor.execute("""
-                SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin, 
-                       tiempo_real, efficiency, estado, case_value, count_production
+                SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin,
+                       tiempo_real, efficiency, estado, case_value, count_production, comments
                 FROM ot_cases
                 ORDER BY id DESC
             """)
@@ -424,43 +426,44 @@ class ProductionTab(QWidget):
         
         # Store filtered cases for pagination
         self.filtered_cases = filtered
-        
-        # Calculate pagination
-        total_items = len(filtered)
-        self.total_pages = max(1, (total_items + self.items_per_page - 1) // self.items_per_page)
-        
-        # Ensure current page is valid
+
+        # Group ALL filtered cases by date first, then paginate by date blocks
+        all_grouped = {}
+        for row in filtered:
+            fecha = row[5]
+            if fecha not in all_grouped:
+                all_grouped[fecha] = []
+            all_grouped[fecha].append(row)
+
+        self._all_dates_sorted = sorted(all_grouped.keys(), reverse=True)
+        total_dates = len(self._all_dates_sorted)
+        self.total_pages = max(1, (total_dates + self.days_per_page - 1) // self.days_per_page)
+
         if self.current_page > self.total_pages:
             self.current_page = self.total_pages
         if self.current_page < 1:
             self.current_page = 1
-        
-        # Update pagination label
+
         self.page_label.setText(f"Page {self.current_page} of {self.total_pages}")
-        
-        # Enable/disable pagination buttons
         self.btn_prev.setEnabled(self.current_page > 1)
         self.btn_next.setEnabled(self.current_page < self.total_pages)
-        
-        # Get items for current page
-        start_idx = (self.current_page - 1) * self.items_per_page
-        end_idx = start_idx + self.items_per_page
-        page_items = filtered[start_idx:end_idx]
-        
-        # Group by date (only items in current page)
-        grouped = {}
-        for row in page_items:
-            fecha = row[5]  # fecha at index 5
-            if fecha not in grouped:
-                grouped[fecha] = []
-            grouped[fecha].append(row)
+
+        # Get dates for current page
+        date_start = (self.current_page - 1) * self.days_per_page
+        date_end = date_start + self.days_per_page
+        page_dates = self._all_dates_sorted[date_start:date_end]
+
+        # Build grouped dict for only the current page's dates
+        grouped = {d: all_grouped[d] for d in page_dates}
         
         # Calculate stats from ALL filtered items (not just current page)
-        total_cases = len(filtered)
-        ok_count = sum(1 for row in filtered if row[10] == "OK")  # estado at index 10
+        # Only include cases where count_production != 0
+        prod_filtered = [r for r in filtered if (r[12] if (len(r) > 12 and r[12] is not None) else 1) != 0]
+        total_cases = len(prod_filtered)
+        ok_count = sum(1 for row in prod_filtered if row[10] == "OK")  # estado at index 10
         low_count = total_cases - ok_count
-        total_value = sum(row[11] for row in filtered)  # case_value at index 11
-        avg_efficiency = sum(row[9] for row in filtered) / total_cases if total_cases > 0 else 0  # efficiency at index 9
+        total_value = sum(row[11] for row in prod_filtered)  # case_value at index 11
+        avg_efficiency = sum(row[9] for row in prod_filtered) / total_cases if total_cases > 0 else 0  # efficiency at index 9
 
         self.stats_avg.setText(f"Avg Eff: {avg_efficiency:.1f}%")
         self.stats_total.setText(f"Cases: {total_cases}")
@@ -476,60 +479,122 @@ class ProductionTab(QWidget):
         except Exception:
             current_is_light = False
 
-        # Count rows needed (date header + type-breakdown row + cases)
-        total_rows = sum(2 + len(cases) for cases in grouped.values())
+        sorted_dates = sorted(grouped.keys(), reverse=True)
+
+        # Pre-fetch downtime for all page dates in one query
+        _dt_map = {}
+        if sorted_dates:
+            conn_dt = get_connection()
+            cur_dt = conn_dt.cursor()
+            placeholders = ",".join("?" for _ in sorted_dates)
+            cur_dt.execute(
+                f"SELECT fecha, SUM(duracion) FROM downtimes "
+                f"WHERE fecha IN ({placeholders}) AND (status = 'approved' OR status IS NULL) "
+                f"GROUP BY fecha",
+                sorted_dates,
+            )
+            _dt_map = {r[0]: r[1] for r in cur_dt.fetchall()}
+            conn_dt.close()
+
+        # Count rows needed (date header rows + type-breakdown row + cases)
+        total_rows = 0
+        for f, cases in grouped.items():
+            dt = _dt_map.get(f, 0) or 0
+            total_rows += (3 if dt > 0 else 2) + len(cases)
 
         # Reset any previous row spans/content before drawing current page.
-        # Without this, spans from a prior page can leak and visually break rows.
         self.table.clearSpans()
         self.table.clearContents()
         self.table.setRowCount(total_rows)
-        
+
         # Clear the row to db_id mapping
         self.case_db_ids = {}
-        
         row_idx = 0
-        sorted_dates = sorted(grouped.keys(), reverse=True)
-        
+
         for fecha in sorted_dates:
-            # Calculate daily total value - case_value at index 11
-            daily_value = sum(case[11] for case in grouped[fecha])
-            daily_cases = len(grouped[fecha])
-            # Calculate daily units equivalent
-            daily_units_eq = sum(self.calculate_units_eq(case[3], case[11], case[4]) for case in grouped[fecha])
-            # Calculate daily total time (minutes)
-            daily_time_sum = sum((case[8] or 0) for case in grouped[fecha])
-            
-            # Date header row with daily total - spaced out text, no icon
-            date_item = QTableWidgetItem(f"    {fecha}     {daily_cases} cases     Value: {daily_value:.2f}%     Units: {daily_units_eq:.2f}     Time: {daily_time_sum:.0f}m    ")
-            # Date header color differs by theme
+            # Calculate daily totals - only include cases that count to production
+            prod_cases = [c for c in grouped[fecha] if (c[12] if (len(c) > 12 and c[12] is not None) else 1) != 0]
+            daily_value = sum(case[11] for case in prod_cases)
+            daily_cases = len(prod_cases)
+            daily_units_eq = sum(self.calculate_units_eq(case[3], case[11], case[4]) for case in prod_cases)
+            daily_time_sum = sum((case[8] or 0) for case in prod_cases)
+
+            # Add downtime credit
+            dt_mins = _dt_map.get(fecha, 0) or 0
+            dt_value = (dt_mins / DAILY_BASE_MINUTES) * 100 if dt_mins > 0 else 0
+            dt_ue = calculate_downtime_equivalent_units(dt_mins)
+
+            total_value_day = daily_value + dt_value
+            total_ue_day = daily_units_eq + dt_ue
+
+            # Theme colors for header rows
             if current_is_light:
                 date_bg = QColor(230, 230, 230)
                 date_fg = QColor(34, 32, 56)
             else:
                 date_bg = QColor(75, 75, 85)
                 date_fg = QColor(220, 220, 220)
+            header_font = QFont()
+            header_font.setBold(True)
+
+            # ── Row 1: Date, cases, value, time ──
+            if dt_mins > 0:
+                line1 = (
+                    f"    {fecha}     {daily_cases} cases     "
+                    f"Value: {total_value_day:.2f}% (Cases: {daily_value:.2f}% + DT: {dt_value:.2f}%)     "
+                    f"Time: {daily_time_sum:.0f}m    "
+                )
+            else:
+                line1 = (
+                    f"    {fecha}     {daily_cases} cases     "
+                    f"Value: {daily_value:.2f}%     Units: {daily_units_eq:.2f}     Time: {daily_time_sum:.0f}m    "
+                )
+
+            date_item = QTableWidgetItem(line1)
             date_item.setBackground(date_bg)
             date_item.setForeground(date_fg)
-            font = QFont()
-            font.setBold(True)
-            date_item.setFont(font)
+            date_item.setFont(header_font)
             date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
             self.table.setItem(row_idx, 0, date_item)
-            self.table.setRowHeight(row_idx, 32)  # Taller row for date header
-            # Fill rest of date row with same background
+            self.table.setRowHeight(row_idx, 32)
             for col in range(1, 10):
-                empty_item = QTableWidgetItem("")
-                empty_item.setBackground(date_bg)
-                empty_item.setForeground(date_fg)
-                self.table.setItem(row_idx, col, empty_item)
-            
-            self.table.setSpan(row_idx, 0, 1, 10)  # Span across all columns
+                ei = QTableWidgetItem("")
+                ei.setBackground(date_bg)
+                ei.setForeground(date_fg)
+                self.table.setItem(row_idx, col, ei)
+            self.table.setSpan(row_idx, 0, 1, 10)
             row_idx += 1
 
+            # ── Row 2 (only when downtime): Units breakdown ──
+            if dt_mins > 0:
+                line2 = (
+                    f"    Units: {total_ue_day:.2f} (Cases: {daily_units_eq:.2f} + DT: {dt_ue:.2f})    "
+                )
+                units_item = QTableWidgetItem(line2)
+                if current_is_light:
+                    u_bg = QColor(220, 220, 230)
+                    u_fg = QColor(50, 50, 80)
+                else:
+                    u_bg = QColor(65, 65, 78)
+                    u_fg = QColor(200, 210, 225)
+                units_item.setBackground(u_bg)
+                units_item.setForeground(u_fg)
+                units_font = QFont()
+                units_font.setBold(True)
+                units_font.setPointSize(9)
+                units_item.setFont(units_font)
+                units_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, 0, units_item)
+                self.table.setRowHeight(row_idx, 24)
+                for col in range(1, 10):
+                    ei = QTableWidgetItem("")
+                    ei.setBackground(u_bg)
+                    self.table.setItem(row_idx, col, ei)
+                self.table.setSpan(row_idx, 0, 1, 10)
+                row_idx += 1
+
             # ── Type-breakdown sub-row ─────────────────────────────────
-            type_counts = Counter(case[4] or "Unknown" for case in grouped[fecha])
+            type_counts = Counter(case[4] or "Unknown" for case in prod_cases)
             breakdown_parts = [f"{t}: {c}" for t, c in sorted(type_counts.items())]
             breakdown_text = "    " + "   │   ".join(breakdown_parts) + "    "
             breakdown_item = QTableWidgetItem(breakdown_text)
@@ -578,13 +643,17 @@ class ProductionTab(QWidget):
                 # Determine text color for row based on theme
                 text_color = QColor(34, 32, 56) if current_is_light else QColor(255, 255, 255)
 
-                case_id_item = QTableWidgetItem(str(case[1]))
+                comment = (case[13] if len(case) > 13 else "") or ""
+                case_id_text = f"{case[1]} \U0001F4AC" if comment.strip() else str(case[1])
+                case_id_item = QTableWidgetItem(case_id_text)
                 case_id_item.setBackground(bg_brush)
                 case_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 bold_font = QFont()
                 bold_font.setBold(True)
                 case_id_item.setFont(bold_font)
                 case_id_item.setForeground(QBrush(text_color))
+                if comment.strip():
+                    case_id_item.setToolTip(comment.strip())
                 self.table.setItem(row_idx, 0, case_id_item)
                 
                 # Doctor - Bold (doctor at index 2)

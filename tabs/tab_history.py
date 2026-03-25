@@ -6,7 +6,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor, QFont, QBrush
 from db.database import get_connection
-from .utils import load_units_eq_data, calculate_equivalent_units
+from .utils import (
+    load_units_eq_data, calculate_equivalent_units,
+    calculate_downtime_equivalent_units, DAILY_BASE_MINUTES,
+)
 import csv
 
 try:
@@ -45,11 +48,17 @@ class HistoryTab(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title)
 
-        # Summary stats label (dynamic)
+        # Summary stats labels (two lines for readability)
         self.stats_label = QLabel("Total: 0 | Time: 0m | Value: 0.00%")
         self.stats_label.setStyleSheet("font-size: 12px; color: #9CC3FF; font-weight: bold;")
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.stats_label)
+
+        self.stats_label2 = QLabel("")
+        self.stats_label2.setStyleSheet("font-size: 11px; color: #81B4E0; font-weight: bold;")
+        self.stats_label2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stats_label2.setVisible(False)
+        main_layout.addWidget(self.stats_label2)
 
         # First filter row - Search, Status, Date
         self.filter_row1 = QHBoxLayout()
@@ -300,11 +309,11 @@ class HistoryTab(QWidget):
         cursor.execute("""
             SELECT * FROM (
                 SELECT id, case_id, doctor, region, tipo_caso,
-                       fecha, tiempo_real, std_time, efficiency, estado, case_value, 'reg' as source
+                       fecha, tiempo_real, std_time, efficiency, estado, case_value, 'reg' as source, comments
                 FROM cases
                 UNION ALL
                 SELECT id, case_id, doctor, region, tipo_caso,
-                       fecha, tiempo_real, std_time, efficiency, estado, case_value, 'ot' as source
+                       fecha, tiempo_real, std_time, efficiency, estado, case_value, 'ot' as source, comments
                 FROM ot_cases
             )
             ORDER BY id DESC
@@ -408,9 +417,46 @@ class HistoryTab(QWidget):
             )
             for c in filtered
         )
-        self.stats_label.setText(
-            f"Total: {total_cases} | Time: {total_time:.0f}m | Value: {total_value:.2f}% | UE: {total_ue:.2f}"
+
+        # Calculate downtime credit for the filtered date range
+        use_specific = self.specific_date_check.isChecked()
+        if use_specific:
+            dt_from = self.specific_date.date().toString("yyyy-MM-dd")
+            dt_to = dt_from
+        else:
+            dt_from = self.date_from.date().toString("yyyy-MM-dd")
+            dt_to = self.date_to.date().toString("yyyy-MM-dd")
+
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT SUM(duracion) FROM downtimes "
+            "WHERE fecha >= ? AND fecha <= ? AND (status = 'approved' OR status IS NULL)",
+            (dt_from, dt_to),
         )
+        dt_row = cur.fetchone()
+        conn.close()
+        total_downtime_mins = dt_row[0] if dt_row and dt_row[0] else 0.0
+        downtime_value = (total_downtime_mins / DAILY_BASE_MINUTES) * 100 if total_downtime_mins > 0 else 0
+        downtime_ue = calculate_downtime_equivalent_units(total_downtime_mins)
+
+        combined_value = total_value + downtime_value
+        combined_ue = total_ue + downtime_ue
+
+        if total_downtime_mins > 0:
+            self.stats_label.setText(
+                f"Total: {total_cases} | Time: {total_time:.0f}m | "
+                f"Production: {combined_value:.2f}% (Cases: {total_value:.2f}% + Downtime: {downtime_value:.2f}%)"
+            )
+            self.stats_label2.setText(
+                f"Equivalent Units: {combined_ue:.2f} (Cases: {total_ue:.2f} + Downtime: {downtime_ue:.2f})"
+            )
+            self.stats_label2.setVisible(True)
+        else:
+            self.stats_label.setText(
+                f"Total: {total_cases} | Time: {total_time:.0f}m | Value: {total_value:.2f}% | UE: {total_ue:.2f}"
+            )
+            self.stats_label2.setVisible(False)
 
         for idx, case in enumerate(page_items):
             # Zebra striping
@@ -425,13 +471,17 @@ class HistoryTab(QWidget):
                 bg_color = QColor(28, 48, 90) if (idx % 2 == 0) else QColor(38, 58, 110)
             bg_brush = QBrush(bg_color)
             
-            # Case ID - Bold
-            case_id_item = QTableWidgetItem(str(case[1]))
+            # Case ID - Bold, with comment indicator
+            comment = (case[12] if len(case) > 12 else "") or ""
+            case_id_text = f"{case[1]} \U0001F4AC" if comment.strip() else str(case[1])
+            case_id_item = QTableWidgetItem(case_id_text)
             case_id_item.setBackground(bg_brush)
             case_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             bold_font = QFont()
             bold_font.setBold(True)
             case_id_item.setFont(bold_font)
+            if comment.strip():
+                case_id_item.setToolTip(comment.strip())
             self.table.setItem(idx, 0, case_id_item)
             
             # Doctor - Bold
@@ -783,5 +833,10 @@ class HistoryTab(QWidget):
                     self.stats_label.setStyleSheet("font-size: 12px; color: #242038; font-weight: bold;")
                 else:
                     self.stats_label.setStyleSheet("font-size: 12px; color: #9CC3FF; font-weight: bold;")
+            if hasattr(self, 'stats_label2') and self.stats_label2:
+                if is_light:
+                    self.stats_label2.setStyleSheet("font-size: 11px; color: #333; font-weight: bold;")
+                else:
+                    self.stats_label2.setStyleSheet("font-size: 11px; color: #81B4E0; font-weight: bold;")
         except Exception:
             pass

@@ -149,14 +149,7 @@ class RegisterTab(QWidget):
         save_btn = QPushButton("Save Case")
         save_btn.setMaximumWidth(120)
         save_btn.setMinimumHeight(26)
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #444;
-            }
-            QPushButton:hover {
-                background-color: #555;
-            }
-        """)
+        save_btn.setStyleSheet("")
         save_btn.clicked.connect(self.save_case)
 
         calc_btn.clicked.connect(self.calculate)
@@ -179,7 +172,7 @@ class RegisterTab(QWidget):
         toggle_layout = QHBoxLayout()
         toggle_layout.setContentsMargins(0, 0, 0, 0)
         toggle_label = QLabel("Count to production?")
-        toggle_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        toggle_label.setStyleSheet("font-size: 11px;")
         toggle_layout.addWidget(toggle_label)
         toggle_layout.addWidget(self.count_toggle)
         toggle_layout.addStretch()
@@ -197,12 +190,11 @@ class RegisterTab(QWidget):
         )
         import_web_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1a5c2a;
-                color: #7ec890;
+                background-color: #4CAF50;
+                color: white;
             }
             QPushButton:hover {
-                background-color: #236b32;
-                color: #a8e6b8;
+                background-color: #388E3C;
             }
         """)
         import_web_btn.clicked.connect(self._on_import_case)
@@ -415,6 +407,11 @@ class RegisterTab(QWidget):
         standards_path = get_resource_path(os.path.join("data", "standards.json"))
         with open(standards_path, "r") as f:
             self.standards = json.load(f)
+        # Ensure "New Impressions" mirrors "Secondary" in every region
+        for _r, _d in self.standards.items():
+            _a = _d.get("Aligners", {}) if isinstance(_d, dict) else {}
+            if isinstance(_a, dict) and "Secondary" in _a:
+                _a["New Impressions"] = _a["Secondary"]
 
     def load_units_eq(self):
         """Load units equivalency for production calculation"""
@@ -749,6 +746,8 @@ class RegisterTab(QWidget):
         if data.get('doctor'):
             self.doctor.setText(data['doctor'])
 
+        # Update date to today in case the app has been open since a previous day
+        self.case_date.setDate(QDate.currentDate())
         self.start_time.setTime(QTime.currentTime())
 
         summary_parts = [p for p in (imported_case_id, imported_region, imported_type) if p]
@@ -775,8 +774,16 @@ class RegisterTab(QWidget):
         end = self.end_time.time()
 
         tiempo_real = start.secsTo(end) / 60
-        if tiempo_real <= 0:
-            self.result_label.setText("Invalid time")
+        if tiempo_real < 1:
+            self.result_label.setText("Invalid time (minimum 1 minute)")
+            return
+
+        # Subtract only breaks the user confirmed they took today
+        from tabs.breaks_dialog import calculate_break_overlap
+        break_mins = calculate_break_overlap(start.toString("HH:mm"), end.toString("HH:mm"), fecha=case_date)
+        tiempo_real -= break_mins
+        if tiempo_real < 1:
+            self.result_label.setText("Case falls entirely within break time")
             return
 
         if not case_id.strip():

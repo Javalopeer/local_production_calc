@@ -92,6 +92,10 @@ def load_units_eq_data(force: bool = False) -> Dict[str, Dict[str, float]]:
         except Exception as exc:
             print(f"[utils] Could not load units_eq.json: {exc}")
             _units_eq_cache = {}
+        # Ensure "New Impressions" mirrors "Secondary" in every region
+        for _region_data in (_units_eq_cache or {}).values():
+            if isinstance(_region_data, dict) and "Secondary" in _region_data:
+                _region_data["New Impressions"] = _region_data["Secondary"]
     return _units_eq_cache
 
 
