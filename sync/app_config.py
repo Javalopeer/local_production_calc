@@ -63,6 +63,35 @@ _DEFAULTS = {
 }
 
 
+def _load_shared_config(export_folder: str) -> dict:
+    """Read _shared_config.json from the shared Reports folder.
+    This file contains team-wide settings like the webhook URL."""
+    if not export_folder:
+        return {}
+    shared_path = os.path.join(export_folder, "_shared_config.json")
+    if os.path.exists(shared_path):
+        try:
+            with open(shared_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_shared_config(cfg: dict) -> bool:
+    """Save team-wide settings to _shared_config.json in the shared folder."""
+    export_folder = cfg.get("export_folder", "").strip()
+    if not export_folder or not os.path.isdir(export_folder):
+        return False
+    shared_path = os.path.join(export_folder, "_shared_config.json")
+    try:
+        with open(shared_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+
 def load_config() -> dict:
     """Return the config dict (merged with defaults for any missing keys)."""
     cfg = dict(_DEFAULTS)
@@ -79,6 +108,11 @@ def load_config() -> dict:
     # Pre-fill designer name from Windows if never set
     if not cfg.get("designer_name"):
         cfg["designer_name"] = get_windows_display_name()
+    # Auto-load teams_webhook from shared config if not set locally
+    if not cfg.get("teams_webhook"):
+        shared = _load_shared_config(cfg.get("export_folder", ""))
+        if shared.get("teams_webhook"):
+            cfg["teams_webhook"] = shared["teams_webhook"]
     return cfg
 
 

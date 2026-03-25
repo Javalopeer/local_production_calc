@@ -173,18 +173,32 @@ def get_daily_metrics(fecha: str) -> dict:
 
 def has_pending_justification() -> str | None:
     """Check if there is an older date where the target was not met and no
-    justification was submitted.  Returns the date string, or None."""
+    justification was submitted.  Returns the date string, or None.
+    Skips weekends and days with zero production (person wasn't producing)."""
     today = date.today().isoformat()
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT fecha FROM daily_performance
+        SELECT fecha, production_pct, equivalent_units FROM daily_performance
         WHERE fecha < ? AND met_target = 0 AND justification_submitted = 0
         ORDER BY fecha DESC LIMIT 1
     """, (today,))
     row = cur.fetchone()
     conn.close()
-    return row[0] if row else None
+    if not row:
+        return None
+    fecha_str, prod_pct, eq_units = row[0], row[1] or 0, row[2] or 0
+    # Skip if the pending date was a weekend
+    try:
+        pending = date.fromisoformat(fecha_str)
+        if pending.weekday() >= 5:
+            return None
+    except (ValueError, TypeError):
+        pass
+    # Skip if zero production (person wasn't producing that day)
+    if prod_pct == 0 and eq_units == 0:
+        return None
+    return fecha_str
 
 
 def record_daily_snapshot(fecha: str, metrics: dict):

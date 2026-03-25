@@ -48,8 +48,42 @@ _TITLE_GREY = "3C3C3C"
 
 DAILY_BASE_MINUTES = 408.3
 
+# Cache: track latest mtime of _Summary_*.xlsx to skip unnecessary Dashboard rebuilds
+_last_dashboard_max_mtime: float = 0.0
+
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _cleanup_onedrive_conflicts(productions_dir: str):
+    """Remove OneDrive conflict copies like _Dashboard-CRI-MACHINE.xlsx.
+
+    OneDrive creates these when two machines write the same file before sync
+    completes.  The main _Dashboard.xlsx is always the authoritative version.
+    """
+    import re
+    try:
+        for f in os.listdir(productions_dir):
+            # Match patterns like _Dashboard-CRI-LGONZALEZA.xlsx or _Summary_Name-MACHINE.xlsx
+            if re.match(r"_Dashboard-.+\.xlsx$", f) or re.match(r".*-[A-Z]{2,5}-[A-Z]+\.xlsx$", f):
+                fpath = os.path.join(productions_dir, f)
+                try:
+                    os.remove(fpath)
+                    print(f"[sharepoint_sync] Removed OneDrive conflict copy: {f}")
+                except OSError:
+                    pass
+        # Also check Dashboards/ subfolder
+        dashboards_dir = os.path.join(productions_dir, "Dashboards")
+        if os.path.isdir(dashboards_dir):
+            for f in os.listdir(dashboards_dir):
+                if re.match(r"_Dashboard_.+-[A-Z]{2,5}-[A-Z]+\.xlsx$", f):
+                    try:
+                        os.remove(os.path.join(dashboards_dir, f))
+                        print(f"[sharepoint_sync] Removed conflict copy: Dashboards/{f}")
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
 
 def _db():
     return sqlite3.connect(DB_PATH)
@@ -637,20 +671,29 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
             - "Dashboard": snapshot for today_str, one row per designer
             - "History": flat table for all dates/designers
 
-        Both sheets show all explicit case types in CASE_TYPE_COLUMNS for REG and OT,
-        plus Reg Other / OT Other and status columns.
-
-        Summary compatibility:
-            - New schema (29 cols): explicit REG+OT case types
-            - Previous schema (21 cols): bucketed Stage RX / Bite Sync
-            - Older schema (15 cols): reduced type columns
+        Skips the rebuild if no _Summary_*.xlsx file has changed since the
+        last successful rebuild (mtime-based cache).
     """
+    global _last_dashboard_max_mtime
     import glob as _glob
     from openpyxl.utils import get_column_letter as _gcl
 
+    # Look in per-designer folders first, fall back to old flat location
     summary_files = sorted(
+        _glob.glob(os.path.join(productions_dir, "*", "_Summary.xlsx"))
+    )
+    # Also pick up any old-style summaries not yet migrated
+    summary_files += sorted(
         _glob.glob(os.path.join(productions_dir, "_Summary_*.xlsx"))
     )
+
+    # ── Skip rebuild if no summary file changed since last time ──────────────
+    dashboard_path = os.path.join(productions_dir, "_Dashboard.xlsx")
+    if summary_files:
+        max_mtime = max(os.path.getmtime(f) for f in summary_files)
+        if max_mtime <= _last_dashboard_max_mtime and os.path.exists(dashboard_path):
+            print("[sharepoint_sync] No summary files changed, skipping Dashboard rebuild.")
+            return
 
     def _pct(v):
         if isinstance(v, str) and v.endswith("%"):
@@ -743,7 +786,12 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
             swb = openpyxl.load_workbook(sf, read_only=True, data_only=True)
             sws = swb.active
             base = os.path.basename(sf)
-            designer_name = base[len("_Summary_"):-len(".xlsx")].replace("_", " ")
+            if base == "_Summary.xlsx":
+                # New format: Productions/<DesignerName>/_Summary.xlsx
+                designer_name = os.path.basename(os.path.dirname(sf)).replace("_", " ")
+            else:
+                # Old format: Productions/_Summary_<DesignerName>.xlsx
+                designer_name = base[len("_Summary_"):-len(".xlsx")].replace("_", " ")
             for row in sws.iter_rows(min_row=2, values_only=True):
                 if not row[0]:
                     continue
@@ -1098,20 +1146,27 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
         except FileNotFoundError:
             pass
         _save_atomic(wb, dashboard_path)
+        # Update mtime cache so next call skips rebuild if nothing changed
+        if summary_files:
+            _last_dashboard_max_mtime = max(os.path.getmtime(f) for f in summary_files if os.path.exists(f))
     except PermissionError:
         # If dashboard is open/locked (Excel, preview, etc.), skip silently.
         # Daily and summary files were already saved.
         return
 
-    # Save a dated snapshot so each day keeps its own dashboard file.
-    # If snapshot is locked, skip silently as well.
+    # Save a dated snapshot ONLY if it doesn't exist yet (once per day).
+    # This avoids OneDrive merge conflicts when multiple designers export.
     snapshots_dir = os.path.join(productions_dir, "Dashboards")
     os.makedirs(snapshots_dir, exist_ok=True)
     snapshot_path = os.path.join(snapshots_dir, f"_Dashboard_{today_str}.xlsx")
-    try:
-        _save_atomic(wb, snapshot_path)
-    except PermissionError:
-        return
+    if not os.path.exists(snapshot_path):
+        try:
+            _save_atomic(wb, snapshot_path)
+        except PermissionError:
+            pass
+
+    # Clean up OneDrive conflict copies (e.g. _Dashboard-CRI-MACHINE.xlsx)
+    _cleanup_onedrive_conflicts(productions_dir)
 
 
 def _update_team_summary(productions_dir: str, designer: str, target_date: str,
@@ -1136,7 +1191,21 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
     if ot_type_counts is None:
         ot_type_counts = {}
     safe_name = designer.replace(" ", "_").replace("/", "-")
-    summary_file = os.path.join(productions_dir, f"_Summary_{safe_name}.xlsx")
+
+    # Per-designer folder: Productions/<DesignerName>/
+    designer_dir = os.path.join(productions_dir, safe_name)
+    os.makedirs(designer_dir, exist_ok=True)
+    summary_file = os.path.join(designer_dir, "_Summary.xlsx")
+
+    # Migration: move old summary from Productions/_Summary_<name>.xlsx to new location
+    old_summary = os.path.join(productions_dir, f"_Summary_{safe_name}.xlsx")
+    if os.path.exists(old_summary) and not os.path.exists(summary_file):
+        try:
+            import shutil
+            shutil.move(old_summary, summary_file)
+            print(f"[sharepoint_sync] Migrated summary to {designer_dir}")
+        except Exception:
+            pass
 
     d         = date.fromisoformat(target_date)
     week_num  = d.isocalendar()[1]
@@ -1360,7 +1429,7 @@ def export_to_sharepoint(target_date: str | None = None) -> tuple[bool, str]:
     safe_name = designer.replace(" ", "_").replace("/", "-")
     return True, (
         f"Report saved:\n{out_path}"
-        f"\n\nSummary updated:\n{productions_dir}\\_Summary_{safe_name}.xlsx"
+        f"\n\nSummary updated:\n{productions_dir}\\{safe_name}\\_Summary.xlsx"
         f"\n\nDashboard rebuilt:\n{productions_dir}\\_Dashboard.xlsx"
         f"\n\nOneDrive will sync to SharePoint automatically."
     )

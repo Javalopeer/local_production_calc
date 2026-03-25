@@ -2,8 +2,8 @@
 """
 Teams Webhook Notifications for Downtime Approvals.
 
-Sends an Adaptive Card to a Teams channel when a designer submits
-a downtime for approval.  Each team configures its own webhook URL.
+Sends structured JSON to a Power Automate workflow which posts an
+Adaptive Card with Approve/Reject buttons.
 """
 
 import json
@@ -20,7 +20,6 @@ def _get_webhook_url() -> str | None:
     url = cfg.get("teams_webhook", "").strip()
     if not url:
         return None
-    # Basic validation — must be an HTTPS webhook URL
     if not url.startswith("https://"):
         print("[teams_notify] Invalid webhook URL (must start with https://)")
         return None
@@ -35,25 +34,35 @@ def notify_downtime_submitted(
     duration: int,
     reason: str,
     detalle: str = "",
+    dt_id: int = 0,
 ) -> bool:
-    """Send a message to Teams Workflow webhook when a downtime is submitted.
+    """Send downtime data to Power Automate workflow.
+
+    Sends simple flat JSON fields so Power Automate can easily
+    reference them as triggerBody()?['designer'], etc.
+
     Returns True on success, False on failure.
     """
     webhook_url = _get_webhook_url()
     if not webhook_url:
         return False
-    submitted_at = datetime.now().strftime("%I:%M %p")
-    # Workflows expect a simple JSON payload, not Adaptive Card
+
+    detail_line = f" — {detalle}" if detalle else ""
+
+    # Simple flat JSON — easy to use in Power Automate expressions
     payload = {
-        "designer": designer,
+        "designer": designer or "Unknown",
         "fecha": fecha,
-        "hora_inicio": start,
-        "hora_fin": end,
-        "duracion": duration,
-        "razon": reason,
+        "start": start,
+        "end": end,
+        "duration": duration,
+        "reason": reason,
         "detalle": detalle,
-        "enviado": submitted_at,
+        "dt_id": dt_id,
+        "summary": f"⏱ {designer or 'Unknown'} — {reason}{detail_line}",
+        "time_range": f"{fecha}  ·  {start}–{end} ({duration} min)",
     }
+
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         webhook_url,
@@ -65,7 +74,7 @@ def notify_downtime_submitted(
         with urllib.request.urlopen(req, timeout=10) as resp:
             status = resp.status
             if status in (200, 202):
-                print(f"[teams_notify] Workflow notification sent ({status}).")
+                print(f"[teams_notify] Notification sent ({status}).")
                 return True
             else:
                 print(f"[teams_notify] Unexpected status: {status}")
