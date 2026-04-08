@@ -39,8 +39,31 @@ _last_rebuild_max_mtime: float = 0.0
 # Track failed exports so they can be retried on next poll cycle
 _pending_retry_designer: str = ""
 
-# Track already-processed Teams response files to avoid re-processing
-_processed_response_files: set = set()
+# Track already-processed Teams response files to avoid re-processing.
+# Persisted locally so each machine tracks independently without
+# renaming/deleting files from the shared folder.
+_LOCAL_PROCESSED_FILE = os.path.join(
+    os.path.expanduser("~"), "ProductionCalcApp", "processed_responses.json"
+)
+
+def _load_processed_responses() -> set:
+    """Load the set of already-processed response file basenames from local disk."""
+    try:
+        with open(_LOCAL_PROCESSED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+def _save_processed_responses(processed: set) -> None:
+    """Persist the set of processed response basenames to local disk."""
+    os.makedirs(os.path.dirname(_LOCAL_PROCESSED_FILE), exist_ok=True)
+    try:
+        with open(_LOCAL_PROCESSED_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(processed), f)
+    except Exception:
+        pass
+
+_processed_response_files: set = _load_processed_responses()
 
 _OPENPYXL_OK = False
 try:
@@ -528,14 +551,19 @@ def _set_column_widths(ws):
 
 # ── poll ─────────────────────────────────────────────────────────────────────
 
-def _poll_teams_responses() -> int:
+def _poll_teams_responses(designer_name: str = "") -> int:
     """Read response_*.json files from Downtime/responses/ and apply decisions.
 
     Each file is created by Power Automate when a supervisor clicks
     Approve or Reject on the Teams Adaptive Card.
 
     Expected JSON format:
-        {"dt_id": 91, "decision": "approved", "responded_by": "Name", "responded_at": "..."}
+        {"dt_id": 91, "decision": "approved", "designer": "Name",
+         "responded_by": "Name", "responded_at": "..."}
+
+    Only processes files whose "designer" field matches *designer_name*
+    (case-insensitive).  Files without a designer field are accepted for
+    backwards compatibility but matched only by dt_id.
 
     Returns the number of downtimes updated.
     """
@@ -547,8 +575,9 @@ def _poll_teams_responses() -> int:
     if not os.path.isdir(responses_dir):
         return 0
 
-    pattern = os.path.join(responses_dir, "response_*.json")
-    files = glob.glob(pattern)
+    # Read both .json and .json.done (old builds renamed files in shared folder)
+    files = glob.glob(os.path.join(responses_dir, "response_*.json"))
+    files += glob.glob(os.path.join(responses_dir, "response_*.json.done"))
     if not files:
         return 0
 
@@ -584,6 +613,11 @@ def _poll_teams_responses() -> int:
             print(f"[downtime_approval] Skipping response without dt_id: {data}")
             continue
 
+        # Filter by designer so each machine only processes its own DTs
+        file_designer = str(data.get("designer", "")).strip().lower()
+        if file_designer and designer_name and file_designer != designer_name.strip().lower():
+            continue  # Not ours — leave the file for the right machine
+
         responded_by = str(data.get("responded_by", "")).strip()
         responded_at = str(data.get("responded_at", "")).strip()
 
@@ -596,18 +630,10 @@ def _poll_teams_responses() -> int:
             updated += 1
             print(f"[downtime_approval] Teams response: {decision} for DT #{dt_id} "
                   f"(by {responded_by or '?'})")
-
-        # Mark as processed so we don't re-process
-        _processed_response_files.add(basename)
-
-        # Rename processed file so it's not picked up again
-        try:
-            done_path = fpath + ".done"
-            if os.path.exists(done_path):
-                os.remove(done_path)
-            os.rename(fpath, done_path)
-        except OSError:
-            pass  # Already tracked in _processed_response_files
+            # Track locally — never rename/delete from the shared folder
+            # so other machines can still read the same file.
+            _processed_response_files.add(basename)
+            _save_processed_responses(_processed_response_files)
 
     conn.commit()
     conn.close()
@@ -626,7 +652,7 @@ def poll_and_process_responses(designer_name: str) -> int:
         return 0
 
     # ── Check Teams Adaptive Card responses first ─────────────────────────
-    teams_updated = _poll_teams_responses()
+    teams_updated = _poll_teams_responses(designer_name)
 
     # ── Retry failed export from a previous cycle ─────────────────────────
     if _pending_retry_designer:
