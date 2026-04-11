@@ -5,11 +5,13 @@ from PySide6.QtGui import QPainter, QColor, QPen
 
 class ToggleSwitch(QWidget):
     toggled = Signal(bool)
-    
-    def __init__(self, parent=None, checked=True):
+
+    def __init__(self, parent=None, checked=True, color_on=None, color_off=None):
         super().__init__(parent)
         self._checked = checked
         self._circle_position = 22 if checked else 2
+        self._color_on  = color_on  or QColor(76, 175, 80)   # green default
+        self._color_off = color_off or QColor(158, 158, 158)  # gray default
         self.setFixedSize(44, 22)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         
@@ -47,10 +49,7 @@ class ToggleSwitch(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         # Background
-        if self._checked:
-            bg_color = QColor(76, 175, 80)  # Green when ON
-        else:
-            bg_color = QColor(158, 158, 158)  # Gray when OFF
+        bg_color = self._color_on if self._checked else self._color_off
         
         painter.setBrush(bg_color)
         painter.setPen(Qt.PenStyle.NoPen)

@@ -34,7 +34,7 @@ except Exception as _e:
 
 from db.database import DB_PATH
 from sync.app_config import load_config
-from tabs.utils import calculate_downtime_equivalent_units
+from tabs.utils import calculate_downtime_equivalent_units, DAILY_BASE_MINUTES
 
 # ── Colour palette ──────────────────────────────────────────────────────────
 _BLUE       = "2D89EF"
@@ -45,8 +45,6 @@ _RED        = "F44336"
 _HEADER_FG  = "FFFFFF"
 _GREY_ROW   = "F5F5F5"
 _TITLE_GREY = "3C3C3C"
-
-DAILY_BASE_MINUTES = 408.3
 
 # Cache: track latest mtime of _Summary_*.xlsx to skip unnecessary Dashboard rebuilds
 _last_dashboard_max_mtime: float = 0.0

@@ -715,8 +715,10 @@ class StandardsTab(QWidget):
         ok1 = self.save_standards()
         ok2 = self.save_units_eq()
         if ok1 and ok2:
-            # Bust the module-level cache so every tab reloads fresh values
+            # Bust module-level caches so every tab reloads fresh values
             load_units_eq_data(force=True)
+            from .utils import load_standards_data
+            load_standards_data(force=True)
             QMessageBox.information(self, "Success", "Standards saved successfully!")
             self.standards_updated.emit()
         else:
@@ -784,8 +786,10 @@ class StandardsTab(QWidget):
     
     def reload_standards(self):
         """Reload standards and units_eq from file"""
+        from .utils import load_standards_data
+        load_standards_data(force=True)  # bust cache before reloading
         self.load_standards()
-        load_units_eq_data(force=True)   # bust cache before reloading
+        load_units_eq_data(force=True)
         self.load_units_eq()
         self.populate_tree()
         QMessageBox.information(self, "Reloaded", "Standards reloaded from file.")

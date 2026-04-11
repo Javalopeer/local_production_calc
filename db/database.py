@@ -224,7 +224,8 @@ def get_db_version():
         result = cursor.fetchone()
         conn.close()
         return result[0] if result else 0
-    except:
+    except Exception as _e:
+        print(f"[db] get_db_version failed: {_e}")
         conn.close()
         return 0
 
@@ -271,12 +272,12 @@ def init_db():
     # Add columns if they don't exist (for existing databases)
     try:
         cursor.execute("ALTER TABLE cases ADD COLUMN count_production INTEGER DEFAULT 1")
-    except:
-        pass
+    except Exception as _e:
+        print(f"[db] migration skipped (already applied): {_e}")
     try:
         cursor.execute("ALTER TABLE cases ADD COLUMN comments TEXT DEFAULT ''")
-    except:
-        pass
+    except Exception as _e:
+        print(f"[db] migration skipped (already applied): {_e}")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS downtimes (
@@ -292,20 +293,20 @@ def init_db():
     # Migrate existing DBs that lack the status or detalle columns
     try:
         cursor.execute("ALTER TABLE downtimes ADD COLUMN status TEXT DEFAULT 'approved'")
-    except:
-        pass
+    except Exception as _e:
+        print(f"[db] migration skipped (already applied): {_e}")
     try:
         cursor.execute("ALTER TABLE downtimes ADD COLUMN detalle TEXT DEFAULT ''")
-    except:
-        pass
+    except Exception as _e:
+        print(f"[db] migration skipped (already applied): {_e}")
     try:
         cursor.execute("ALTER TABLE downtimes ADD COLUMN responded_by TEXT DEFAULT ''")
-    except:
-        pass
+    except Exception as _e:
+        print(f"[db] migration skipped (already applied): {_e}")
     try:
         cursor.execute("ALTER TABLE downtimes ADD COLUMN responded_at TEXT DEFAULT ''")
-    except:
-        pass
+    except Exception as _e:
+        print(f"[db] migration skipped (already applied): {_e}")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ot_cases (
@@ -330,13 +331,19 @@ def init_db():
     # Add columns if they don't exist (for existing databases)
     try:
         cursor.execute("ALTER TABLE ot_cases ADD COLUMN count_production INTEGER DEFAULT 1")
-    except:
-        pass
+    except Exception as _e:
+        print(f"[db] migration skipped (already applied): {_e}")
     try:
         cursor.execute("ALTER TABLE ot_cases ADD COLUMN comments TEXT DEFAULT ''")
-    except:
-        pass
+    except Exception as _e:
+        print(f"[db] migration skipped (already applied): {_e}")
     
+    # Indexes for the most common query patterns (fecha, region+tipo)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_fecha ON cases(fecha)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_region_tipo ON cases(region, tipo_caso)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ot_cases_fecha ON ot_cases(fecha)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_downtimes_fecha ON downtimes(fecha)")
+
     # Update schema version
     cursor.execute("INSERT OR REPLACE INTO db_metadata (key, version) VALUES ('schema_version', ?)", (CURRENT_SCHEMA_VERSION,))
 

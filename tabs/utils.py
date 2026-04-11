@@ -99,6 +99,32 @@ def load_units_eq_data(force: bool = False) -> Dict[str, Dict[str, float]]:
     return _units_eq_cache
 
 
+_standards_cache: Dict[str, dict] | None = None
+
+
+def load_standards_data(force: bool = False) -> Dict[str, dict]:
+    """Load standards.json once and cache in memory.
+
+    Call with force=True after saving changes in the Standards tab so all
+    tabs pick up the fresh values without restarting the app.
+    """
+    global _standards_cache
+    if _standards_cache is None or force:
+        path = get_resource_path(os.path.join("data", "standards.json"))
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                _standards_cache = json.load(fh)
+        except Exception as exc:
+            print(f"[utils] Could not load standards.json: {exc}")
+            _standards_cache = {}
+        # Ensure "New Impressions" mirrors "Secondary" in every region
+        for _region_data in (_standards_cache or {}).values():
+            _aligners = _region_data.get("Aligners", {}) if isinstance(_region_data, dict) else {}
+            if isinstance(_aligners, dict) and "Secondary" in _aligners:
+                _aligners["New Impressions"] = _aligners["Secondary"]
+    return _standards_cache
+
+
 def _norm(s: str) -> str:
     """Normalise a region name for fuzzy matching (lower-case, alphanum only)."""
     return re.sub(r"[^a-z0-9]", "", s.lower()) if s else ""

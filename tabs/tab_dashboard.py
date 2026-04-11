@@ -385,7 +385,7 @@ class _Card(QFrame):
 
         self._title_lbl = QLabel(title)
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._title_lbl.setStyleSheet("color: #888888; font-size: 11px;")
+        self._title_lbl.setStyleSheet("color: #8B949E; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
 
         self._val_lbl = QLabel(value)
         self._val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -516,7 +516,7 @@ class DashboardTab(QWidget):
         # ── Title ──────────────────────────────────────────────────────
         title = QLabel("Dashboard")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #4aa3ff;")
+        title.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6EDF3; letter-spacing: 0.5px;")
         root.addWidget(title)
 
         # ── Filters ────────────────────────────────────────────────────
@@ -586,16 +586,63 @@ class DashboardTab(QWidget):
 
         flay.addWidget(btn_refresh, 1, 4, Qt.AlignmentFlag.AlignLeft)
         flay.setColumnStretch(5, 1)
+
+        # Row 2: Date preset shortcuts
+        presets_lbl = QLabel("Quick:")
+        presets_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        flay.addWidget(presets_lbl, 2, 0)
+
+        presets_bar = QWidget()
+        presets_layout = QHBoxLayout(presets_bar)
+        presets_layout.setContentsMargins(0, 0, 0, 0)
+        presets_layout.setSpacing(6)
+
+        btn_today = QPushButton("Today")
+        btn_today.setMaximumWidth(70)
+        btn_week  = QPushButton("This Week")
+        btn_week.setMaximumWidth(80)
+        btn_month = QPushButton("This Month")
+        btn_month.setMaximumWidth(90)
+
+        def _set_today():
+            today = QDate.currentDate()
+            self.date_from.setDate(today)
+            self.date_to.setDate(today)
+            self.refresh()
+
+        def _set_week():
+            today = QDate.currentDate()
+            self.date_from.setDate(today.addDays(-today.dayOfWeek() + 1))  # Monday
+            self.date_to.setDate(today)
+            self.refresh()
+
+        def _set_month():
+            today = QDate.currentDate()
+            self.date_from.setDate(QDate(today.year(), today.month(), 1))
+            self.date_to.setDate(today)
+            self.refresh()
+
+        btn_today.clicked.connect(_set_today)
+        btn_week.clicked.connect(_set_week)
+        btn_month.clicked.connect(_set_month)
+
+        presets_layout.addWidget(btn_today)
+        presets_layout.addWidget(btn_week)
+        presets_layout.addWidget(btn_month)
+        presets_layout.addStretch()
+
+        flay.addWidget(presets_bar, 2, 1, 1, 5)
+
         root.addWidget(fb)
 
         # ── KPI cards (3 + 2 grid so they wrap before squishing) ───────
         card_grid = QGridLayout()
         card_grid.setSpacing(14)
-        self.kpi_reg  = _Card("REG Cases", accent="#4aa3ff")
-        self.kpi_ot   = _Card("OT Cases",  accent="#f5a623")
-        self.kpi_ue   = _Card("Total UE",  accent="#4CAF50")
-        self.kpi_eff  = _Card("Avg Eff %", accent="#e07b54")
-        self.kpi_down = _Card("Downtime",  accent="#e05c5c")
+        self.kpi_reg  = _Card("REG Cases", accent="#388BFD")
+        self.kpi_ot   = _Card("OT Cases",  accent="#F0883E")
+        self.kpi_ue   = _Card("Total UE",  accent="#3FB950")
+        self.kpi_eff  = _Card("Avg Eff %", accent="#A371F7")
+        self.kpi_down = _Card("Downtime",  accent="#F85149")
         for i, card in enumerate(
             (self.kpi_reg, self.kpi_ot, self.kpi_ue, self.kpi_eff, self.kpi_down)
         ):

@@ -8,7 +8,9 @@ if __name__ == "__main__":
 
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QComboBox, QLineEdit,
-    QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar, QDateEdit, QTextEdit, QScrollArea
+    QPushButton, QLabel, QTimeEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QProgressBar,
+    QDateEdit, QTextEdit, QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QHeaderView, QMessageBox, QFrame, QSizePolicy,
 )
 from PySide6.QtCore import QTime, QDate, Qt, Signal, QPropertyAnimation, QEasingCurve, QTimer
 from db.database import get_connection
@@ -19,75 +21,22 @@ from .utils import (
     get_units_per_case as _ue_lookup,
     calculate_equivalent_units,
     calculate_downtime_equivalent_units,
+    DAILY_BASE_MINUTES,
 )
 from datetime import datetime
 from .downtime_manager import DowntimeManager
 from .toggle_switch import ToggleSwitch
-
-
-def card(title, widget):
-    """Helper function to create styled card/groupbox"""
-    box = QGroupBox(title)
-    layout = QVBoxLayout()
-    layout.addWidget(widget) if isinstance(widget, QWidget) else layout.addLayout(widget)
-    box.setLayout(layout)
-    return box
-
-
-class TimeEditWithShortcut(QTimeEdit):
-    """QTimeEdit con soporte para Ctrl+Shift+: para hora actual y edición directa"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDisplayFormat("HH:mm")
-        self.setCorrectionMode(QTimeEdit.CorrectToNearestValue)
-        self.setAcceptDrops(True)
-    
-    def keyPressEvent(self, event):
-        # Ctrl+Shift+:
-        if event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
-            if event.key() == Qt.Key.Key_Colon:
-                self.setTime(QTime.currentTime())
-                return
-        # Allow all text input
-        super().keyPressEvent(event)
-    
-    def mouseDoubleClickEvent(self, event):
-        """Allow double-click to select all for editing"""
-        super().mouseDoubleClickEvent(event)
-        # Select all text when double-clicked
-        self.lineEdit().selectAll() if hasattr(self, 'lineEdit') and self.lineEdit() else None
-
-
-class DateEditWithShortcut(QDateEdit):
-    """QDateEdit con soporte para Ctrl+Shift+; para fecha actual y edición directa"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDisplayFormat("yyyy-MM-dd")
-        self.setCalendarPopup(True)
-        self.setAcceptDrops(True)
-    
-    def keyPressEvent(self, event):
-        # Ctrl+Shift+; (semicolon)
-        if event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
-            if event.key() == Qt.Key.Key_Semicolon:
-                self.setDate(QDate.currentDate())
-                return
-        # Allow all text input
-        super().keyPressEvent(event)
-    
-    def mouseDoubleClickEvent(self, event):
-        """Allow double-click to select all for editing"""
-        super().mouseDoubleClickEvent(event)
-        # Select all text when double-clicked
-        self.lineEdit().selectAll() if hasattr(self, 'lineEdit') and self.lineEdit() else None
+from .widgets import TimeEditWithShortcut, DateEditWithShortcut, card
 
 
 class RegisterTab(QWidget):
-    case_saved = Signal()  # Signal emitted when a case is saved
-    
+    case_saved = Signal()   # regular case saved/updated
+    ot_saved   = Signal()   # overtime case saved/updated
+
     def __init__(self):
         super().__init__()
-        self.editing_case_id = None  # Track if we're editing a case
+        self._mode        = "regular"   # "regular" | "overtime"
+        self._editing_id  = None        # db id being edited (None = new case)
         self._import_toast = None
         self._import_toast_timer = None
 
@@ -95,45 +44,81 @@ class RegisterTab(QWidget):
         self.load_units_eq()
 
         self.case_id = QLineEdit()
-        self.case_id.setMaximumWidth(150)
         self.case_id.setPlaceholderText("Enter Case ID")
         self.case_id.textChanged.connect(self.on_case_id_changed)
         self.region = QComboBox()
-        self.region.setMaximumWidth(180)
         self.tipo = QComboBox()
-        self.tipo.setMaximumWidth(180)
         self.doctor = QLineEdit()
         self.doctor.setPlaceholderText("Optional")
-        self.doctor.setMaximumWidth(180)
 
         self.start_time = TimeEditWithShortcut()
-        self.start_time.setMaximumWidth(120)
-        
+        self.start_time.setMaximumWidth(140)
+
         self.end_time = TimeEditWithShortcut()
-        self.end_time.setMaximumWidth(120)
+        self.end_time.setMaximumWidth(140)
         self.end_time.timeChanged.connect(self.validate_end_time)
 
         self.case_date = DateEditWithShortcut()
         self.case_date.setDate(QDate.currentDate())
-        self.case_date.setMaximumWidth(180)
         self.case_date.dateChanged.connect(self.on_date_changed)
 
-        self.result_label = QLabel("—")
-        self.result_label.setStyleSheet("""
-            font-size: 13px;
-            font-weight: bold;
-            color: #4aa3ff;
-            text-align: center;
-        """)
+        # Calculation Result — two KPI boxes side by side
+        self._result_eff_value = QLabel("—")
+        self._result_eff_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._result_eff_value.setStyleSheet(
+            "font-size: 22px; font-weight: 700; color: #388BFD;"
+        )
+        _result_eff_label = QLabel("Efficiency")
+        _result_eff_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _result_eff_label.setStyleSheet("font-size: 10px; color: #8B949E; font-weight: 600; letter-spacing: 0.5px;")
+
+        self._result_val_value = QLabel("—")
+        self._result_val_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._result_val_value.setStyleSheet(
+            "font-size: 22px; font-weight: 700; color: #3FB950;"
+        )
+        _result_val_label = QLabel("Case Value")
+        _result_val_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _result_val_label.setStyleSheet("font-size: 10px; color: #8B949E; font-weight: 600; letter-spacing: 0.5px;")
+
+        _kpi_left = QVBoxLayout()
+        _kpi_left.setSpacing(2)
+        _kpi_left.addWidget(self._result_eff_value)
+        _kpi_left.addWidget(_result_eff_label)
+
+        _kpi_right = QVBoxLayout()
+        _kpi_right.setSpacing(2)
+        _kpi_right.addWidget(self._result_val_value)
+        _kpi_right.addWidget(_result_val_label)
+
+        _kpi_divider = QFrame()
+        _kpi_divider.setFrameShape(QFrame.Shape.VLine)
+        _kpi_divider.setStyleSheet("color: #30363D;")
+
+        _kpi_row = QHBoxLayout()
+        _kpi_row.setSpacing(12)
+        _kpi_row.addLayout(_kpi_left)
+        _kpi_row.addWidget(_kpi_divider)
+        _kpi_row.addLayout(_kpi_right)
+
+        # Small status label for errors/messages (shown below KPI row)
+        self.result_label = QLabel()
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.result_label.setWordWrap(True)
-        self.result_label.setMinimumHeight(50)
-        self.result_label.setMaximumHeight(50)
+        self.result_label.setStyleSheet("font-size: 11px; color: #8B949E;")
+        self.result_label.setVisible(False)
+
+        result_kpi_layout = QVBoxLayout()
+        result_kpi_layout.setContentsMargins(8, 6, 8, 6)
+        result_kpi_layout.setSpacing(6)
+        result_kpi_layout.addLayout(_kpi_row)
+        result_kpi_layout.addWidget(self.result_label)
+
         self.daily_production_label = QLabel("Daily Production: 0.00%")
-        self.daily_production_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #2196F3;")
-        
+        self.daily_production_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #388BFD;")
+
         self.equivalent_units_label = QLabel("Equivalent Units: 0.00")
-        self.equivalent_units_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #9C27B0;")
+        self.equivalent_units_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #A371F7;")
 
         self.region.addItems(self.standards.keys())
         self.region.currentTextChanged.connect(self.update_case_types)
@@ -144,21 +129,21 @@ class RegisterTab(QWidget):
         self.end_time.setTime(QTime(0, 0))  # Empty/default value
 
         calc_btn = QPushButton("Calculate")
-        calc_btn.setMaximumWidth(120)
-        calc_btn.setMinimumHeight(26)
-        save_btn = QPushButton("Save Case")
-        save_btn.setMaximumWidth(120)
-        save_btn.setMinimumHeight(26)
-        save_btn.setStyleSheet("")
-        save_btn.clicked.connect(self.save_case)
-
+        calc_btn.setMinimumHeight(30)
         calc_btn.clicked.connect(self.calculate)
 
-        # Form layout - centered
+        self._save_btn = QPushButton("Save Case")
+        self._save_btn.setMinimumHeight(36)
+        self._save_btn.clicked.connect(self.save_case)
+        # keep local alias for the buttons layout below
+        save_btn = self._save_btn
+
+        # Form layout
         form = QFormLayout()
-        form.setSpacing(9)
+        form.setSpacing(10)
         form.setContentsMargins(11, 11, 11, 11)
-        form.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.addRow("Case ID:", self.case_id)
         form.addRow("Region:", self.region)
         form.addRow("Type:", self.tipo)
@@ -181,35 +166,38 @@ class RegisterTab(QWidget):
         form.addRow("", toggle_widget)
 
         # Import from Web button
-        import_web_btn = QPushButton("Import")
-        import_web_btn.setMaximumWidth(90)
-        import_web_btn.setMinimumHeight(26)
+        import_web_btn = QPushButton("Import from Web")
+        import_web_btn.setMinimumHeight(30)
         import_web_btn.setToolTip(
             "Copy all text on the case page (Ctrl+A, Ctrl+C),\n"
             "then click here or press Ctrl+Shift+I to auto-fill the fields."
         )
         import_web_btn.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
-                color: white;
+                background-color: transparent;
+                border: 1px solid #3FB950;
+                color: #3FB950;
+                border-radius: 6px;
+                font-weight: 600;
             }
             QPushButton:hover {
-                background-color: #388E3C;
+                background-color: #1A3126;
+                border-color: #3FB950;
             }
         """)
         import_web_btn.clicked.connect(self._on_import_case)
 
-        # Buttons layout - centered
-        buttons_layout = QHBoxLayout()
-        buttons_layout.addStretch()
-        buttons_layout.addWidget(import_web_btn)
-        buttons_layout.addWidget(calc_btn)
-        buttons_layout.addWidget(save_btn)
-        buttons_layout.addStretch()
+        # Buttons layout — row 1: secondary actions, row 2: primary save (full width)
+        _secondary_row = QHBoxLayout()
+        _secondary_row.setSpacing(8)
+        _secondary_row.addWidget(import_web_btn)
+        _secondary_row.addWidget(calc_btn)
 
-        # Result section
-        result_layout = QVBoxLayout()
-        result_layout.addWidget(self.result_label)
+        buttons_layout = QVBoxLayout()
+        buttons_layout.setSpacing(6)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.addLayout(_secondary_row)
+        buttons_layout.addWidget(save_btn)
 
         # Progress bar section
         progress_layout = QVBoxLayout()
@@ -243,16 +231,15 @@ class RegisterTab(QWidget):
         
         left_layout.addWidget(case_info_card)
         left_layout.addLayout(buttons_layout)
-        left_layout.addWidget(card("Calculation Result", result_layout))
+        left_layout.addWidget(card("Calculation Result", result_kpi_layout))
         left_layout.addStretch()
         
-        # Create right card (Comments, Downtime, Progress)
+        # ── Right panel — page 0: Regular mode (Comments + Downtime + Progress) ──
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setSpacing(12)
         right_layout.setContentsMargins(10, 10, 10, 10)
-        
-        # Comments section 
+
         self.comments_input = QTextEdit()
         self.comments_input.setPlaceholderText("Optional comments...")
         self.comments_input.setMaximumHeight(45)
@@ -260,30 +247,103 @@ class RegisterTab(QWidget):
         comments_card = card("Comments (Optional)", self.comments_input)
         comments_card.setMaximumHeight(100)
         right_layout.addWidget(comments_card)
-        
-        # Downtime section
+
         self.downtime_manager = DowntimeManager(on_update_callback=self.load_daily_production)
         self.downtime_manager.setMaximumHeight(300)
         downtime_card = card("Downtime", self.downtime_manager)
         right_layout.addWidget(downtime_card)
-        
-        # Progress bar in right column (normal mode)
+
         right_layout.addWidget(self.progress_group)
         right_layout.addStretch()
-        
+
+        # ── Right panel — page 1: OT mode (OT summary + OT cases table) ──────
+        ot_view_widget = QWidget()
+        ot_view_layout = QVBoxLayout(ot_view_widget)
+        ot_view_layout.setSpacing(12)
+        ot_view_layout.setContentsMargins(10, 10, 10, 10)
+
+        # OT day summary card
+        self.ot_day_prod_label = QLabel("OT Production: 0.00%")
+        self.ot_day_prod_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #FF9800;")
+        self.ot_day_prod_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.ot_day_ue_label = QLabel("OT Equiv. Units: 0.00")
+        self.ot_day_ue_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #CE93D8;")
+        self.ot_day_ue_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.ot_day_progress = QProgressBar()
+        self.ot_day_progress.setMinimum(0)
+        self.ot_day_progress.setMaximum(100)
+        self.ot_day_progress.setValue(0)
+        self.ot_day_progress.setFormat("%v%")
+        self.ot_day_progress.setMinimumHeight(24)
+        self.ot_day_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3c3c3c; border-radius: 8px;
+                text-align: center; background-color: #2b2b2b; color: #fff;
+            }
+            QProgressBar::chunk { background-color: #FF9800; border-radius: 6px; }
+        """)
+        _ot_sum_layout = QVBoxLayout()
+        _ot_sum_layout.addWidget(self.ot_day_prod_label)
+        _ot_sum_layout.addWidget(self.ot_day_ue_label)
+        _ot_sum_layout.addWidget(self.ot_day_progress)
+        _ot_summary_card = card("OT Daily Summary", _ot_sum_layout)
+        _ot_summary_card.setMaximumHeight(130)
+        ot_view_layout.addWidget(_ot_summary_card)
+
+        # OT cases mini-table
+        self._ot_reg_case_ids: list = []
+        self.ot_reg_table = QTableWidget()
+        self.ot_reg_table.setColumnCount(6)
+        self.ot_reg_table.setHorizontalHeaderLabels(["Case ID", "Type", "Time", "Eff %", "Value %", "UE"])
+        self.ot_reg_table.verticalHeader().setVisible(False)
+        self.ot_reg_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.ot_reg_table.setAlternatingRowColors(False)
+        self.ot_reg_table.setShowGrid(True)
+        self.ot_reg_table.setStyleSheet("""
+            QTableWidget { gridline-color: #444; }
+            QHeaderView::section {
+                background-color: #333; border: 1px solid #555; padding: 4px;
+            }
+        """)
+        self.ot_reg_table.setColumnWidth(0, 90)
+        self.ot_reg_table.setColumnWidth(1, 80)
+        self.ot_reg_table.setColumnWidth(2, 46)
+        self.ot_reg_table.setColumnWidth(3, 46)
+        self.ot_reg_table.setColumnWidth(4, 58)
+        self.ot_reg_table.setColumnWidth(5, 46)
+        self.ot_reg_table.horizontalHeader().setStretchLastSection(True)
+        _ot_table_card = card("Today's OT Cases", self.ot_reg_table)
+        ot_view_layout.addWidget(_ot_table_card)
+
+        # Delete button
+        self._ot_reg_delete_btn = QPushButton("Delete Selected")
+        self._ot_reg_delete_btn.setMinimumHeight(26)
+        self._ot_reg_delete_btn.setStyleSheet(
+            "QPushButton { background-color: #B71C1C; color: white; }"
+            "QPushButton:hover { background-color: #D32F2F; }"
+        )
+        self._ot_reg_delete_btn.clicked.connect(self._delete_selected_ot_case)
+        ot_view_layout.addWidget(self._ot_reg_delete_btn)
+        ot_view_layout.addStretch()
+
+        # ── Stacked right panel ───────────────────────────────────────────────
+        self._right_stack = QStackedWidget()
+        self._right_stack.addWidget(right_widget)    # index 0 — regular
+        self._right_stack.addWidget(ot_view_widget)  # index 1 — OT
+
         # Container for responsive layout
         self.content_widget = QWidget()
         self.content_layout = QHBoxLayout(self.content_widget)
         self.content_layout.setSpacing(15)
         self.content_layout.setContentsMargins(5, 5, 5, 5)
         self.content_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        
+
         self.left_widget = left_widget
         self.right_widget = right_widget
         self.right_layout = right_layout
-        
+
         self.content_layout.addWidget(left_widget)
-        self.content_layout.addWidget(right_widget)
+        self.content_layout.addWidget(self._right_stack)
         
         # Scroll area for content
         scroll = QScrollArea()
@@ -293,10 +353,67 @@ class RegisterTab(QWidget):
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         
+        # ── Mode toggle bar ───────────────────────────────────────────────────
+        from PySide6.QtGui import QColor as _QColor
+        mode_bar_widget = QWidget()
+        mode_bar_widget.setMaximumHeight(40)
+        mode_bar_layout = QHBoxLayout(mode_bar_widget)
+        mode_bar_layout.setContentsMargins(8, 4, 8, 4)
+        mode_bar_layout.setSpacing(10)
+
+        self._mode_label_regular = QLabel("Regular")
+        self._mode_label_regular.setStyleSheet(
+            "font-size: 12px; font-weight: 700; color: #388BFD;"
+        )
+
+        self._mode_toggle = ToggleSwitch(
+            checked=False,
+            color_on=_QColor(240, 136, 62),   # orange = OT
+            color_off=_QColor(56, 139, 253),   # blue   = Regular
+        )
+        self._mode_toggle.toggled.connect(self._on_mode_toggled)
+
+        self._mode_label_ot = QLabel("OT")
+        self._mode_label_ot.setStyleSheet(
+            "font-size: 12px; font-weight: 700; color: #6E7681;"
+        )
+
+        mode_bar_layout.addStretch()
+        mode_bar_layout.addWidget(self._mode_label_regular)
+        mode_bar_layout.addWidget(self._mode_toggle)
+        mode_bar_layout.addWidget(self._mode_label_ot)
+        mode_bar_layout.addStretch()
+
+        # ── Edit banner ───────────────────────────────────────────────────────
+        self._edit_banner = QFrame()
+        self._edit_banner.setFrameShape(QFrame.Shape.StyledPanel)
+        self._edit_banner.setMaximumHeight(38)
+        self._edit_banner.setVisible(False)
+        self._edit_banner.setStyleSheet(
+            "QFrame { background-color: #2D2A00; border: 1px solid #D29922; border-radius: 6px; }"
+        )
+        _banner_layout = QHBoxLayout(self._edit_banner)
+        _banner_layout.setContentsMargins(10, 4, 8, 4)
+        self._edit_banner_label = QLabel("Editing case — save to update")
+        self._edit_banner_label.setStyleSheet(
+            "color: #D29922; font-weight: 700; font-size: 12px; background: transparent;"
+        )
+        _banner_cancel_btn = QPushButton("Cancel")
+        _banner_cancel_btn.setMaximumWidth(70)
+        _banner_cancel_btn.setMinimumHeight(22)
+        _banner_cancel_btn.clicked.connect(self._cancel_edit)
+        _banner_layout.addWidget(self._edit_banner_label, 1)
+        _banner_layout.addWidget(_banner_cancel_btn)
+
+        # Apply initial mode styling
+        self._update_mode_ui()
+
         # Main layout
         self.final_layout = QVBoxLayout()
         self.final_layout.setContentsMargins(5, 5, 5, 5)
-        self.final_layout.setSpacing(5)
+        self.final_layout.setSpacing(4)
+        self.final_layout.addWidget(mode_bar_widget)
+        self.final_layout.addWidget(self._edit_banner)
         self.final_layout.addWidget(scroll, 1)
         self.setLayout(self.final_layout)
         
@@ -404,14 +521,8 @@ class RegisterTab(QWidget):
         self._import_toast.move(x, y)
 
     def load_standards(self):
-        standards_path = get_resource_path(os.path.join("data", "standards.json"))
-        with open(standards_path, "r") as f:
-            self.standards = json.load(f)
-        # Ensure "New Impressions" mirrors "Secondary" in every region
-        for _r, _d in self.standards.items():
-            _a = _d.get("Aligners", {}) if isinstance(_d, dict) else {}
-            if isinstance(_a, dict) and "Secondary" in _a:
-                _a["New Impressions"] = _a["Secondary"]
+        from .utils import load_standards_data
+        self.standards = load_standards_data()
 
     def load_units_eq(self):
         """Load units equivalency for production calculation"""
@@ -462,6 +573,28 @@ class RegisterTab(QWidget):
         total_downtime = result[0] if result[0] else 0.0
         return total_downtime
 
+    # ── Result KPI helpers ─────────────────────────────────────────────────
+
+    def _show_result(self, efficiency: float, case_value: float, color: str):
+        """Update the two KPI boxes with calculated values."""
+        self._result_eff_value.setText(f"{efficiency:.1f}%")
+        self._result_eff_value.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {color};")
+        self._result_val_value.setText(f"{case_value:.3f}%")
+        self.result_label.setVisible(False)
+
+    def _set_result_status(self, msg: str, color: str = "#8B949E"):
+        """Show a status/error message below the KPI row."""
+        self.result_label.setText(msg)
+        self.result_label.setStyleSheet(f"font-size: 11px; color: {color};")
+        self.result_label.setVisible(True)
+
+    def _reset_result_kpi(self):
+        """Reset KPI boxes to blank state."""
+        self._result_eff_value.setText("—")
+        self._result_eff_value.setStyleSheet("font-size: 22px; font-weight: 700; color: #388BFD;")
+        self._result_val_value.setText("—")
+        self.result_label.setVisible(False)
+
     def calculate(self):
         region = self.region.currentText()
         tipo = self.tipo.currentText()
@@ -482,32 +615,28 @@ class RegisterTab(QWidget):
 
         real_minutes = start.secsTo(end) / 60
         if real_minutes <= 0:
-            self.result_label.setText("Invalid time")
+            self._set_result_status("Invalid time", "#F85149")
             return
 
         efficiency = (std_time / real_minutes) * 100
-        
+
         # Determine status and color
         if efficiency >= 100:
-            status = "OK"
-            color = "#4CAF50"
+            color = "#3FB950"
         elif efficiency >= 95:
-            status = "WARN"
-            color = "#FFC107"
+            color = "#D29922"
         else:
-            status = "LOW"
-            color = "#F44336"
+            color = "#F85149"
 
-        # Display result with dynamic color showing efficiency and case value in two lines
-        result_text = f"{efficiency:.1f}% – {status}\nCase Value: {case_value:.3f}%"
-        self.result_label.setText(result_text)
-        self.result_label.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold; text-align: center;")
+        self._show_result(efficiency, case_value, color)
 
     def on_date_changed(self):
         """Called when the date picker changes - reload production and downtime for that date"""
         selected_date = self.case_date.date().toString("yyyy-MM-dd")
         self.downtime_manager.set_date(selected_date)
         self.load_daily_production()
+        if self._mode == "overtime":
+            self._load_ot_day_cases()
 
     def load_daily_production(self):
         conn = get_connection()
@@ -550,7 +679,6 @@ class RegisterTab(QWidget):
         
         # Get total downtime and calculate as production value
         total_downtime = self.get_daily_downtime(selected_date)
-        DAILY_BASE_MINUTES = 408.3  # Base for percentage calculation
         downtime_value = (total_downtime / DAILY_BASE_MINUTES) * 100 if total_downtime > 0 else 0
         
         # Total production = cases + downtime (both count as production)
@@ -578,22 +706,24 @@ class RegisterTab(QWidget):
         # Animate the progress bar
         self.animate_progress_bar(int(total_production))
         
-        # Change color based on performance
+        # Color based on performance threshold
         if total_production < 95:
-            bar_color = "#F44336"
+            bar_color = "#F85149"   # red
         elif total_production < 100:
-            bar_color = "#FFC107"
+            bar_color = "#D29922"   # amber
         else:
-            bar_color = "#4CAF50"
-        
+            bar_color = "#3FB950"   # green
+
         self.progress_bar.setStyleSheet(f"""
             QProgressBar {{
-                border: 1px solid #3c3c3c;
-                border-radius: 8px;
+                background-color: #21262D;
+                border: none;
+                border-radius: 6px;
                 text-align: center;
-                height: 24px;
-                background-color: #2b2b2b;
-                color: #ffffff;
+                min-height: 24px;
+                color: #E6EDF3;
+                font-weight: 700;
+                font-size: 11px;
             }}
             QProgressBar::chunk {{
                 background-color: {bar_color};
@@ -618,7 +748,7 @@ class RegisterTab(QWidget):
         self._progress_animation.start()
 
     def load_case_for_edit(self, db_id):
-        """Load a case from database into form for editing"""
+        """Load a regular case from database into form for editing."""
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
@@ -627,34 +757,244 @@ class RegisterTab(QWidget):
         """, (db_id,))
         row = cursor.fetchone()
         conn.close()
-        
-        if row:
-            self.editing_case_id = db_id
-            self.case_id.setText(row[0])
-            
-            # Set region and type
-            region_idx = self.region.findText(row[1])
-            if region_idx >= 0:
-                self.region.setCurrentIndex(region_idx)
-            self.update_case_types()
-            type_idx = self.tipo.findText(row[2])
-            if type_idx >= 0:
-                self.tipo.setCurrentIndex(type_idx)
-            
-            self.doctor.setText(row[3] if row[3] else "")
-            self.case_date.setDate(QDate.fromString(row[4], "yyyy-MM-dd"))
-            self.start_time.setTime(QTime.fromString(row[5], "HH:mm"))
-            self.end_time.setTime(QTime.fromString(row[6], "HH:mm"))
-            
-            # Set toggle state
-            count_prod = row[7] if row[7] is not None else 1
-            self.count_toggle.setChecked(bool(count_prod))
-            
-            # Set comments
-            self.comments_input.setText(row[8] if row[8] else "")
-            
-            self.result_label.setText("Editing - Click Save to update")
-            self.result_label.setStyleSheet("color: #FFC107; font-size: 13px; font-weight: bold; text-align: center;")
+
+        if not row:
+            return
+
+        self._editing_id = db_id
+        self.switch_to_regular_mode()
+
+        self.case_id.setText(row[0])
+        region_idx = self.region.findText(row[1])
+        if region_idx >= 0:
+            self.region.setCurrentIndex(region_idx)
+        self.update_case_types()
+        type_idx = self.tipo.findText(row[2])
+        if type_idx >= 0:
+            self.tipo.setCurrentIndex(type_idx)
+
+        self.doctor.setText(row[3] if row[3] else "")
+        self.case_date.setDate(QDate.fromString(row[4], "yyyy-MM-dd"))
+        self.start_time.setTime(QTime.fromString(row[5], "HH:mm"))
+        self.end_time.setTime(QTime.fromString(row[6], "HH:mm"))
+
+        count_prod = row[7] if row[7] is not None else 1
+        self.count_toggle.setChecked(bool(count_prod))
+        self.comments_input.setText(row[8] if row[8] else "")
+
+        self._edit_banner_label.setText(f"Editing case {row[0]} — save to update")
+        self._edit_banner.setVisible(True)
+        self._reset_result_kpi()
+
+    def load_ot_case_for_edit(self, db_id: int):
+        """Load an OT case from ot_cases into the form for editing."""
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT case_id, region, tipo_caso, doctor, fecha, hora_inicio, hora_fin, count_production, comments
+            FROM ot_cases WHERE id = ?
+        """, (db_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return
+
+        self._editing_id = db_id
+        self.switch_to_ot_mode()
+
+        self.case_id.setText(row[0])
+        region_idx = self.region.findText(row[1])
+        if region_idx >= 0:
+            self.region.setCurrentIndex(region_idx)
+        self.update_case_types()
+        type_idx = self.tipo.findText(row[2])
+        if type_idx >= 0:
+            self.tipo.setCurrentIndex(type_idx)
+
+        self.doctor.setText(row[3] if row[3] else "")
+        self.case_date.setDate(QDate.fromString(row[4], "yyyy-MM-dd"))
+        self.start_time.setTime(QTime.fromString(row[5], "HH:mm"))
+        self.end_time.setTime(QTime.fromString(row[6], "HH:mm"))
+
+        count_prod = row[7] if row[7] is not None else 1
+        self.count_toggle.setChecked(bool(count_prod))
+        self.comments_input.setText(row[8] if row[8] else "")
+
+        self._edit_banner_label.setText(f"Editing OT case {row[0]} — save to update")
+        self._edit_banner.setVisible(True)
+        self._reset_result_kpi()
+
+    def _update_mode_ui(self):
+        """Sync toggle label colors, save button, and right panel to self._mode."""
+        is_ot = self._mode == "overtime"
+
+        # Update label emphasis
+        if hasattr(self, '_mode_label_regular'):
+            self._mode_label_regular.setStyleSheet(
+                "font-size: 12px; font-weight: 700; color: #8B949E;"
+                if is_ot else
+                "font-size: 12px; font-weight: 700; color: #388BFD;"
+            )
+        if hasattr(self, '_mode_label_ot'):
+            self._mode_label_ot.setStyleSheet(
+                "font-size: 12px; font-weight: 700; color: #F0883E;"
+                if is_ot else
+                "font-size: 12px; font-weight: 700; color: #6E7681;"
+            )
+
+        # Sync toggle position without re-firing the signal
+        if hasattr(self, '_mode_toggle') and self._mode_toggle.isChecked() != is_ot:
+            self._mode_toggle.blockSignals(True)
+            self._mode_toggle.setChecked(is_ot)
+            self._mode_toggle.blockSignals(False)
+
+        # Save button
+        if is_ot:
+            self._save_btn.setText("Save OT Case")
+            self._save_btn.setStyleSheet("""
+                QPushButton { background-color: #F0883E; border: 1px solid #F0883E;
+                              color: white; border-radius: 6px; font-weight: 700;
+                              font-size: 13px; padding: 4px 12px; }
+                QPushButton:hover { background-color: #D97834; }
+            """)
+        else:
+            self._save_btn.setText("Save Case")
+            self._save_btn.setStyleSheet("""
+                QPushButton { background-color: #238636; border: 1px solid #2EA043;
+                              color: white; border-radius: 6px; font-weight: 700;
+                              font-size: 13px; padding: 4px 12px; }
+                QPushButton:hover { background-color: #2EA043; }
+            """)
+
+        # Right panel stack
+        if hasattr(self, '_right_stack'):
+            self._right_stack.setCurrentIndex(1 if is_ot else 0)
+
+    def _on_mode_toggled(self, checked: bool):
+        """Called when the user flips the mode toggle."""
+        if checked:
+            self.switch_to_ot_mode()
+        else:
+            self.switch_to_regular_mode()
+
+    def switch_to_ot_mode(self):
+        """Switch the form to overtime mode and load OT cases."""
+        self._mode = "overtime"
+        self._update_mode_ui()
+        self._load_ot_day_cases()
+
+    def switch_to_regular_mode(self):
+        """Switch the form to regular mode."""
+        self._mode = "regular"
+        self._editing_id = None
+        self._edit_banner.setVisible(False)
+        self._update_mode_ui()
+
+    def _load_ot_day_cases(self):
+        """Populate the embedded OT table with today's (or selected date's) OT cases."""
+        from PySide6.QtGui import QColor, QBrush, QFont
+        selected_date = self.case_date.date().toString("yyyy-MM-dd")
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, case_id, tipo_caso, tiempo_real, efficiency, case_value, region, count_production
+            FROM ot_cases WHERE fecha = ? ORDER BY id DESC
+        """, (selected_date,))
+        rows = cursor.fetchall()
+
+        # Also compute summary stats
+        cursor.execute("""
+            SELECT SUM(case_value), region, tipo_caso, COUNT(*), SUM(case_value)
+            FROM ot_cases
+            WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
+            GROUP BY region, tipo_caso
+        """, (selected_date,))
+        region_rows = cursor.fetchall()
+        conn.close()
+
+        # Update summary labels
+        total_ot_pct = sum(r[0] for r in rows if r[7] in (1, None) and r[5]) or 0.0
+        total_ue = 0.0
+        for _, region, case_type, count, sum_cv in region_rows:
+            if count and sum_cv:
+                total_ue += calculate_equivalent_units(self.units_eq, region, case_type, sum_cv, count=count)
+
+        self.ot_day_prod_label.setText(f"OT Production: {total_ot_pct:.2f}%")
+        self.ot_day_ue_label.setText(f"OT Equiv. Units: {total_ue:.2f}")
+        self.ot_day_progress.setMaximum(max(100, int(total_ot_pct) + 10))
+        self.ot_day_progress.setValue(int(total_ot_pct))
+
+        # Populate table
+        self._ot_reg_case_ids = []
+        self.ot_reg_table.setRowCount(len(rows))
+        for i, (db_id, case_id, tipo, tiempo, eff, cv, region, count_prod) in enumerate(rows):
+            self._ot_reg_case_ids.append(db_id)
+            counts = count_prod if count_prod is not None else 1
+            bg = QColor(180, 150, 50) if counts == 0 else QColor(43, 43, 43) if i % 2 == 0 else QColor(50, 50, 50)
+            bg_brush = QBrush(bg)
+            fg_brush = QBrush(QColor(255, 255, 255))
+            bold = QFont(); bold.setBold(True)
+
+            ue_val = calculate_equivalent_units(self.units_eq, region or "", tipo or "", cv or 0.0, count=1)
+
+            vals = [str(case_id or ""), str(tipo or ""), f"{tiempo:.0f}" if tiempo else "—",
+                    f"{eff:.0f}" if eff else "—", f"{cv:.2f}" if cv else "—", f"{ue_val:.2f}"]
+            for col, text in enumerate(vals):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setBackground(bg_brush)
+                item.setForeground(fg_brush)
+                if col == 0:
+                    item.setFont(bold)
+                # Color efficiency cell
+                if col == 3 and eff:
+                    try:
+                        ev = float(eff)
+                        if ev >= 100:
+                            item.setBackground(QBrush(QColor(76, 175, 80)))
+                        elif ev >= 95:
+                            item.setBackground(QBrush(QColor(255, 193, 7)))
+                        else:
+                            item.setBackground(QBrush(QColor(244, 67, 54)))
+                    except Exception:
+                        pass
+                self.ot_reg_table.setItem(i, col, item)
+
+    def _delete_selected_ot_case(self):
+        """Delete the OT case selected in the embedded OT table."""
+        row = self.ot_reg_table.currentRow()
+        if row < 0 or row >= len(self._ot_reg_case_ids):
+            return
+        db_id = self._ot_reg_case_ids[row]
+        case_id_text = self.ot_reg_table.item(row, 0).text() if self.ot_reg_table.item(row, 0) else str(db_id)
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete OT case '{case_id_text}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM ot_cases WHERE id = ?", (db_id,))
+            conn.commit()
+            conn.close()
+            self._load_ot_day_cases()
+            self.ot_saved.emit()
+
+    def _cancel_edit(self):
+        """Cancel edit — clear editing state and reset the form."""
+        self._editing_id = None
+        self._edit_banner.setVisible(False)
+        self.case_id.clear()
+        self.doctor.clear()
+        self.comments_input.clear()
+        self.count_toggle.setChecked(True)
+        self.end_time.blockSignals(True)
+        self.end_time.setTime(QTime(0, 0))
+        self.end_time.blockSignals(False)
+        self._reset_result_kpi()
+        self.case_id.setFocus()
 
     # ── Web Import ────────────────────────────────────────────────────────
 
@@ -670,12 +1010,9 @@ class RegisterTab(QWidget):
 
         # Nothing found — show error directly, no dialog
         if not any(data.get(k) for k in ('case_id', 'region', 'tipo', 'doctor')):
-            self.result_label.setText(
-                "Nothing detected in clipboard.\n"
-                "On the case page: press Ctrl+A then Ctrl+C, then try again."
-            )
-            self.result_label.setStyleSheet(
-                "color: #FFC107; font-size: 12px; font-weight: bold; text-align: center;"
+            self._set_result_status(
+                "Nothing detected in clipboard.\nPress Ctrl+A, Ctrl+C on the case page, then retry.",
+                "#D29922"
             )
             return
 
@@ -752,10 +1089,7 @@ class RegisterTab(QWidget):
 
         summary_parts = [p for p in (imported_case_id, imported_region, imported_type) if p]
         summary = " | ".join(summary_parts) if summary_parts else "Case imported"
-        self.result_label.setText(f"Imported: {summary}\nClick Calculate.")
-        self.result_label.setStyleSheet(
-            "color: #4CAF50; font-size: 11px; font-weight: bold; text-align: center;"
-        )
+        self._set_result_status(f"Imported: {summary} — Click Calculate.", "#3FB950")
 
         self._show_import_toast(
             "Verify if the case is Stage RX or Bite Sync.\n"
@@ -764,6 +1098,12 @@ class RegisterTab(QWidget):
         )
 
     def save_case(self):
+        # Auto-set end time to now if the user never changed it from the default 00:00
+        if self.end_time.time() == QTime(0, 0):
+            self.end_time.blockSignals(True)
+            self.end_time.setTime(QTime.currentTime())
+            self.end_time.blockSignals(False)
+
         region = self.region.currentText()
         tipo = self.tipo.currentText()
         case_id = self.case_id.text()
@@ -775,7 +1115,7 @@ class RegisterTab(QWidget):
 
         tiempo_real = start.secsTo(end) / 60
         if tiempo_real < 1:
-            self.result_label.setText("Invalid time (minimum 1 minute)")
+            self._set_result_status("Invalid time (minimum 1 minute)", "#F85149")
             return
 
         # Subtract only breaks the user confirmed they took today
@@ -783,11 +1123,11 @@ class RegisterTab(QWidget):
         break_mins = calculate_break_overlap(start.toString("HH:mm"), end.toString("HH:mm"), fecha=case_date)
         tiempo_real -= break_mins
         if tiempo_real < 1:
-            self.result_label.setText("Case falls entirely within break time")
+            self._set_result_status("Case falls entirely within break time", "#F85149")
             return
 
         if not case_id.strip():
-            self.result_label.setText("Enter Case ID")
+            self._set_result_status("Enter Case ID", "#D29922")
             return
 
         std_time = self.standards[region]["Aligners"][tipo]
@@ -797,15 +1137,19 @@ class RegisterTab(QWidget):
 
         conn = get_connection()
         cursor = conn.cursor()
-        
+
         # Get toggle and comments values
         count_production = 1 if self.count_toggle.isChecked() else 0
         comments = self.comments_input.toPlainText().strip()
 
+        # Determine target table based on current mode
+        sql_table = "ot_cases" if self._mode == "overtime" else "cases"
+        is_ot = self._mode == "overtime"
+
         # Check if we're editing an existing case
-        if self.editing_case_id:
-            cursor.execute("""
-                UPDATE cases SET
+        if self._editing_id:
+            cursor.execute(f"""
+                UPDATE {sql_table} SET
                     case_id = ?, region = ?, tipo_caso = ?,
                     doctor = ?, fecha = ?, hora_inicio = ?, hora_fin = ?,
                     tiempo_real = ?, std_time = ?, efficiency = ?, estado = ?, case_value = ?,
@@ -817,13 +1161,14 @@ class RegisterTab(QWidget):
                 start.toString("HH:mm"), end.toString("HH:mm"),
                 tiempo_real, std_time, efficiency, estado, case_value,
                 count_production, comments,
-                self.editing_case_id
+                self._editing_id
             ))
-            self.editing_case_id = None
-            msg = "Case Updated"
+            self._editing_id = None
+            self._edit_banner.setVisible(False)
+            msg = "OT Case Updated" if is_ot else "Case Updated"
         else:
-            cursor.execute("""
-                INSERT INTO cases (
+            cursor.execute(f"""
+                INSERT INTO {sql_table} (
                     case_id, region, tipo_caso,
                     doctor, fecha, hora_inicio, hora_fin,
                     tiempo_real, std_time, efficiency, estado, case_value,
@@ -836,24 +1181,32 @@ class RegisterTab(QWidget):
                 tiempo_real, std_time, efficiency, estado, case_value,
                 count_production, comments
             ))
-            msg = "Case Saved"
+            msg = "OT Case Saved" if is_ot else "Case Saved"
 
         conn.commit()
         conn.close()
 
-        # Show success message with color
-        self.result_label.setText(msg)
-        self.result_label.setStyleSheet("color: #4CAF50; font-size: 13px; font-weight: bold; text-align: center;")
+        # Show success in KPI boxes and clear status
+        result_color = "#F0883E" if is_ot else "#3FB950"
+        self._show_result(efficiency, case_value, result_color)
+        self._set_result_status(msg, result_color)
         self.load_daily_production()
         self.case_id.clear()
         self.doctor.clear()
         self.comments_input.clear()
         self.count_toggle.setChecked(True)  # Reset toggle to ON
-        
+
         # Clear end time - set to midnight (00:00)
         self.end_time.blockSignals(True)
         self.end_time.setTime(QTime(0, 0))
         self.end_time.blockSignals(False)
-        
+
         # Emit signal to notify other tabs
-        self.case_saved.emit()
+        if is_ot:
+            self.ot_saved.emit()
+            self._load_ot_day_cases()  # refresh embedded OT view
+        else:
+            self.case_saved.emit()
+
+        # Auto-focus Case ID for the next entry
+        self.case_id.setFocus()

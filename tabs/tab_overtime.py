@@ -18,49 +18,12 @@ from .utils import (
     get_units_per_case as _ue_lookup,
     calculate_equivalent_units,
 )
-
-
-def card(title, widget):
-    """Helper function to create styled card/groupbox"""
-    box = QGroupBox(title)
-    layout = QVBoxLayout()
-    layout.addWidget(widget) if isinstance(widget, QWidget) else layout.addLayout(widget)
-    box.setLayout(layout)
-    return box
-
-
-class TimeEditWithShortcut(QTimeEdit):
-    """QTimeEdit con soporte para Ctrl+Shift+: para hora actual"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDisplayFormat("HH:mm")
-        self.setCorrectionMode(QTimeEdit.CorrectToNearestValue)
-    
-    def keyPressEvent(self, event):
-        if event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
-            if event.key() == Qt.Key.Key_Colon:
-                self.setTime(QTime.currentTime())
-                return
-        super().keyPressEvent(event)
-
-
-class DateEditWithShortcut(QDateEdit):
-    """QDateEdit con soporte para Ctrl+Shift+; para fecha actual"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDisplayFormat("yyyy-MM-dd")
-        self.setCalendarPopup(True)
-    
-    def keyPressEvent(self, event):
-        if event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
-            if event.key() == Qt.Key.Key_Semicolon:
-                self.setDate(QDate.currentDate())
-                return
-        super().keyPressEvent(event)
+from .widgets import TimeEditWithShortcut, DateEditWithShortcut, card
 
 
 class OvertimeTab(QWidget):
-    ot_saved = Signal()  # Signal emitted when OT case is saved
+    ot_saved = Signal()              # Signal emitted when OT case is saved
+    ot_edit_requested = Signal(int)  # db id of OT case the user wants to edit
     
     def __init__(self):
         super().__init__()
@@ -73,14 +36,8 @@ class OvertimeTab(QWidget):
         self.init_ui()
 
     def load_standards(self):
-        standards_path = get_resource_path(os.path.join("data", "standards.json"))
-        with open(standards_path, "r") as f:
-            self.standards = json.load(f)
-        # Ensure "New Impressions" mirrors "Secondary" in every region
-        for _r, _d in self.standards.items():
-            _a = _d.get("Aligners", {}) if isinstance(_d, dict) else {}
-            if isinstance(_a, dict) and "Secondary" in _a:
-                _a["New Impressions"] = _a["Secondary"]
+        from .utils import load_standards_data
+        self.standards = load_standards_data()
 
     def load_units_eq(self):
         self.units_eq = load_units_eq_data()
@@ -123,12 +80,9 @@ class OvertimeTab(QWidget):
         self.case_date.dateChanged.connect(self.on_date_changed)
 
         self.result_label = QLabel("—")
-        self.result_label.setStyleSheet("""
-            font-size: 13px;
-            font-weight: bold;
-            color: #FF9800;
-            text-align: center;
-        """)
+        self.result_label.setStyleSheet(
+            "font-size: 14px; font-weight: 700; color: #F0883E; text-align: center;"
+        )
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.result_label.setWordWrap(True)
         self.result_label.setMinimumHeight(50)
@@ -146,11 +100,10 @@ class OvertimeTab(QWidget):
         save_btn.setMinimumHeight(26)
         save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #FF9800;
+                background-color: #F0883E; color: white;
+                border: 1px solid #F0883E; border-radius: 6px; font-weight: 700;
             }
-            QPushButton:hover {
-                background-color: #F57C00;
-            }
+            QPushButton:hover { background-color: #D97834; }
         """)
         save_btn.clicked.connect(self.save_ot_case)
 
@@ -193,12 +146,11 @@ class OvertimeTab(QWidget):
         )
         import_btn.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
-                color: white;
+                background-color: transparent;
+                border: 1px solid #3FB950; color: #3FB950;
+                border-radius: 6px; font-weight: 600;
             }
-            QPushButton:hover {
-                background-color: #388E3C;
-            }
+            QPushButton:hover { background-color: #1A3126; }
         """)
         import_btn.clicked.connect(self._on_import_case)
 
@@ -220,11 +172,11 @@ class OvertimeTab(QWidget):
 
         # Daily OT Production and Equivalent Units
         self.daily_ot_label = QLabel("OT Production: 0.00%")
-        self.daily_ot_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #FF9800;")
+        self.daily_ot_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #F0883E;")
         self.daily_ot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
+
         self.ot_units_label = QLabel("OT Equivalent Units: 0.00")
-        self.ot_units_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #9C27B0;")
+        self.ot_units_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #A371F7;")
         self.ot_units_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         # Comments section
@@ -351,17 +303,16 @@ class OvertimeTab(QWidget):
         self.ot_progress_bar.setMinimumHeight(24)
         self.ot_progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 1px solid #3c3c3c;
-                border-radius: 8px;
-                text-align: center;
-                height: 24px;
-                background-color: #2b2b2b;
-                color: #ffffff;
-            }
-            QProgressBar::chunk {
-                background-color: #FF9800;
+                background-color: #21262D;
+                border: none;
                 border-radius: 6px;
+                text-align: center;
+                min-height: 24px;
+                color: #E6EDF3;
+                font-weight: 700;
+                font-size: 11px;
             }
+            QProgressBar::chunk { background-color: #F0883E; border-radius: 6px; }
         """)
         summary_layout.addWidget(self.ot_progress_bar)
 
@@ -434,13 +385,15 @@ class OvertimeTab(QWidget):
         
         # Style for grid lines
         self.ot_table.setStyleSheet("""
-            QTableWidget {
-                gridline-color: #5a5a5a;
-            }
+            QTableWidget { gridline-color: #21262D; border: none; }
             QHeaderView::section {
-                background-color: #3c3c3c;
-                border: 1px solid #5a5a5a;
-                padding: 4px;
+                background-color: #161B22;
+                color: #8B949E;
+                border: none;
+                border-bottom: 1px solid #30363D;
+                padding: 5px 6px;
+                font-weight: 700;
+                font-size: 10px;
             }
         """)
         
@@ -489,11 +442,10 @@ class OvertimeTab(QWidget):
         self.delete_ot_btn.setMinimumHeight(26)
         self.delete_ot_btn.setStyleSheet("""
             QPushButton {
-                background-color: #F44336;
+                background-color: transparent; color: #F85149;
+                border: 1px solid #F85149; border-radius: 6px; font-weight: 600;
             }
-            QPushButton:hover {
-                background-color: #D32F2F;
-            }
+            QPushButton:hover { background-color: #3D0C09; }
         """)
         # Create main final layout and add left/right content inside a scroll area
         self.final_layout = QVBoxLayout()
@@ -664,13 +616,13 @@ class OvertimeTab(QWidget):
         
         if efficiency >= 100:
             status = "OK"
-            color = "#4CAF50"
+            color = "#3FB950"
         elif efficiency >= 95:
-            status = "⚠ WARN"
-            color = "#FFC107"
+            status = "WARN"
+            color = "#D29922"
         else:
             status = "LOW"
-            color = "#F44336"
+            color = "#F85149"
 
         result_text = f"{efficiency:.1f}% – {status}\nOT Case Value: {case_value:.3f}%"
         self.result_label.setText(result_text)
@@ -729,11 +681,11 @@ class OvertimeTab(QWidget):
         
         # Change color based on OT production
         if total_ot < 10:
-            bar_color = "#9E9E9E"  # Gray for low OT
+            bar_color = "#444C56"   # muted for low OT
         elif total_ot < 25:
-            bar_color = "#FF9800"  # Orange
+            bar_color = "#F0883E"   # orange
         else:
-            bar_color = "#4CAF50"  # Green for good OT
+            bar_color = "#3FB950"   # green for solid OT
         # Store chunk color and let the theme helper set the background
         self._ot_progress_chunk = bar_color
         current_is_light = 'background-color: #F7ECE1' in QApplication.instance().styleSheet()
@@ -951,21 +903,21 @@ class OvertimeTab(QWidget):
 
     def update_progress_bar_style(self, light_mode: bool):
         """Update OT progress bar appearance for light/dark themes."""
-        chunk = getattr(self, '_ot_progress_chunk', '#FF9800')
-        if light_mode:
-            bg = '#8D86C9'
-        else:
-            bg = '#2b2b2b'
+        chunk = getattr(self, '_ot_progress_chunk', '#F0883E')
+        bg = '#EAEEF2' if light_mode else '#21262D'
+        text_color = '#1F2328' if light_mode else '#E6EDF3'
 
         try:
             self.ot_progress_bar.setStyleSheet(f"""
                 QProgressBar {{
-                    border: 1px solid #3c3c3c;
-                    border-radius: 8px;
-                    text-align: center;
-                    height: 24px;
                     background-color: {bg};
-                    color: #ffffff;
+                    border: none;
+                    border-radius: 6px;
+                    text-align: center;
+                    min-height: 24px;
+                    color: {text_color};
+                    font-weight: 700;
+                    font-size: 11px;
                 }}
                 QProgressBar::chunk {{
                     background-color: {chunk};
@@ -1350,6 +1302,12 @@ class OvertimeTab(QWidget):
         )
 
     def save_ot_case(self):
+        # Auto-set end time to now if the user never changed it from the default 00:00
+        if self.end_time.time() == QTime(0, 0):
+            self.end_time.blockSignals(True)
+            self.end_time.setTime(QTime.currentTime())
+            self.end_time.blockSignals(False)
+
         region = self.region.currentText()
         tipo = self.tipo.currentText()
         case_id = self.case_id.text()
@@ -1428,7 +1386,7 @@ class OvertimeTab(QWidget):
         conn.close()
 
         self.result_label.setText(msg)
-        self.result_label.setStyleSheet("color: #FF9800; font-size: 13px; font-weight: bold; text-align: center;")
+        self.result_label.setStyleSheet("color: #F0883E; font-size: 13px; font-weight: 700; text-align: center;")
         self.load_daily_ot_production()
         self.load_ot_cases()
         self.case_id.clear()
@@ -1451,47 +1409,14 @@ class OvertimeTab(QWidget):
                 pass
 
     def edit_selected_ot_case(self):
-        """Load selected OT case into form for editing"""
+        """Emit ot_edit_requested so the Register tab opens the case for editing."""
         selected_row = self.ot_table.currentRow()
         if selected_row < 0 or selected_row >= len(self.ot_case_ids):
             self.result_label.setText("Select a case to edit")
             return
-        
+
         db_id = self.ot_case_ids[selected_row]
-        
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT case_id, region, tipo_caso, doctor, hora_inicio, hora_fin, count_production, comments
-            FROM ot_cases WHERE id = ?
-        """, (db_id,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            self.editing_ot_id = db_id
-            self.case_id.setText(row[0])
-            
-            # Set region and type
-            region_idx = self.region.findText(row[1])
-            if region_idx >= 0:
-                self.region.setCurrentIndex(region_idx)
-            self.update_case_types()
-            type_idx = self.tipo.findText(row[2])
-            if type_idx >= 0:
-                self.tipo.setCurrentIndex(type_idx)
-            
-            self.doctor.setText(row[3] if row[3] else "")
-            self.start_time.setTime(QTime.fromString(row[4], "HH:mm"))
-            self.end_time.setTime(QTime.fromString(row[5], "HH:mm"))
-            
-            # Set toggle and comments
-            count_prod = row[6] if row[6] is not None else 1
-            self.count_toggle.setChecked(bool(count_prod))
-            self.comments_input.setText(row[7] if row[7] else "")
-            
-            self.result_label.setText("Editing - Click Save to update")
-            self.result_label.setStyleSheet("color: #FFC107; font-size: 13px; font-weight: bold; text-align: center;")
+        self.ot_edit_requested.emit(db_id)
 
     def load_case_for_edit(self, db_id):
         """Load an OT case by database id into the OT form for editing (public API)."""
