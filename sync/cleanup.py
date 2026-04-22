@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timedelta
 
 from sync.app_config import load_config
+from sync.app_logger import log_event
 
 # Files older than this are deleted
 RETENTION_DAYS = 180  # ~6 months
@@ -48,8 +49,8 @@ def _should_run(export_folder: str) -> bool:
                 last_run = datetime.fromtimestamp(mtime).date()
                 if last_run >= datetime.now().date():
                     return False
-            except Exception:
-                pass
+            except Exception as exc:
+                log_event("cleanup", f"_should_run marker check ({m}): {exc}", level="WARN")
     return True
 
 
@@ -60,15 +61,15 @@ def _mark_done(export_folder: str):
     try:
         with open(marker, "w") as f:
             f.write(datetime.now().isoformat())
-    except Exception:
-        pass
+    except Exception as exc:
+        log_event("cleanup", f"_mark_done write ({marker}): {exc}", level="WARN")
     # Remove old root-level marker if it exists
     old_marker = os.path.join(export_folder, _CLEANUP_MARKER)
     try:
         if os.path.exists(old_marker):
             os.remove(old_marker)
-    except Exception:
-        pass
+    except Exception as exc:
+        log_event("cleanup", f"_mark_done remove old marker: {exc}", level="WARN")
 
 
 def _cleanup_daily_productions(productions_dir: str, cutoff: datetime) -> int:
@@ -126,15 +127,15 @@ def _cleanup_daily_productions(productions_dir: str, cutoff: datetime) -> int:
             try:
                 if os.path.isdir(week_path) and not os.listdir(week_path):
                     os.rmdir(week_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_event("cleanup", f"rmdir week ({week_path}): {exc}", level="WARN")
 
         # Remove empty month folder
         try:
             if os.path.isdir(month_path) and not os.listdir(month_path):
                 os.rmdir(month_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("cleanup", f"rmdir month ({month_path}): {exc}", level="WARN")
 
     return deleted
 

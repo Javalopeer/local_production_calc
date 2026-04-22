@@ -1,6 +1,8 @@
 import sqlite3
 import os
 import sys
+import time
+from sync.app_logger import log_event
 
 def get_base_path():
     """Get the base path for data files - works for both dev and PyInstaller exe"""
@@ -39,7 +41,7 @@ def get_data_path():
 DB_PATH = os.path.join(get_data_path(), "cases.db")
 
 # Current schema version - increment when making DB changes
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 def _get_legacy_db_candidates() -> list:
@@ -49,7 +51,8 @@ def _get_legacy_db_candidates() -> list:
       1. %LOCALAPPDATA%\\ProductionCalcApp\\data\\cases.db   (self-installer era)
       2. %USERPROFILE%\\ProductionCalcApp\\cases.db          (config-folder era)
       3. %APPDATA%\\ProductionCalcApp\\cases.db              (AppData fallback)
-      4. <exe folder>\\data\\cases.db                        (very first versions, run from desktop)
+      4. <exe folder>\\data\\cases.db                        (very first versions)
+      5. <exe folder>\\cases.db                              (manual copy in app root)
     """
     candidates = []
     local_app   = os.environ.get("LOCALAPPDATA", "")
@@ -62,6 +65,7 @@ def _get_legacy_db_candidates() -> list:
     if app_data:
         candidates.append(os.path.join(app_data,    "ProductionCalcApp", "cases.db"))
     candidates.append(    os.path.join(get_base_path(), "data", "cases.db"))
+    candidates.append(    os.path.join(get_base_path(), "cases.db"))
 
     # Remove duplicates while preserving order, and skip DB_PATH itself
     seen = set()
@@ -89,63 +93,86 @@ def _db_has_data(path: str) -> bool:
             except sqlite3.OperationalError:
                 pass  # table doesn't exist yet — not an error
         conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        log_event("db", f"_db_has_data({path}): {exc}", level="WARN")
     return False
+
+
+def _get_table_columns(cursor, table: str) -> set:
+    """Return the set of column names that exist in *table* on this connection."""
+    cursor.execute(f"PRAGMA table_info({table})")
+    return {row[1] for row in cursor.fetchall()}
 
 
 def _merge_from(legacy: str) -> dict:
     """Insert rows from *legacy* that don't already exist in DB_PATH.
-    Returns counts dict {cases, ot_cases, downtimes}."""
+
+    Only columns present in BOTH the source and destination table are copied;
+    extra columns in the old DB are silently ignored, and missing columns in
+    the old DB fall back to the destination's DEFAULT values.
+
+    Returns counts dict {cases, ot_cases, downtimes}.
+    """
     counts = {"cases": 0, "ot_cases": 0, "downtimes": 0}
     src = sqlite3.connect(legacy)
     dst = sqlite3.connect(DB_PATH)
-    src.row_factory = sqlite3.Row
-    src_cur = src.cursor()
-    dst_cur = dst.cursor()
-
-    for table in ("cases", "ot_cases"):
-        try:
-            src_cur.execute(f"SELECT * FROM {table}")
-        except sqlite3.OperationalError:
-            continue
-        for row in src_cur.fetchall():
-            r = dict(row)
-            dst_cur.execute(
-                f"SELECT 1 FROM {table} WHERE case_id=? AND fecha=? AND hora_inicio=?",
-                (r.get("case_id"), r.get("fecha"), r.get("hora_inicio"))
-            )
-            if dst_cur.fetchone():
-                continue
-            cols = [k for k in r if k != "id"]
-            dst_cur.execute(
-                f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?'*len(cols))})",
-                [r[c] for c in cols]
-            )
-            counts[table] += 1
-
     try:
-        src_cur.execute("SELECT * FROM downtimes")
-        for row in src_cur.fetchall():
-            r = dict(row)
-            dst_cur.execute(
-                "SELECT 1 FROM downtimes WHERE fecha=? AND hora_inicio=?",
-                (r.get("fecha"), r.get("hora_inicio"))
-            )
-            if dst_cur.fetchone():
-                continue
-            cols = [k for k in r if k != "id"]
-            dst_cur.execute(
-                f"INSERT INTO downtimes ({', '.join(cols)}) VALUES ({', '.join('?'*len(cols))})",
-                [r[c] for c in cols]
-            )
-            counts["downtimes"] += 1
-    except sqlite3.OperationalError:
-        pass
+        src.row_factory = sqlite3.Row
+        src_cur = src.cursor()
+        dst_cur = dst.cursor()
 
-    dst.commit()
-    src.close()
-    dst.close()
+        for table in ("cases", "ot_cases"):
+            try:
+                src_cur.execute(f"SELECT * FROM {table}")
+            except sqlite3.OperationalError:
+                continue  # table absent in old DB
+            dst_cols = _get_table_columns(dst_cur, table)
+            for row in src_cur.fetchall():
+                r = dict(row)
+                dst_cur.execute(
+                    f"SELECT 1 FROM {table} WHERE case_id=? AND fecha=? AND hora_inicio=?",
+                    (r.get("case_id"), r.get("fecha"), r.get("hora_inicio")),
+                )
+                if dst_cur.fetchone():
+                    continue
+                # Only keep columns that exist in the destination (skip unknown extras)
+                cols = [k for k in r if k != "id" and k in dst_cols]
+                dst_cur.execute(
+                    f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?'*len(cols))})",
+                    [r[c] for c in cols],
+                )
+                counts[table] += 1
+
+        try:
+            src_cur.execute("SELECT * FROM downtimes")
+            dst_cols = _get_table_columns(dst_cur, "downtimes")
+            for row in src_cur.fetchall():
+                r = dict(row)
+                dst_cur.execute(
+                    "SELECT 1 FROM downtimes WHERE fecha=? AND hora_inicio=?",
+                    (r.get("fecha"), r.get("hora_inicio")),
+                )
+                if dst_cur.fetchone():
+                    continue
+                cols = [k for k in r if k != "id" and k in dst_cols]
+                dst_cur.execute(
+                    f"INSERT INTO downtimes ({', '.join(cols)}) VALUES ({', '.join('?'*len(cols))})",
+                    [r[c] for c in cols],
+                )
+                counts["downtimes"] += 1
+        except sqlite3.OperationalError:
+            pass  # downtimes table absent in legacy DB — skip
+
+        dst.commit()
+    finally:
+        try:
+            src.close()
+        except Exception:
+            pass
+        try:
+            dst.close()
+        except Exception:
+            pass
     return counts
 
 
@@ -212,6 +239,303 @@ def migrate_legacy_db() -> str:
     return header + "\n\n".join(messages) + footer
 
 
+def _windows_drive_roots() -> list:
+    """Return existing Windows drive roots like C:\\, D:\\, ..."""
+    roots = []
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+        root = f"{letter}:\\"
+        if os.path.exists(root):
+            roots.append(root)
+    return roots
+
+
+def _discover_cases_db_candidates(max_seconds: int = 30) -> list:
+    """Best-effort background discovery of cases.db files across common roots.
+
+    The search is time-bounded and skips heavy/system folders to avoid UI impact.
+    """
+    started = time.time()
+    user = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+    roots = [
+        os.path.join(user, "OneDrive"),
+        os.path.join(user, "Desktop"),
+        os.path.join(user, "Documents"),
+        os.path.join(user, "Downloads"),
+        os.path.join(user, "Escritorio"),
+        os.environ.get("LOCALAPPDATA", ""),
+        os.environ.get("APPDATA", ""),
+    ]
+    roots.extend(_windows_drive_roots())
+
+    # Deduplicate and keep existing roots only
+    seen_roots = set()
+    scan_roots = []
+    for r in roots:
+        if not r:
+            continue
+        ar = os.path.abspath(r)
+        key = os.path.normcase(ar)
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        if os.path.isdir(ar):
+            scan_roots.append(ar)
+
+    skip_dirs = {
+        "$Recycle.Bin",
+        "System Volume Information",
+        "Windows",
+        "Program Files",
+        "Program Files (x86)",
+        "ProgramData",
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".venv",
+        "venv",
+    }
+
+    found = []
+    seen_paths = set()
+    db_norm = os.path.normcase(os.path.abspath(DB_PATH))
+
+    for root in scan_roots:
+        if time.time() - started > max_seconds:
+            break
+        for cur, dirs, files in os.walk(root, topdown=True, onerror=lambda _e: None):
+            if time.time() - started > max_seconds:
+                break
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith("$")]
+            for name in files:
+                if name.lower() != "cases.db":
+                    continue
+                p = os.path.join(cur, name)
+                ap = os.path.abspath(p)
+                nk = os.path.normcase(ap)
+                if nk == db_norm or nk in seen_paths:
+                    continue
+                seen_paths.add(nk)
+                found.append(ap)
+
+    # Prefer app-looking paths first
+    found.sort(key=lambda p: ("productioncalcapp" not in p.lower(), len(p)))
+    return found
+
+
+def discover_and_merge_background_dbs(max_seconds: int = 30) -> str:
+    """Discover external cases.db files and merge data into DB_PATH.
+
+    Safe to run repeatedly; duplicate rows are skipped by _merge_from checks.
+    Returns a short summary string.
+    """
+    import shutil
+
+    discovered = _discover_cases_db_candidates(max_seconds=max_seconds)
+    candidates = [p for p in discovered if os.path.exists(p) and _db_has_data(p)]
+    if not candidates:
+        return ""
+
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    merged_sources = 0
+    total_cases = 0
+    total_ot = 0
+    total_dt = 0
+
+    for legacy in candidates:
+        if not os.path.exists(DB_PATH) or not _db_has_data(DB_PATH):
+            try:
+                shutil.copy2(legacy, DB_PATH)
+                merged_sources += 1
+            except Exception as exc:
+                log_event("db", f"discover copy failed from {legacy}: {exc}", level="WARN")
+            continue
+
+        try:
+            counts = _merge_from(legacy)
+            added = sum(counts.values())
+            if added > 0:
+                merged_sources += 1
+                total_cases += counts.get("cases", 0)
+                total_ot += counts.get("ot_cases", 0)
+                total_dt += counts.get("downtimes", 0)
+        except Exception as exc:
+            log_event("db", f"discover merge failed from {legacy}: {exc}", level="WARN")
+
+    if merged_sources == 0:
+        return ""
+    return (
+        f"Auto-merge: {merged_sources} source(s), "
+        f"+{total_cases} cases, +{total_ot} OT, +{total_dt} downtimes."
+    )
+
+
+def _table_exists(cursor, table_name: str) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    return cursor.fetchone() is not None
+
+
+def _column_exists(cursor, table_name: str, column_name: str) -> bool:
+    if not _table_exists(cursor, table_name):
+        return False
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    return any(row[1] == column_name for row in cursor.fetchall())
+
+
+def _ensure_column(cursor, table_name: str, column_name: str, ddl: str) -> None:
+    """Add a column if it's missing. Safe and idempotent."""
+    if not _column_exists(cursor, table_name, column_name):
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {ddl}")
+
+
+def _ensure_base_tables(cursor) -> None:
+    """Create core tables if absent, with latest schema for new installs."""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS db_metadata (
+            key TEXT PRIMARY KEY,
+            version INTEGER
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT,
+            region TEXT,
+            tipo_caso TEXT,
+            doctor TEXT,
+            fecha TEXT,
+            hora_inicio TEXT,
+            hora_fin TEXT,
+            tiempo_real REAL,
+            std_time REAL,
+            efficiency REAL,
+            estado TEXT,
+            case_value REAL,
+            count_production INTEGER DEFAULT 1,
+            comments TEXT DEFAULT ''
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS downtimes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            hora_inicio TEXT,
+            hora_fin TEXT,
+            razon TEXT,
+            duracion REAL,
+            status TEXT DEFAULT 'approved',
+            detalle TEXT DEFAULT '',
+            responded_by TEXT DEFAULT '',
+            responded_at TEXT DEFAULT '',
+            downtime_case_id TEXT DEFAULT ''
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ot_cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT,
+            region TEXT,
+            tipo_caso TEXT,
+            doctor TEXT,
+            fecha TEXT,
+            hora_inicio TEXT,
+            hora_fin TEXT,
+            tiempo_real REAL,
+            std_time REAL,
+            efficiency REAL,
+            estado TEXT,
+            case_value REAL,
+            count_production INTEGER DEFAULT 1,
+            comments TEXT DEFAULT ''
+        )
+        """
+    )
+
+
+def _migration_v1(cursor) -> None:
+    """Bring schema to v1 shape (legacy-compatible baseline)."""
+    _ensure_base_tables(cursor)
+
+    _ensure_column(cursor, "cases", "count_production", "count_production INTEGER DEFAULT 1")
+    _ensure_column(cursor, "cases", "comments", "comments TEXT DEFAULT ''")
+
+    _ensure_column(cursor, "downtimes", "status", "status TEXT DEFAULT 'approved'")
+    _ensure_column(cursor, "downtimes", "detalle", "detalle TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "responded_by", "responded_by TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "responded_at", "responded_at TEXT DEFAULT ''")
+
+    _ensure_column(cursor, "ot_cases", "count_production", "count_production INTEGER DEFAULT 1")
+    _ensure_column(cursor, "ot_cases", "comments", "comments TEXT DEFAULT ''")
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_fecha ON cases(fecha)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_region_tipo ON cases(region, tipo_caso)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ot_cases_fecha ON ot_cases(fecha)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_downtimes_fecha ON downtimes(fecha)")
+
+
+def _migration_v2(cursor) -> None:
+    """Schema hardening upgrade (non-destructive)."""
+    # Defensive: some v1 DBs in the wild never got these columns added before
+    # their version marker was bumped. Re-ensure before indexing.
+    _ensure_column(cursor, "downtimes", "status", "status TEXT DEFAULT 'approved'")
+    _ensure_column(cursor, "downtimes", "detalle", "detalle TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "responded_by", "responded_by TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "responded_at", "responded_at TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "downtime_case_id", "downtime_case_id TEXT DEFAULT ''")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_downtimes_status_fecha ON downtimes(status, fecha)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_downtimes_case_id ON downtimes(downtime_case_id)")
+
+
+def _get_db_version_from_cursor(cursor) -> int:
+    if not _table_exists(cursor, "db_metadata"):
+        return 0
+    cursor.execute("SELECT version FROM db_metadata WHERE key='schema_version'")
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def _set_db_version_from_cursor(cursor, version: int) -> None:
+    cursor.execute(
+        "INSERT OR REPLACE INTO db_metadata (key, version) VALUES ('schema_version', ?)",
+        (version,),
+    )
+
+
+def _run_schema_migrations(conn) -> int:
+    """
+    Run schema migrations inside a single transaction.
+
+    Returns final schema version.
+    """
+    cursor = conn.cursor()
+    _ensure_base_tables(cursor)
+    version = _get_db_version_from_cursor(cursor)
+
+    if version < 1:
+        _migration_v1(cursor)
+        _set_db_version_from_cursor(cursor, 1)
+        version = 1
+
+    if version < 2:
+        _migration_v2(cursor)
+        _set_db_version_from_cursor(cursor, 2)
+        version = 2
+
+    return version
+
+
 def get_connection():
     return sqlite3.connect(DB_PATH)
 
@@ -239,115 +563,14 @@ def set_db_version(version):
 
 def init_db():
     conn = get_connection()
-    cursor = conn.cursor()
-    
-    # Create metadata table for version tracking
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS db_metadata (
-            key TEXT PRIMARY KEY,
-            version INTEGER
-        )
-    """)
+    try:
+        conn.execute("BEGIN")
+        final_version = _run_schema_migrations(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            case_id TEXT,
-            region TEXT,
-            tipo_caso TEXT,
-            doctor TEXT,
-            fecha TEXT,
-            hora_inicio TEXT,
-            hora_fin TEXT,
-            tiempo_real REAL,
-            std_time REAL,
-            efficiency REAL,
-            estado TEXT,
-            case_value REAL,
-            count_production INTEGER DEFAULT 1,
-            comments TEXT DEFAULT ''
-        )
-    """)
-    
-    # Add columns if they don't exist (for existing databases)
-    try:
-        cursor.execute("ALTER TABLE cases ADD COLUMN count_production INTEGER DEFAULT 1")
-    except Exception as _e:
-        print(f"[db] migration skipped (already applied): {_e}")
-    try:
-        cursor.execute("ALTER TABLE cases ADD COLUMN comments TEXT DEFAULT ''")
-    except Exception as _e:
-        print(f"[db] migration skipped (already applied): {_e}")
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS downtimes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha TEXT,
-            hora_inicio TEXT,
-            hora_fin TEXT,
-            razon TEXT,
-            duracion REAL,
-            status TEXT DEFAULT 'approved'
-        )
-    """)
-    # Migrate existing DBs that lack the status or detalle columns
-    try:
-        cursor.execute("ALTER TABLE downtimes ADD COLUMN status TEXT DEFAULT 'approved'")
-    except Exception as _e:
-        print(f"[db] migration skipped (already applied): {_e}")
-    try:
-        cursor.execute("ALTER TABLE downtimes ADD COLUMN detalle TEXT DEFAULT ''")
-    except Exception as _e:
-        print(f"[db] migration skipped (already applied): {_e}")
-    try:
-        cursor.execute("ALTER TABLE downtimes ADD COLUMN responded_by TEXT DEFAULT ''")
-    except Exception as _e:
-        print(f"[db] migration skipped (already applied): {_e}")
-    try:
-        cursor.execute("ALTER TABLE downtimes ADD COLUMN responded_at TEXT DEFAULT ''")
-    except Exception as _e:
-        print(f"[db] migration skipped (already applied): {_e}")
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ot_cases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            case_id TEXT,
-            region TEXT,
-            tipo_caso TEXT,
-            doctor TEXT,
-            fecha TEXT,
-            hora_inicio TEXT,
-            hora_fin TEXT,
-            tiempo_real REAL,
-            std_time REAL,
-            efficiency REAL,
-            estado TEXT,
-            case_value REAL,
-            count_production INTEGER DEFAULT 1,
-            comments TEXT DEFAULT ''
-        )
-    """)
-    
-    # Add columns if they don't exist (for existing databases)
-    try:
-        cursor.execute("ALTER TABLE ot_cases ADD COLUMN count_production INTEGER DEFAULT 1")
-    except Exception as _e:
-        print(f"[db] migration skipped (already applied): {_e}")
-    try:
-        cursor.execute("ALTER TABLE ot_cases ADD COLUMN comments TEXT DEFAULT ''")
-    except Exception as _e:
-        print(f"[db] migration skipped (already applied): {_e}")
-    
-    # Indexes for the most common query patterns (fecha, region+tipo)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_fecha ON cases(fecha)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_region_tipo ON cases(region, tipo_caso)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ot_cases_fecha ON ot_cases(fecha)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_downtimes_fecha ON downtimes(fecha)")
-
-    # Update schema version
-    cursor.execute("INSERT OR REPLACE INTO db_metadata (key, version) VALUES ('schema_version', ?)", (CURRENT_SCHEMA_VERSION,))
-
-    conn.commit()
-    conn.close()
-    
-    print(f"Database initialized - Schema version: {CURRENT_SCHEMA_VERSION}")
+    print(f"Database initialized - Schema version: {final_version}")

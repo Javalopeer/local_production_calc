@@ -6,13 +6,15 @@ from PySide6.QtWidgets import (
     QPushButton, QMessageBox, QLabel, QLineEdit, QDialog,
     QVBoxLayout, QHBoxLayout, QDialogButtonBox
 )
-from PySide6.QtCore import Qt, Signal, QThread, QTimer
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QEvent
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut, QIcon
-from db.database import init_db, migrate_legacy_db
+from db.database import init_db, migrate_legacy_db, discover_and_merge_background_dbs
+from sync.app_logger import log_event
 from tabs.utils import load_units_eq_data
 from tabs.breaks_dialog import (
     init_breaks_table, BreaksDialog, get_breaks,
     get_breaks_answered_today, set_break_attendance, _to_minutes,
+    get_active_schedule,
 )
 import qtawesome as qta
 
@@ -33,6 +35,8 @@ except Exception as _perf_err:
     print(f"[main] Performance module unavailable: {_perf_err}")
     _PERF_OK = False
 
+_JUSTIFICATION_ENABLED = True
+
 
 def _resource_path(relative: str) -> str:
     """Return absolute path to a bundled resource (works both frozen and in dev)."""
@@ -41,20 +45,34 @@ def _resource_path(relative: str) -> str:
 
 # ============== VERSION ==============
 APP_VERSION = "1.1.4"
-DB_SCHEMA_VERSION = 1
+DB_SCHEMA_VERSION = 2
 # =====================================
 
 from tabs.tab_register import RegisterTab
 from tabs.tab_production import ProductionTab
 from tabs.tab_history import HistoryTab
-from tabs.tab_overtime import OvertimeTab
 from tabs.tab_standards import StandardsTab
 from tabs.tab_dashboard import DashboardTab
+from tabs.tab_theme_config import ThemeConfigTab, DEFAULT_LIGHT_COLORS
 from tabs.tab_sync import SyncTab
 from PySide6.QtWidgets import QDialog, QVBoxLayout as _QVBox
+from sync.app_config import load_config
+
+_TRANSIENT_SYNC_KEYWORDS = (
+    "permissionerror", "locked", "cannot access", "winerror",
+    "timed out", "timeout", "network", "connection reset",
+    "remote end closed", "odmpath",
+)
+
+
+def _is_transient_sync_error(msg: str) -> bool:
+    m = msg.lower()
+    return any(k in m for k in _TRANSIENT_SYNC_KEYWORDS)
+
 
 class _SilentSyncThread(QThread):
-    """Run export_to_sharepoint silently in background after each case save."""
+    """Run export_to_sharepoint silently in background after each case save.
+    Retries up to 3 times on transient network/file errors."""
     done = Signal(bool, str)
 
     def run(self):
@@ -65,75 +83,136 @@ class _SilentSyncThread(QThread):
                 return
             cfg = load_config()
             if not cfg.get("name_confirmed") or not cfg.get("export_folder"):
-                return  # silent skip if not configured yet
+                return
             import os as _os
             if not _os.path.isdir(cfg["export_folder"]):
                 return
-            ok, msg = export_to_sharepoint()
-            self.done.emit(ok, msg)
+            import time as _t
+            last_ok, last_msg = False, ""
+            for attempt in range(3):
+                try:
+                    ok, msg = export_to_sharepoint()
+                    if ok or not _is_transient_sync_error(msg) or attempt == 2:
+                        self.done.emit(ok, msg)
+                        return
+                    last_ok, last_msg = ok, msg
+                except Exception as e:
+                    last_ok, last_msg = False, str(e)
+                    if not _is_transient_sync_error(last_msg) or attempt == 2:
+                        self.done.emit(last_ok, last_msg)
+                        return
+                _t.sleep(5 * (attempt + 1))
+            self.done.emit(last_ok, last_msg)
         except Exception as e:
             self.done.emit(False, str(e))
+class CenteredTabWidget(QTabWidget):
+    """QTabWidget whose tab bar is always horizontally centered.
+
+    Qt re-layouts the tab bar to x=0 on resize, tab switch, and other events.
+    We install an event filter on the tab bar that catches every Move/Resize
+    event Qt fires on it and immediately corrects the position.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        bar = self.tabBar()
+        bar.setExpanding(False)
+        bar.setUsesScrollButtons(True)
+        bar.installEventFilter(self)
+        self._centering = False  # re-entry guard
+
+    # ── event filter on the tab bar ───────────────────────────────────────────
+
+    def eventFilter(self, obj, event):
+        if obj is self.tabBar() and event.type() in (
+            QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show,
+        ):
+            self._schedule_center()
+        return False  # never consume the event
+
+    def _schedule_center(self):
+        if not self._centering:
+            self._centering = True
+            QTimer.singleShot(0, self._do_center)
+
+    def _do_center(self):
+        self._centering = False
+        self._center_tabs()
+
+    # ── centering logic ───────────────────────────────────────────────────────
+
+    def _center_tabs(self):
+        bar = self.tabBar()
+        n = bar.count()
+        if n == 0:
+            return
+        total = sum(bar.tabRect(i).width() for i in range(n))
+        geo = bar.geometry()
+        x = max(0, (self.width() - total) // 2)
+        if geo.x() == x:
+            return  # already centered — avoid triggering another Move event
+        bar.setGeometry(x, geo.y(), self.width() - x, geo.height())
+
+    # ── also re-center on widget resize / show / tab add ─────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._center_tabs()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_center()
+
+    def tabInserted(self, index):
+        super().tabInserted(index)
+        self._schedule_center()
+
+
 class MainWindow(QMainWindow):
     themeChanged = Signal(bool)
     def __init__(self, dark_style="", light_style=""):
         super().__init__()
         self._dark_style = dark_style
         self._light_style = light_style
+        self._light_style_base = light_style
         self._font_size = 12
         self._is_light = False
         self.setWindowTitle(f"Production Performance Calculator v{APP_VERSION}")
         _ico = _resource_path(os.path.join("data", "app_icon.ico"))
         self.setWindowIcon(QIcon(_ico))
 
-        self.tabs = QTabWidget()
-        
+        self.tabs = CenteredTabWidget()
+
         self.register_tab = RegisterTab()
         self.production_tab = ProductionTab()
         self.history_tab = HistoryTab()
-        self.overtime_tab = OvertimeTab()
         self.standards_tab = StandardsTab()
         self.dashboard_tab = DashboardTab()
-        self._sync_dialog = None  # created lazily
-        self._sync_thread = None   # background sync thread
-        self._sync_status_label = None  # statusbar indicator
+        self._sync_dialog = None         # created lazily
+        self._sync_tab_widget = None     # SyncTab instance inside dialog
+        self._sync_thread = None         # background sync thread
+        self._sync_status_label = None   # statusbar indicator
+        self._eod_sync_triggered_date = None  # prevent double EOD trigger
+
+        self._load_and_apply_light_palette()
+
+        def _safe_connect(signal, target, slot_name: str, name: str):
+            try:
+                slot = getattr(target, slot_name, None)
+                if not callable(slot):
+                    log_event("main", f"theme signal skipped (missing slot) for {name}", level="WARN")
+                    return
+                signal.connect(slot)
+            except Exception as exc:
+                log_event("main", f"theme signal connect failed for {name}: {exc}", level="WARN")
 
         # Connect a themeChanged signal to tabs so they update their local styles
-        try:
-            self.themeChanged.connect(self.register_tab.update_theme_labels)
-        except Exception:
-            pass
-        try:
-            self.themeChanged.connect(self.overtime_tab.update_theme_labels)
-        except Exception:
-            pass
-        try:
-            self.themeChanged.connect(self.history_tab.update_theme_labels)
-        except Exception:
-            pass
-        try:
-            self.themeChanged.connect(self.production_tab.update_theme_labels)
-        except Exception:
-            pass
-        try:
-            self.themeChanged.connect(self.register_tab.update_progress_bar_style)
-        except Exception:
-            pass
-        try:
-            self.themeChanged.connect(self.overtime_tab.update_progress_bar_style)
-        except Exception:
-            pass
-        try:
-            self.themeChanged.connect(self.production_tab.update_theme_labels)
-        except Exception:
-            pass
-        try:
-            self.themeChanged.connect(self.standards_tab.update_theme_labels)
-        except Exception:
-            pass
-        try:
-            self.themeChanged.connect(self.dashboard_tab.update_theme_labels)
-        except Exception:
-            pass
+        _safe_connect(self.themeChanged, self.register_tab,   "update_theme_labels",        "register.update_theme_labels")
+        _safe_connect(self.themeChanged, self.register_tab,   "update_progress_bar_style",  "register.update_progress_bar_style")
+        _safe_connect(self.themeChanged, self.history_tab,    "update_theme_labels",        "history.update_theme_labels")
+        _safe_connect(self.themeChanged, self.production_tab, "update_theme_labels",        "production.update_theme_labels")
+        _safe_connect(self.themeChanged, self.standards_tab,  "update_theme_labels",        "standards.update_theme_labels")
+        _safe_connect(self.themeChanged, self.dashboard_tab,  "update_theme_labels",        "dashboard.update_theme_labels")
 
         
         # Connect register tab to production tab for dynamic updates
@@ -144,60 +223,46 @@ class MainWindow(QMainWindow):
         # Connect production tab edit/delete to register tab
         self.production_tab.case_updated.connect(self.on_production_case_updated)
 
-        # Connect OT tab to refresh when cases change (fired from either OT tab or Register in OT mode)
-        self.overtime_tab.ot_saved.connect(self.overtime_tab.load_ot_cases)
-        self.overtime_tab.ot_saved.connect(self.overtime_tab.load_daily_ot_production)
-        self.overtime_tab.ot_saved.connect(self.production_tab.load_data)
-        self.overtime_tab.ot_saved.connect(self.history_tab.load_all_cases)
-        self.overtime_tab.ot_saved.connect(self.dashboard_tab.refresh)
-
         # Register tab in OT mode also refreshes OT views
-        self.register_tab.ot_saved.connect(self.overtime_tab.load_ot_cases)
-        self.register_tab.ot_saved.connect(self.overtime_tab.load_daily_ot_production)
+        self.register_tab.ot_saved.connect(self.register_tab._load_ot_day_cases)
         self.register_tab.ot_saved.connect(self.production_tab.load_data)
         self.register_tab.ot_saved.connect(self.history_tab.load_all_cases)
         self.register_tab.ot_saved.connect(self.dashboard_tab.refresh)
         self.register_tab.ot_saved.connect(self._silent_sync)
-
-        # OT tab Edit button → open in Register tab (OT mode)
-        self.overtime_tab.ot_edit_requested.connect(self._on_ot_edit_requested)
         
-        # Connect standards tab to refresh Register and OT when standards change
+        # Connect standards tab to refresh app data when standards change
         self.standards_tab.standards_updated.connect(self.on_standards_updated)
 
         # Auto-sync silently after every case save
         self.register_tab.case_saved.connect(self._silent_sync)
-        self.overtime_tab.ot_saved.connect(self._silent_sync)
 
-        # Performance check after each case save (disabled during testing)
         self._justification_blocking = False
-        # if _PERF_OK:
-        #     self.register_tab.case_saved.connect(self._check_performance_after_save)
-        #     self._start_eod_timer()
+        if _PERF_OK and _JUSTIFICATION_ENABLED:
+            self.register_tab.case_saved.connect(self._check_performance_after_save)
+            self._start_eod_timer()
 
         # Break reminder timer — asks "going on break?" ~10 min before each break
         self._break_reminder_shown = set()  # (fecha, break_id) already asked today
         self._start_break_reminder_timer()
+
+        # EOD auto-sync at 4:55 PM on weekdays
+        self._start_eod_sync_timer()
         
         self._tab_icons = [
-            'fa5s.edit', 'fa5s.clock', 'fa5s.chart-bar',
+            'fa5s.edit', 'fa5s.chart-bar',
             'fa5s.history', 'fa5s.cog', 'fa5s.tachometer-alt',
         ]
         _ic = "#b8ceb1"
         self.tabs.addTab(self.register_tab,  qta.icon(self._tab_icons[0], color=_ic), "Register")
-        self.tabs.addTab(self.overtime_tab,   qta.icon(self._tab_icons[1], color=_ic), "OT")
-        self.tabs.addTab(self.production_tab, qta.icon(self._tab_icons[2], color=_ic), "Production")
-        self.tabs.addTab(self.history_tab,    qta.icon(self._tab_icons[3], color=_ic), "History")
-        self.tabs.addTab(self.standards_tab,  qta.icon(self._tab_icons[4], color=_ic), "Standards")
-        self.tabs.addTab(self.dashboard_tab,  qta.icon(self._tab_icons[5], color=_ic), "Dashboard")
-        self.tabs.tabBar().setExpanding(False)
-        self.tabs.tabBar().setUsesScrollButtons(True)
-
+        self.tabs.addTab(self.production_tab, qta.icon(self._tab_icons[1], color=_ic), "Production")
+        self.tabs.addTab(self.history_tab,    qta.icon(self._tab_icons[2], color=_ic), "History")
+        self.tabs.addTab(self.standards_tab,  qta.icon(self._tab_icons[3], color=_ic), "Standards")
+        self.tabs.addTab(self.dashboard_tab,  qta.icon(self._tab_icons[4], color=_ic), "Dashboard")
         self.setCentralWidget(self.tabs)
 
         # ── Global clipboard-import shortcut (Ctrl+Shift+I) ─────────────────────
         # After copying a case page (Ctrl+A, Ctrl+C in the browser), press
-        # Ctrl+Shift+I here to auto-fill the Register or OT tab.
+        # Ctrl+Shift+I here to auto-fill Register.
         import_shortcut = QShortcut(QKeySequence("Ctrl+Shift+I"), self)
         import_shortcut.activated.connect(self._trigger_import_shortcut)
 
@@ -206,9 +271,23 @@ class MainWindow(QMainWindow):
         screen_height = screen.availableGeometry().height()
         
         # Set size constraints - resizable with min/max
-        self.setMinimumSize(640, 550)  # Minimum width 640px
-        self.setMaximumSize(900, screen_height)  # Maximum height = monitor height
-        self.resize(900, 700)  # Default size 900x700
+        self.setMinimumSize(660, 550)
+        screen_width = screen.availableGeometry().width()
+        max_width = min(1128, screen_width)
+        self.setMaximumSize(max_width, screen_height)
+        self.resize(min(1100, max_width), 700)
+        # Load old DB button in status bar
+        try:
+            btn_load_db = QPushButton()
+            btn_load_db.setIcon(qta.icon('fa5s.database', color='#A371F7'))
+            btn_load_db.setToolTip("Import cases from an old cases.db file")
+            btn_load_db.setFixedSize(28, 20)
+            btn_load_db.setStyleSheet("padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; background: transparent;")
+            btn_load_db.clicked.connect(self.register_tab._on_load_db)
+            self.statusBar().addPermanentWidget(btn_load_db)
+        except Exception as exc:
+            log_event("main", f"statusbar load_db button setup failed: {exc}", level="WARN")
+
         # Breaks configuration button in status bar
         try:
             btn_breaks = QPushButton()
@@ -218,8 +297,20 @@ class MainWindow(QMainWindow):
             btn_breaks.setStyleSheet("padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; background: transparent; color: #FFA726;")
             btn_breaks.clicked.connect(self._open_breaks_dialog)
             self.statusBar().addPermanentWidget(btn_breaks)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("main", f"statusbar breaks button setup failed: {exc}", level="WARN")
+
+        # Light-theme palette button in status bar
+        try:
+            btn_palette = QPushButton()
+            btn_palette.setIcon(qta.icon('fa5s.palette', color='#58A6FF'))
+            btn_palette.setToolTip("Customize Light Mode Colors")
+            btn_palette.setFixedSize(28, 20)
+            btn_palette.setStyleSheet("padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; background: transparent;")
+            btn_palette.clicked.connect(self._open_theme_config_dialog)
+            self.statusBar().addPermanentWidget(btn_palette)
+        except Exception as exc:
+            log_event("main", f"statusbar palette button setup failed: {exc}", level="WARN")
 
         # Theme toggle checkbox in status bar
         try:
@@ -232,31 +323,11 @@ class MainWindow(QMainWindow):
                 _icon_color = "#242038" if checked else "#b8ceb1"
                 for i, name in enumerate(self._tab_icons):
                     self.tabs.setTabIcon(i, qta.icon(name, color=_icon_color))
-                # Emit a single signal so tabs update themselves (clean approach)
+                # Signal notifies all connected tabs
                 try:
                     self.themeChanged.emit(checked)
-                except Exception:
-                    # Fallback: call known updaters directly if emit fails
-                    try:
-                        self.register_tab.update_progress_bar_style(checked)
-                    except Exception:
-                        pass
-                    try:
-                        self.overtime_tab.update_progress_bar_style(checked)
-                    except Exception:
-                        pass
-                    try:
-                        self.production_tab.update_theme_labels(checked)
-                    except Exception:
-                        pass
-                    try:
-                        self.register_tab.update_theme_labels(checked)
-                    except Exception:
-                        pass
-                    try:
-                        self.overtime_tab.update_theme_labels(checked)
-                    except Exception:
-                        pass
+                except Exception as exc:
+                    log_event("main", f"themeChanged emit failed: {exc}", level="WARN")
 
             light_chk.toggled.connect(on_theme_toggled)
             self.statusBar().addPermanentWidget(light_chk)
@@ -288,8 +359,8 @@ class MainWindow(QMainWindow):
             self._sync_status_label = QLabel("")
             self._sync_status_label.setStyleSheet("font-size: 10px; color: #8B949E; padding-right: 4px;")
             self.statusBar().addWidget(self._sync_status_label)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("main", f"statusbar theme/sync controls setup failed: {exc}", level="WARN")
 
     def _open_breaks_dialog(self):
         """Open the breaks configuration dialog."""
@@ -301,29 +372,26 @@ class MainWindow(QMainWindow):
         if self._sync_dialog is None:
             self._sync_dialog = QDialog(self)
             self._sync_dialog.setWindowTitle("SharePoint Sync")
-            self._sync_dialog.setMinimumSize(520, 480)
+            self._sync_dialog.setMinimumSize(760, 800)
+            self._sync_dialog.resize(820, 820)
             layout = QVBoxLayout(self._sync_dialog)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.addWidget(SyncTab())
+            self._sync_tab_widget = SyncTab()
+            layout.addWidget(self._sync_tab_widget)
         self._sync_dialog.show()
         self._sync_dialog.raise_()
         self._sync_dialog.activateWindow()
-    # ── Daily performance logic ────────────────────────────────────────────
 
-    @staticmethod
-    def _is_weekday() -> bool:
-        """Return True if today is Monday–Friday."""
-        return date.today().weekday() < 5  # 0=Mon, 4=Fri
-
-    def _start_eod_timer(self):
-        """Schedule a check at 3:05 PM for below-target justification."""
-        if not _PERF_OK:
-            return
-        self._eod_timer = QTimer(self)
-        self._eod_timer.setInterval(30_000)  # check every 30 seconds
-        self._eod_timer.timeout.connect(self._check_eod_trigger)
-        self._eod_timer.start()
-
+    def _open_theme_config_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Light Theme Colors")
+        dlg.setMinimumWidth(560)
+        dlg.setMinimumHeight(520)
+        layout = QVBoxLayout(dlg)
+        cfg = ThemeConfigTab()
+        cfg.theme_colors_changed.connect(self._on_light_palette_changed)
+        layout.addWidget(cfg)
+        dlg.exec()
     # ── Break reminder ─────────────────────────────────────────────────────
     def _start_break_reminder_timer(self):
         """Check every 60s if a break starts in ~10 minutes and ask the user."""
@@ -339,7 +407,7 @@ class MainWindow(QMainWindow):
         today_str = date.today().isoformat()
         now_mins = now.hour * 60 + now.minute
 
-        breaks = get_breaks()
+        breaks = get_breaks(get_active_schedule())
         answered = get_breaks_answered_today(today_str)
 
         for bid, name, b_start_str, _b_end_str in breaks:
@@ -371,40 +439,75 @@ class MainWindow(QMainWindow):
         took = result == QMessageBox.StandardButton.Yes
         set_break_attendance(fecha, break_id, took)
 
+    # ── EOD auto-sync ─────────────────────────────────────────────────────────
+
+    def _start_eod_sync_timer(self):
+        self._eod_sync_timer = QTimer(self)
+        self._eod_sync_timer.setInterval(60_000)
+        self._eod_sync_timer.timeout.connect(self._check_eod_sync)
+        self._eod_sync_timer.start()
+
+    def _check_eod_sync(self):
+        today = date.today()
+        if today.weekday() >= 5:
+            return
+        now = datetime.now()
+        if not (now.hour == 16 and now.minute == 55):
+            return
+        if self._eod_sync_triggered_date == today:
+            return
+        self._eod_sync_triggered_date = today
+        log_event("main", "EOD auto-sync triggered at 16:55")
+        self._silent_sync()
+        if self._sync_status_label:
+            self._sync_status_label.setText("↻ EOD sync…")
+            self._sync_status_label.setStyleSheet("font-size: 10px; color: #aaa; padding-right: 4px;")
+
+    # ── Daily performance / justification logic ───────────────────────────────
+
+    @staticmethod
+    def _is_weekday() -> bool:
+        return date.today().weekday() < 5  # 0=Mon, 4=Fri
+
+    def _start_eod_timer(self):
+        if not _PERF_OK or not _JUSTIFICATION_ENABLED:
+            return
+        self._eod_timer = QTimer(self)
+        self._eod_timer.setInterval(30_000)
+        self._eod_timer.timeout.connect(self._check_eod_trigger)
+        self._eod_timer.start()
+
     def _check_eod_trigger(self):
-        """Fires every 30s — at or after 3:15 PM, show justification popup once."""
-        if not self._is_weekday():
-            return  # skip weekends
+        if not _JUSTIFICATION_ENABLED or not self._is_weekday():
+            return
         now = datetime.now()
         if now.hour < 15 or (now.hour == 15 and now.minute < 15):
-            return  # not yet 3:15 PM
+            return
         today_str = date.today().isoformat()
-        # Check if justification was already submitted today
         from db.database import get_connection
         conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT justification_submitted FROM daily_performance WHERE fecha = ?",
-            (today_str,),
-        )
-        row = cur.fetchone()
-        conn.close()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT justification_submitted FROM daily_performance WHERE fecha = ?",
+                (today_str,),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
         if row and row[0]:
-            return  # already submitted, don't show again
+            return
         metrics = get_daily_metrics(today_str)
         record_daily_snapshot(today_str, metrics)
         if metrics["met_target"]:
-            return  # on target, nothing to do
-        # Skip if zero production (person wasn't producing today)
+            return
         if metrics["production_pct"] == 0 and metrics["equivalent_units"] == 0:
             return
-        # Stop the timer so the popup only appears once per day
         self._eod_timer.stop()
         self._show_justification_popup(today_str, metrics)
 
     def _check_performance_after_save(self):
-        """After saving a case, check if the target was just reached."""
-        if not _PERF_OK or not self._is_weekday():
+        if not _PERF_OK or not _JUSTIFICATION_ENABLED or not self._is_weekday():
             return
         today_str = date.today().isoformat()
         metrics = get_daily_metrics(today_str)
@@ -415,8 +518,7 @@ class MainWindow(QMainWindow):
             dlg.exec()
 
     def _check_pending_justification_on_start(self):
-        """On app startup, block usage if there's an old unjustified day."""
-        if not _PERF_OK or not self._is_weekday():
+        if not _PERF_OK or not _JUSTIFICATION_ENABLED or not self._is_weekday():
             return
         pending_date = has_pending_justification()
         if not pending_date:
@@ -425,14 +527,14 @@ class MainWindow(QMainWindow):
         self._show_justification_popup(pending_date, metrics)
 
     def _show_justification_popup(self, fecha: str, metrics: dict):
-        """Show the justification popup and handle submission."""
+        if not _JUSTIFICATION_ENABLED:
+            return
         self._justification_blocking = True
         dlg = JustificationPopup(metrics, fecha, parent=self)
         dlg.exec()
         text = dlg.justification_text
         if text:
             save_justification(fecha, text)
-            # Export to shared Excel
             try:
                 from sync.app_config import load_config
                 cfg = load_config()
@@ -443,32 +545,57 @@ class MainWindow(QMainWindow):
         self._justification_blocking = False
 
     def closeEvent(self, event):
-        """Prevent closing while a justification is required."""
-        if self._justification_blocking:
-            event.ignore()
-            return
-        # Check if there's an end-of-day justification pending right now
-        if _PERF_OK and self._is_weekday():
-            now = datetime.now()
-            if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
-                today_str = date.today().isoformat()
-                metrics = get_daily_metrics(today_str)
-                record_daily_snapshot(today_str, metrics)
-                if not metrics["met_target"] and (metrics["production_pct"] > 0 or metrics["equivalent_units"] > 0):
-                    # Check if already submitted today
-                    from db.database import get_connection
-                    conn = get_connection()
-                    cur = conn.cursor()
-                    cur.execute(
-                        "SELECT justification_submitted FROM daily_performance WHERE fecha = ?",
-                        (today_str,),
-                    )
-                    row = cur.fetchone()
-                    conn.close()
-                    if not row or not row[0]:
-                        event.ignore()
-                        self._show_justification_popup(today_str, metrics)
-                        return
+        if _JUSTIFICATION_ENABLED:
+            if self._justification_blocking:
+                event.ignore()
+                return
+            if _PERF_OK and self._is_weekday():
+                now = datetime.now()
+                if now.hour > 15 or (now.hour == 15 and now.minute >= 15):
+                    today_str = date.today().isoformat()
+                    metrics = get_daily_metrics(today_str)
+                    record_daily_snapshot(today_str, metrics)
+                    if not metrics["met_target"] and (metrics["production_pct"] > 0 or metrics["equivalent_units"] > 0):
+                        from db.database import get_connection
+                        conn = get_connection()
+                        try:
+                            cur = conn.cursor()
+                            cur.execute(
+                                "SELECT justification_submitted FROM daily_performance WHERE fecha = ?",
+                                (today_str,),
+                            )
+                            row = cur.fetchone()
+                        finally:
+                            conn.close()
+                        if not row or not row[0]:
+                            event.ignore()
+                            self._show_justification_popup(today_str, metrics)
+                            return
+        # Warn if a manual sync operation (Sync dialog) is in progress.
+        sync_dialog_busy = (
+            self._sync_tab_widget is not None
+            and self._sync_tab_widget.is_busy()
+        )
+        if sync_dialog_busy:
+            reply = QMessageBox.question(
+                self, "Sync In Progress",
+                "A SharePoint sync operation is currently running.\n\n"
+                "Closing now may leave the upload incomplete.\n\n"
+                "Close anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
+        # Stop child timers explicitly so they can't fire after Qt cleanup.
+        try:
+            dm = getattr(self.register_tab, "downtime_manager", None)
+            if dm is not None and hasattr(dm, "_stop_poll_timer"):
+                dm._stop_poll_timer()
+        except Exception:
+            pass
         event.accept()
 
     def _check_first_use(self):
@@ -506,8 +633,8 @@ class MainWindow(QMainWindow):
                 cfg["designer_name"] = name
                 cfg["name_confirmed"] = True
                 save_config(cfg)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("main", f"first-use setup failed: {exc}", level="WARN")
 
     def _silent_sync(self):
         """Run export_to_sharepoint in background after a case is saved. No UI popup on success."""
@@ -543,25 +670,17 @@ class MainWindow(QMainWindow):
             try:
                 self._sync_status_label.mousePressEvent = lambda e, m=msg: QMessageBox.warning(
                     self, "Sync Error", m)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_event("main", f"sync error click handler setup failed: {exc}", level="WARN")
     def on_standards_updated(self):
-        """Reload standards and units_eq in Register, OT and Production tabs when standards are modified"""
+        """Reload standards and units_eq in Register and Production tabs when standards are modified."""
         load_units_eq_data(force=True)  # Invalidate shared cache so all tabs pick up new values
         self.register_tab.load_standards()
         self.register_tab.load_units_eq()
         self.register_tab.update_case_types()
-        self.overtime_tab.load_standards()
-        self.overtime_tab.load_units_eq()
-        self.overtime_tab.update_case_types()
         self.production_tab.load_units_eq()
         self.dashboard_tab._load_metadata()
         self.dashboard_tab.refresh()
-
-    def _on_ot_edit_requested(self, db_id: int):
-        """OT tab Edit button — open case in Register tab (OT mode)."""
-        self.register_tab.load_ot_case_for_edit(db_id)
-        self.tabs.setCurrentIndex(0)  # Switch to Register tab
 
     def on_production_case_updated(self):
         """Handle case update/delete from production tab"""
@@ -583,8 +702,7 @@ class MainWindow(QMainWindow):
             # Delete action — refresh whichever tab the deletion came from
             mode = getattr(self.production_tab, 'current_mode', 'reg')
             if mode == 'ot':
-                self.overtime_tab.load_ot_cases()
-                self.overtime_tab.load_daily_ot_production()
+                self.register_tab._load_ot_day_cases()
                 self.history_tab.load_all_cases()
                 self.dashboard_tab.refresh()
             else:
@@ -600,6 +718,41 @@ class MainWindow(QMainWindow):
         base = self._light_style if self._is_light else self._dark_style
         styled = base.replace("font-size: 12px", f"font-size: {self._font_size}px")
         QApplication.instance().setStyleSheet(styled)
+
+    def _apply_light_palette(self, colors: dict):
+        mapping = {
+            "#F6F8FA": colors.get("base_bg", DEFAULT_LIGHT_COLORS["base_bg"]),
+            "#FFFFFF": colors.get("surface_bg", DEFAULT_LIGHT_COLORS["surface_bg"]),
+            "#1F2328": colors.get("text_primary", DEFAULT_LIGHT_COLORS["text_primary"]),
+            "#656D76": colors.get("text_muted", DEFAULT_LIGHT_COLORS["text_muted"]),
+            "#D0D7DE": colors.get("border", DEFAULT_LIGHT_COLORS["border"]),
+            "#0969DA": colors.get("accent", DEFAULT_LIGHT_COLORS["accent"]),
+            "#DDF4FF": colors.get("selection_bg", DEFAULT_LIGHT_COLORS["selection_bg"]),
+            "#EAEEF2": colors.get("button_bg", DEFAULT_LIGHT_COLORS["button_bg"]),
+        }
+        styled = self._light_style_base
+        for old, new in mapping.items():
+            if isinstance(new, str) and new.strip():
+                styled = styled.replace(old, new.strip().upper())
+        self._light_style = styled
+
+    def _load_and_apply_light_palette(self):
+        cfg = load_config()
+        colors = cfg.get("light_theme_colors", {}) if isinstance(cfg, dict) else {}
+        if not isinstance(colors, dict):
+            colors = {}
+        merged = dict(DEFAULT_LIGHT_COLORS)
+        merged.update({k: v for k, v in colors.items() if k in DEFAULT_LIGHT_COLORS})
+        self._apply_light_palette(merged)
+
+    def _on_light_palette_changed(self, colors: dict):
+        self._apply_light_palette(colors or {})
+        if self._is_light:
+            self._apply_style()
+            try:
+                self.themeChanged.emit(True)
+            except Exception as exc:
+                log_event("main", f"themeChanged emit after palette update failed: {exc}", level="WARN")
 
     def _change_font_size(self, delta: int):
         """Increment or decrement font size within [9, 18] range and re-apply style."""
@@ -618,7 +771,7 @@ class MainWindow(QMainWindow):
             current_widget._on_import_case()
         else:
             self.statusBar().showMessage(
-                "Clipboard import is only available in the Register and OT tabs.", 4000
+                "Clipboard import is only available in the Register tab.", 4000
             )
 
 if __name__ == "__main__":
@@ -659,6 +812,7 @@ if __name__ == "__main__":
         padding: 5px 8px;
         color: #E6EDF3;
     }
+    QComboBox { padding-right: 26px; }
     QLineEdit:focus, QComboBox:focus, QDateEdit:focus,
     QTimeEdit:focus, QTextEdit:focus,
     QSpinBox:focus, QDoubleSpinBox:focus {
@@ -670,7 +824,12 @@ if __name__ == "__main__":
     QDateEdit::up-button, QDateEdit::down-button { width: 0; border: none; }
     QTimeEdit, QDateEdit { padding-right: 6px; }
 
-    QComboBox::drop-down { border: none; width: 20px; }
+    QComboBox::drop-down, QDateEdit::drop-down {
+        border: none;
+        width: 20px;
+        border-left: 1px solid #30363D;
+    }
+    QComboBox::down-arrow, QDateEdit::down-arrow {}
     QComboBox QAbstractItemView {
         background-color: #161B22;
         color: #E6EDF3;
@@ -833,6 +992,7 @@ if __name__ == "__main__":
         padding: 5px 8px;
         color: #1F2328;
     }
+    QComboBox { padding-right: 26px; }
     QLineEdit:focus, QComboBox:focus, QDateEdit:focus,
     QTimeEdit:focus, QTextEdit:focus,
     QSpinBox:focus, QDoubleSpinBox:focus {
@@ -843,7 +1003,12 @@ if __name__ == "__main__":
     QDateEdit::up-button, QDateEdit::down-button { width: 0; border: none; }
     QTimeEdit, QDateEdit { padding-right: 6px; }
 
-    QComboBox::drop-down { border: none; width: 20px; }
+    QComboBox::drop-down, QDateEdit::drop-down {
+        border: none;
+        width: 20px;
+        border-left: 1px solid #D0D7DE;
+    }
+    QComboBox::down-arrow, QDateEdit::down-arrow {}
     QComboBox QAbstractItemView {
         background-color: #FFFFFF;
         color: #1F2328;
@@ -994,11 +1159,44 @@ if __name__ == "__main__":
                 run_cleanup()
             except Exception as exc:
                 print(f"[main] Cleanup error: {exc}")
+                log_event("main", f"cleanup error: {exc}", level="WARN")
         threading.Thread(target=_bg, daemon=True).start()
     QTimer.singleShot(3000, _run_cleanup)
 
+    # Startup safety backup (lightweight, background, non-blocking)
+    def _run_startup_backup():
+        import threading
+        def _bg():
+            try:
+                from sync.safety_backup import run_startup_backups
+                stats = run_startup_backups()
+                log_event("main", f"startup backups done: {stats}")
+            except Exception as exc:
+                print(f"[main] Startup backup error: {exc}")
+                log_event("main", f"startup backup error: {exc}", level="WARN")
+        threading.Thread(target=_bg, daemon=True).start()
+    QTimer.singleShot(1500, _run_startup_backup)
+
+    # Background DB discovery/merge across common PC paths (time-bounded)
+    def _run_background_db_discovery():
+        import threading
+        def _bg():
+            try:
+                cfg = load_config()
+                if not bool(cfg.get("auto_discover_dbs", True)):
+                    return
+                summary = discover_and_merge_background_dbs(max_seconds=35)
+                if summary:
+                    log_event("main", summary)
+                    print(f"[main] {summary}")
+            except Exception as exc:
+                print(f"[main] Background DB discovery error: {exc}")
+                log_event("main", f"background DB discovery error: {exc}", level="WARN")
+        threading.Thread(target=_bg, daemon=True).start()
+    QTimer.singleShot(2500, _run_background_db_discovery)
+
     # Check for pending justifications from previous days
-    if _PERF_OK:
+    if _PERF_OK and _JUSTIFICATION_ENABLED:
         QTimer.singleShot(1000, window._check_pending_justification_on_start)
 
     # Show a brief notice if the app was just self-installed

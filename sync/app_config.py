@@ -5,8 +5,40 @@ Config file: C:\\Users\\<user>\\ProductionCalcApp\\config.json
 import json
 import os
 import getpass
+from sync import get_local_app_dir
+from sync.app_logger import log_event
 
-_CONFIG_PATH = os.path.join(os.path.expanduser("~"), "ProductionCalcApp", "config.json")
+_CONFIG_PATH = get_local_app_dir("config.json")
+ENV_TEAMS_WEBHOOK = "PCALC_TEAMS_WEBHOOK"
+ENV_EXCEL_SHEET_PASSWORD = "PCALC_EXCEL_SHEET_PASSWORD"
+
+
+def _load_dotenv():
+    """Load variables from <app_dir>/.env into os.environ (never overwrites existing vars).
+
+    Format: KEY=value  (lines starting with # ignored, quotes stripped).
+    Users can place sensitive values like PCALC_TEAMS_WEBHOOK here instead of
+    storing them in config.json.
+    """
+    env_path = get_local_app_dir(".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception as exc:
+        log_event("config", f"_load_dotenv: {exc}", level="WARN")
+
+
+_load_dotenv()
 
 def get_windows_display_name() -> str:
     """Return the Windows full display name (e.g. 'Gerardo Gomez').
@@ -20,8 +52,8 @@ def get_windows_display_name() -> str:
         buf = ctypes.create_unicode_buffer(size.contents.value)
         if GetUserNameEx(NameDisplay, buf, size) and buf.value:
             return buf.value
-    except Exception:
-        pass
+    except Exception as exc:
+        log_event("config", f"get_windows_display_name fallback to getuser: {exc}", level="INFO")
     return getpass.getuser()
 def _default_export_folder() -> str:
     """Try to auto-detect the Teams/SharePoint-synced Reports folder.
@@ -60,6 +92,9 @@ _DEFAULTS = {
     "export_folder": "",
     "auto_sync_hours": 0,
     "teams_webhook": "",
+    "excel_sheet_password": "",
+    "light_theme_colors": {},
+    "auto_discover_dbs": True,
 }
 
 
@@ -73,14 +108,16 @@ def _load_shared_config(export_folder: str) -> dict:
         try:
             with open(shared_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("config", f"_load_shared_config({shared_path}): {exc}", level="WARN")
     return {}
 
 
 def save_shared_config(cfg: dict) -> bool:
     """Save team-wide settings to _shared_config.json in the shared folder."""
     export_folder = cfg.get("export_folder", "").strip()
+    if not export_folder:
+        export_folder = load_config().get("export_folder", "").strip()
     if not export_folder or not os.path.isdir(export_folder):
         return False
     shared_path = os.path.join(export_folder, "_shared_config.json")
@@ -88,7 +125,8 @@ def save_shared_config(cfg: dict) -> bool:
         with open(shared_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
         return True
-    except Exception:
+    except Exception as exc:
+        log_event("config", f"save_shared_config({shared_path}): {exc}", level="WARN")
         return False
 
 
@@ -100,8 +138,8 @@ def load_config() -> dict:
             with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
                 stored = json.load(f)
             cfg.update(stored)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("config", f"load_config({_CONFIG_PATH}): {exc}", level="WARN")
     # Auto-detect export folder if not set yet
     if not cfg.get("export_folder"):
         cfg["export_folder"] = _default_export_folder()
@@ -114,6 +152,35 @@ def load_config() -> dict:
         if shared.get("teams_webhook"):
             cfg["teams_webhook"] = shared["teams_webhook"]
     return cfg
+
+
+def _resolve_config_value(key: str, env_var: str, cfg: dict | None = None) -> str:
+    """
+    Single fallback chain for any config value:
+      1) environment variable *env_var*
+      2) local config[key]
+      3) shared _shared_config.json[key]
+      4) "" (never a hardcoded default)
+    """
+    env_val = os.environ.get(env_var, "").strip()
+    if env_val:
+        return env_val
+    base = cfg or load_config()
+    local_val = str(base.get(key, "")).strip()
+    if local_val:
+        return local_val
+    shared = _load_shared_config(str(base.get("export_folder", "")).strip())
+    return str(shared.get(key, "")).strip()
+
+
+def get_teams_webhook_url(cfg: dict | None = None) -> str:
+    """Resolve Teams webhook URL (env → local config → shared config → "")."""
+    return _resolve_config_value("teams_webhook", ENV_TEAMS_WEBHOOK, cfg)
+
+
+def get_excel_sheet_password(cfg: dict | None = None) -> str:
+    """Resolve Excel sheet password (env → local config → shared config → "")."""
+    return _resolve_config_value("excel_sheet_password", ENV_EXCEL_SHEET_PASSWORD, cfg)
 
 
 def save_config(cfg: dict) -> None:

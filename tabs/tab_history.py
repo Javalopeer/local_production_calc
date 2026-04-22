@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem,
-    QDateEdit, QComboBox, QFileDialog, QMessageBox, QCheckBox
+    QDateEdit, QComboBox, QFileDialog, QMessageBox, QCheckBox, QApplication
 )
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor, QFont, QBrush
@@ -9,6 +9,10 @@ from db.database import get_connection
 from .utils import (
     load_units_eq_data, calculate_equivalent_units,
     calculate_downtime_equivalent_units, DAILY_BASE_MINUTES,
+)
+from .theme_table_utils import (
+    apply_table_theme, CLR_FG_LIGHT, CLR_FG_DARK,
+    get_light_theme_colors, light_row_bg, light_header_bg, light_header_fg, mix_hex,
 )
 import csv
 
@@ -128,35 +132,59 @@ class HistoryTab(QWidget):
         self.specific_in_row1 = True
         
         # Second filter row - Region, Type, Doctor
-        filter_row2 = QHBoxLayout()
-        filter_row2.addStretch()
-        
-        filter_row2.addWidget(QLabel("Region:"))
+        self.filter_row2 = QHBoxLayout()
+        self.filter_row2.setSpacing(8)
+        self.filter_row2.addStretch()
+
+        self.lbl_region = QLabel("Region:")
+        self.filter_row2.addWidget(self.lbl_region)
         self.filter_region = QComboBox()
         self.filter_region.setFixedWidth(100)
         self.filter_region.currentTextChanged.connect(self.on_filter_changed)
-        filter_row2.addWidget(self.filter_region)
-        
-        filter_row2.addWidget(QLabel("Type:"))
+        self.filter_row2.addWidget(self.filter_region)
+
+        self.lbl_type = QLabel("Type:")
+        self.filter_row2.addWidget(self.lbl_type)
         self.filter_type = QComboBox()
         self.filter_type.setFixedWidth(100)
         self.filter_type.currentTextChanged.connect(self.on_filter_changed)
-        filter_row2.addWidget(self.filter_type)
-        
-        filter_row2.addWidget(QLabel("Doctor:"))
+        self.filter_row2.addWidget(self.filter_type)
+
+        self.lbl_count = QLabel("Count:")
+        self.filter_row2.addWidget(self.lbl_count)
+        self.count_filter = QComboBox()
+        self.count_filter.addItems(["All", "Counted", "NC"])
+        self.count_filter.setFixedWidth(90)
+        self.count_filter.currentTextChanged.connect(self.on_filter_changed)
+        self.filter_row2.addWidget(self.count_filter)
+
+        self.lbl_doctor = QLabel("Doctor:")
+        self.filter_row2.addWidget(self.lbl_doctor)
         self.filter_doctor = QLineEdit()
         self.filter_doctor.setPlaceholderText("Search...")
         self.filter_doctor.setFixedWidth(100)
         self.filter_doctor.textChanged.connect(self.on_filter_changed)
-        filter_row2.addWidget(self.filter_doctor)
+        self.filter_row2.addWidget(self.filter_doctor)
 
-        export_btn = QPushButton("Export CSV")
-        export_btn.setFixedWidth(100)
-        export_btn.clicked.connect(self.export_csv)
-        filter_row2.addWidget(export_btn)
+        self.export_btn = QPushButton("Export CSV")
+        self.export_btn.setFixedWidth(100)
+        self.export_btn.clicked.connect(self.export_csv)
+        self.filter_row2.addWidget(self.export_btn)
 
-        filter_row2.addStretch()
-        main_layout.addLayout(filter_row2)
+        self.filter_row2.addStretch()
+        main_layout.addLayout(self.filter_row2)
+
+        # Row used when width is tight: move Count/Doctor/Export here.
+        self.filter_row3 = QHBoxLayout()
+        self.filter_row3.setSpacing(8)
+        self.filter_row3.addStretch()
+        self.filter_row3.addStretch()
+
+        self.filter_row3_widget = QWidget()
+        self.filter_row3_widget.setLayout(self.filter_row3)
+        self.filter_row3_widget.setVisible(False)
+        main_layout.addWidget(self.filter_row3_widget)
+        self.row2_compact = False
 
         # Table
         self.table = QTableWidget()
@@ -281,6 +309,44 @@ class HistoryTab(QWidget):
                 self.specific_row_widget.setVisible(False)
                 self.specific_in_row1 = True
 
+        self._update_filter_row2_layout(width)
+
+    def _update_filter_row2_layout(self, width: int):
+        """Prevent filter overlap by splitting Count/Doctor/Export into a third row."""
+        compact_threshold = 980
+
+        tail_widgets = [
+            self.lbl_count,
+            self.count_filter,
+            self.lbl_doctor,
+            self.filter_doctor,
+            self.export_btn,
+        ]
+
+        if width < compact_threshold and not self.row2_compact:
+            for w in tail_widgets:
+                w.setParent(None)
+
+            insert_at = 1  # between two stretches
+            for w in tail_widgets:
+                self.filter_row3.insertWidget(insert_at, w)
+                insert_at += 1
+
+            self.filter_row3_widget.setVisible(True)
+            self.row2_compact = True
+
+        elif width >= compact_threshold and self.row2_compact:
+            for w in tail_widgets:
+                w.setParent(None)
+
+            insert_at = self.filter_row2.count() - 1  # before final stretch
+            for w in tail_widgets:
+                self.filter_row2.insertWidget(insert_at, w)
+                insert_at += 1
+
+            self.filter_row3_widget.setVisible(False)
+            self.row2_compact = False
+
     def load_regions_and_types(self):
         """Load unique regions and types for filters"""
         conn = get_connection()
@@ -309,11 +375,15 @@ class HistoryTab(QWidget):
         cursor.execute("""
             SELECT * FROM (
                 SELECT id, case_id, doctor, region, tipo_caso,
-                       fecha, tiempo_real, std_time, efficiency, estado, case_value, 'reg' as source, comments
+                       fecha, tiempo_real, std_time, efficiency, estado, case_value,
+                       COALESCE(count_production, 1) as count_production,
+                       'reg' as source, comments
                 FROM cases
                 UNION ALL
                 SELECT id, case_id, doctor, region, tipo_caso,
-                       fecha, tiempo_real, std_time, efficiency, estado, case_value, 'ot' as source, comments
+                       fecha, tiempo_real, std_time, efficiency, estado, case_value,
+                       COALESCE(count_production, 1) as count_production,
+                       'ot' as source, comments
                 FROM ot_cases
             )
             ORDER BY id DESC
@@ -362,6 +432,7 @@ class HistoryTab(QWidget):
         
         region_filter = self.filter_region.currentText()
         type_filter = self.filter_type.currentText()
+        count_filter = self.count_filter.currentText()
         doctor_filter = self.filter_doctor.text().lower()
 
         filtered = []
@@ -376,6 +447,11 @@ class HistoryTab(QWidget):
             if region_filter != "All" and case[3] != region_filter:
                 continue
             if type_filter != "All" and case[4] != type_filter:
+                continue
+            counts_for_production = case[11] if (len(case) > 11 and case[11] is not None) else 1
+            if count_filter == "Counted" and counts_for_production == 0:
+                continue
+            if count_filter == "NC" and counts_for_production != 0:
                 continue
             if doctor_filter and doctor_filter not in (case[2] or "").lower():
                 continue
@@ -458,28 +534,51 @@ class HistoryTab(QWidget):
             )
             self.stats_label2.setVisible(False)
 
+        is_light = False
+        try:
+            is_light = "#F6F8FA" in (QApplication.instance().styleSheet() or "")
+        except Exception:
+            is_light = False
+        light_colors = get_light_theme_colors()
+
         for idx, case in enumerate(page_items):
             # Zebra striping
-            # Default zebra colors for regular cases
-            bg_color = QColor(43, 43, 43) if (idx % 2 == 0) else QColor(55, 55, 55)
-            # If this is an OT case (source at index 11), use a distinct blue tint
+            bg_color = light_row_bg(idx, light_colors) if is_light else (QColor(43, 43, 43) if (idx % 2 == 0) else QColor(55, 55, 55))
+            # If this is an OT case (source at index 12), use a distinct blue tint
             try:
-                source = case[11]
+                source = case[12]
             except Exception:
                 source = 'reg'
             if source == 'ot':
-                bg_color = QColor(28, 48, 90) if (idx % 2 == 0) else QColor(38, 58, 110)
+                if is_light:
+                    bg_color = QColor(mix_hex(light_colors.get("selection_bg", "#DDF4FF"), "#FFFFFF", 0.18 if (idx % 2 == 0) else 0.30))
+                else:
+                    # Stronger blue tint so OT rows are clearly visible in dark mode.
+                    bg_color = QColor(34, 62, 122) if (idx % 2 == 0) else QColor(44, 72, 138)
             bg_brush = QBrush(bg_color)
             
             # Case ID - Bold, with comment indicator
-            comment = (case[12] if len(case) > 12 else "") or ""
+            counts_for_production = case[11] if (len(case) > 11 and case[11] is not None) else 1
+            comment = (case[13] if len(case) > 13 else "") or ""
             case_id_text = f"{case[1]} \U0001F4AC" if comment.strip() else str(case[1])
+            if source == 'ot':
+                case_id_text = f"{case_id_text} (OT)"
+            if counts_for_production == 0:
+                case_id_text = f"{case_id_text} (NC)"
             case_id_item = QTableWidgetItem(case_id_text)
             case_id_item.setBackground(bg_brush)
             case_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             bold_font = QFont()
             bold_font.setBold(True)
+            if counts_for_production == 0:
+                bold_font.setItalic(True)
             case_id_item.setFont(bold_font)
+            if counts_for_production == 0:
+                case_id_item.setForeground(QBrush(QColor("#A15C00") if is_light else QColor("#F0883E")))
+            elif source == 'ot':
+                case_id_item.setForeground(QBrush(QColor(mix_hex(light_colors.get("accent", "#0969DA"), "#000000", 0.15)) if is_light else QColor("#7DB3FF")))
+            else:
+                case_id_item.setForeground(QBrush(CLR_FG_DARK if is_light else CLR_FG_LIGHT))
             if comment.strip():
                 case_id_item.setToolTip(comment.strip())
             self.table.setItem(idx, 0, case_id_item)
@@ -489,24 +588,28 @@ class HistoryTab(QWidget):
             doctor_item.setBackground(bg_brush)
             doctor_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             doctor_item.setFont(bold_font)
+            doctor_item.setForeground(QBrush(CLR_FG_DARK if is_light else CLR_FG_LIGHT))
             self.table.setItem(idx, 1, doctor_item)
             
             # Region
             region_item = QTableWidgetItem(str(case[3]))
             region_item.setBackground(bg_brush)
             region_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            region_item.setForeground(QBrush(CLR_FG_DARK if is_light else CLR_FG_LIGHT))
             self.table.setItem(idx, 2, region_item)
             
             # Type
             type_item = QTableWidgetItem(str(case[4]))
             type_item.setBackground(bg_brush)
             type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            type_item.setForeground(QBrush(CLR_FG_DARK if is_light else CLR_FG_LIGHT))
             self.table.setItem(idx, 3, type_item)
             
             # Date
             date_item = QTableWidgetItem(str(case[5]))
             date_item.setBackground(bg_brush)
             date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            date_item.setForeground(QBrush(CLR_FG_DARK if is_light else CLR_FG_LIGHT))
             self.table.setItem(idx, 4, date_item)
             
             # Time - always show actual minutes; color by estado
@@ -517,7 +620,7 @@ class HistoryTab(QWidget):
                 time_item.setBackground(QBrush(QColor(76, 175, 80)))
             else:
                 time_item.setBackground(QBrush(QColor(244, 67, 54)))
-            time_item.setForeground(QBrush(QColor(255, 255, 255)))
+            time_item.setForeground(QBrush(CLR_FG_LIGHT))
             time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(idx, 5, time_item)
             
@@ -525,6 +628,7 @@ class HistoryTab(QWidget):
             std_item = QTableWidgetItem(f"{case[7]:.1f}")
             std_item.setBackground(bg_brush)
             std_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            std_item.setForeground(QBrush(CLR_FG_DARK if is_light else CLR_FG_LIGHT))
             self.table.setItem(idx, 6, std_item)
             
             # Efficiency with color
@@ -532,16 +636,17 @@ class HistoryTab(QWidget):
             efficiency_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if estado == "OK":
                 efficiency_item.setBackground(QBrush(QColor(76, 175, 80)))
-                efficiency_item.setForeground(QBrush(QColor(255, 255, 255)))
+                efficiency_item.setForeground(QBrush(CLR_FG_LIGHT))
             else:
                 efficiency_item.setBackground(QBrush(QColor(244, 67, 54)))
-                efficiency_item.setForeground(QBrush(QColor(255, 255, 255)))
+                efficiency_item.setForeground(QBrush(CLR_FG_LIGHT))
             self.table.setItem(idx, 7, efficiency_item)
             
             # Case Value
             value_item = QTableWidgetItem(f"{case[10]:.2f}%")
             value_item.setBackground(bg_brush)
             value_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            value_item.setForeground(QBrush(CLR_FG_DARK if is_light else CLR_FG_LIGHT))
             self.table.setItem(idx, 8, value_item)
 
     def export_csv(self):
@@ -774,52 +879,27 @@ class HistoryTab(QWidget):
                 QMessageBox.critical(self, "Export Error", f"Error: {str(e)}")
 
     def update_theme_labels(self, is_light: bool):
-        """Adjust table styling so cell text is light and readable.
-
-        User expects light-colored letters (white) in the history table. To keep
-        good contrast we force a dark table background when switching to light
-        theme and set all cell foregrounds to white. In dark theme we restore
-        the saved table style and keep white text as well.
-        """
-        fg_color = QColor(255, 255, 255)
-        # Dark table CSS used when app is in light mode so white text remains readable
-        dark_table_css = (
-            ' QTableWidget { background-color: #2b2b2b; gridline-color: #3c3c3c; } '
-            ' QHeaderView::section { background-color: #3c3c3c; color: white; border: 1px solid #5a5a5a; padding: 4px; } '
+        """Apply theme colors; in light mode use user-selected palette."""
+        colors = get_light_theme_colors()
+        light_table_css = (
+            f' QTableWidget {{ background-color: {colors["surface_bg"]}; gridline-color: {colors["border"]}; border: 1px solid {colors["border"]}; }} '
+            f' QHeaderView::section {{ background-color: {light_header_bg(colors)}; color: {light_header_fg(colors)}; border: 1px solid {colors["border"]}; padding: 4px; }} '
         )
 
-        for table in self.findChildren(QTableWidget):
-            if not hasattr(table, '_saved_style'):
-                table._saved_style = table.styleSheet() or ''
-            try:
-                if is_light:
-                    table.setStyleSheet(table._saved_style + dark_table_css)
-                else:
-                    table.setStyleSheet(table._saved_style)
-            except Exception:
-                pass
-
-            # Set per-item foreground based on background lightness for consistent
-            # white/light letters in the History view while preserving colored
-            # status/efficiency cells.
-            for r in range(table.rowCount()):
-                for c in range(table.columnCount()):
-                    item = table.item(r, c)
-                    if item:
-                        bg = item.background().color() if item.background() else None
-                        if bg is None:
-                            item.setForeground(QBrush(fg_color))
-                        else:
-                            # If background is dark, white text; if background is light, dark text.
-                            fg = QColor(255, 255, 255) if bg.lightness() < 129 else QColor(34, 32, 56)
-                            item.setForeground(QBrush(fg))
+        apply_table_theme(
+            self,
+            is_light,
+            light_append_css=light_table_css,
+            adaptive_fg_by_bg=True,
+            adaptive_default_fg=CLR_FG_DARK if is_light else CLR_FG_LIGHT,
+        )
 
         # Title color: make History title dark in light mode, keep blue in dark
         try:
             for lbl in self.findChildren(QLabel):
                 if lbl.text().strip() == "Case History":
                     if is_light:
-                        lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #242038;")
+                        lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {colors['text_primary']};")
                     else:
                         lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #4aa3ff;")
                     break
@@ -830,13 +910,19 @@ class HistoryTab(QWidget):
         try:
             if hasattr(self, 'stats_label') and self.stats_label:
                 if is_light:
-                    self.stats_label.setStyleSheet("font-size: 12px; color: #242038; font-weight: bold;")
+                    self.stats_label.setStyleSheet(f"font-size: 12px; color: {colors['text_primary']}; font-weight: bold;")
                 else:
                     self.stats_label.setStyleSheet("font-size: 12px; color: #9CC3FF; font-weight: bold;")
             if hasattr(self, 'stats_label2') and self.stats_label2:
                 if is_light:
-                    self.stats_label2.setStyleSheet("font-size: 11px; color: #333; font-weight: bold;")
+                    self.stats_label2.setStyleSheet(f"font-size: 11px; color: {colors['text_muted']}; font-weight: bold;")
                 else:
                     self.stats_label2.setStyleSheet("font-size: 11px; color: #81B4E0; font-weight: bold;")
+        except Exception:
+            pass
+
+        # Repaint rows so OT/NC custom colors remain consistent after theme toggle.
+        try:
+            self.filter_cases()
         except Exception:
             pass

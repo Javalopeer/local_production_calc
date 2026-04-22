@@ -14,7 +14,9 @@ Filename pattern:
   <DesignerName>_Production_<YYYY-MM-DD>.xlsx
 """
 import os
+import random
 import sqlite3
+import time
 from datetime import datetime, date
 
 _OPENPYXL_ERROR = ""
@@ -34,6 +36,7 @@ except Exception as _e:
 
 from db.database import DB_PATH
 from sync.app_config import load_config
+from sync.app_logger import log_event
 from tabs.utils import calculate_downtime_equivalent_units, DAILY_BASE_MINUTES
 
 # ── Colour palette ──────────────────────────────────────────────────────────
@@ -67,8 +70,8 @@ def _cleanup_onedrive_conflicts(productions_dir: str):
                 try:
                     os.remove(fpath)
                     print(f"[sharepoint_sync] Removed OneDrive conflict copy: {f}")
-                except OSError:
-                    pass
+                except OSError as exc:
+                    log_event("sharepoint_sync", f"failed removing conflict copy {f}: {exc}", level="WARN")
         # Also check Dashboards/ subfolder
         dashboards_dir = os.path.join(productions_dir, "Dashboards")
         if os.path.isdir(dashboards_dir):
@@ -77,10 +80,10 @@ def _cleanup_onedrive_conflicts(productions_dir: str):
                     try:
                         os.remove(os.path.join(dashboards_dir, f))
                         print(f"[sharepoint_sync] Removed conflict copy: Dashboards/{f}")
-                    except OSError:
-                        pass
-    except Exception:
-        pass
+                    except OSError as exc:
+                        log_event("sharepoint_sync", f"failed removing dashboard conflict copy {f}: {exc}", level="WARN")
+    except Exception as exc:
+        log_event("sharepoint_sync", f"conflict cleanup failed: {exc}", level="WARN")
 
 
 def _db():
@@ -122,8 +125,8 @@ def _autowidth(ws, extra=4):
                 try:
                     if cell.value:
                         length = max(length, len(str(cell.value)))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event("sharepoint_sync", f"autowidth value read failed col={ci}: {exc}", level="WARN")
         ws.column_dimensions[get_column_letter(ci)].width = max(length, 8) + extra
 
 def _production_color(pct):
@@ -209,6 +212,8 @@ def _get_monthly_data(year: int, month: int):
     return rows
 
 
+_SP_UPLOAD_JITTER = (1.0, 6.0)  # random backoff range (s) between SharePoint write retries
+
 # Fixed case types shown as individual columns in the Dashboard
 FIXED_CASE_TYPES = ["Primary", "Secondary", "CR"]
 
@@ -223,6 +228,7 @@ CASE_TYPE_COLUMNS = [
     "Bite Sync Primary",
     "Bite Sync Secondary",
     "Bite Sync CR",
+    "New Impressions",
 ]
 
 
@@ -240,6 +246,10 @@ def _bucket_case_types(type_counts: dict) -> dict:
         "bite sync2": "Bite Sync Secondary",
         "bitesync3": "Bite Sync CR",
         "bite sync3": "Bite Sync CR",
+        "new impressions": "New Impressions",
+        "newimpressions": "New Impressions",
+        "new_impressions": "New Impressions",
+        "new impression": "New Impressions",
     }
 
     for raw_type, count in (type_counts or {}).items():
@@ -297,8 +307,10 @@ def _get_ue_and_types(target_date: str):
     try:
         _ueq_path = os.path.join(os.path.dirname(__file__),
                                   "..", "data", "units_eq.json")
-        units_eq = _json.load(open(_ueq_path, encoding="utf-8-sig"))
-    except Exception:
+        with open(_ueq_path, encoding="utf-8-sig") as _f:
+            units_eq = _json.load(_f)
+    except Exception as exc:
+        log_event("sharepoint_sync", f"units_eq load failed; using empty map: {exc}", level="WARN")
         units_eq = {}
 
     conn = _db()
@@ -353,7 +365,8 @@ def _get_ue_and_types(target_date: str):
 
 def _build_daily_summary(wb, target_date: str, designer: str,
                          cases, ot_cases, downtimes,
-                         total_cases_pct, total_downtime_min):
+                         total_cases_pct, total_downtime_min,
+                         ue_cases: float = 0.0, ue_total: float = 0.0):
     ws = wb.active
     ws.title = "Daily Summary"
     ws.sheet_view.showGridLines = False
@@ -363,7 +376,7 @@ def _build_daily_summary(wb, target_date: str, designer: str,
     pct_color = _production_color(total_pct)
 
     # ── Title block ─────────────────────────────────────────────────
-    ws.merge_cells("A1:F1")
+    ws.merge_cells("A1:H1")
     t = ws["A1"]
     t.value = "Production Performance Report"
     t.font  = Font(bold=True, size=15, color=_HEADER_FG)
@@ -371,7 +384,7 @@ def _build_daily_summary(wb, target_date: str, designer: str,
     t.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 28
 
-    ws.merge_cells("A2:F2")
+    ws.merge_cells("A2:H2")
     s = ws["A2"]
     s.value = f"Designer: {designer}     Date: {target_date}"
     s.font  = Font(size=11, color="555555")
@@ -383,7 +396,8 @@ def _build_daily_summary(wb, target_date: str, designer: str,
     row = 4
     ws.row_dimensions[row].height = 22
     for col, label in enumerate(["Cases Production", "Downtime", "Total Production",
-                                  "Reg Cases", "OT Cases", "Downtime Events"], 1):
+                                  "Reg Cases", "OT Cases", "Downtime Events",
+                                  "UE (Cases)", "UE (w/ Downtime)"], 1):
         _hdr(ws.cell(row, col), label, bg=_BLUE)
 
     row = 5
@@ -395,12 +409,14 @@ def _build_daily_summary(wb, target_date: str, designer: str,
     _cell(ws.cell(row, 4), len(cases),    align="center", bg="DCEEFB")
     _cell(ws.cell(row, 5), len(ot_cases), align="center", bg="DCEEFB")
     _cell(ws.cell(row, 6), len(downtimes),align="center", bg="DCEEFB")
+    _cell(ws.cell(row, 7), f"{ue_cases:.2f}", bold=True, align="center", bg="DCEEFB")
+    _cell(ws.cell(row, 8), f"{ue_total:.2f}", bold=True, align="center", bg="DCEEFB")
 
     ws["A6"].value = ""
 
     # ── Cases table ─────────────────────────────────────────────────
     row = 7
-    ws.merge_cells(f"A{row}:F{row}")
+    ws.merge_cells(f"A{row}:H{row}")
     t2 = ws.cell(row, 1)
     t2.value = "Regular Cases"
     t2.font  = Font(bold=True, size=11, color=_HEADER_FG)
@@ -425,14 +441,14 @@ def _build_daily_summary(wb, target_date: str, designer: str,
 
     if not cases:
         row += 1
-        ws.merge_cells(f"A{row}:F{row}")
+        ws.merge_cells(f"A{row}:H{row}")
         ws.cell(row, 1).value = "No regular cases for this date."
 
     row += 1; ws.cell(row, 1).value = ""
 
     # ── OT cases table ──────────────────────────────────────────────
     row += 1
-    ws.merge_cells(f"A{row}:F{row}")
+    ws.merge_cells(f"A{row}:H{row}")
     t3 = ws.cell(row, 1)
     t3.value = "Overtime Cases"
     t3.font  = Font(bold=True, size=11, color=_HEADER_FG)
@@ -456,14 +472,14 @@ def _build_daily_summary(wb, target_date: str, designer: str,
 
     if not ot_cases:
         row += 1
-        ws.merge_cells(f"A{row}:F{row}")
+        ws.merge_cells(f"A{row}:H{row}")
         ws.cell(row, 1).value = "No OT cases for this date."
 
     row += 1; ws.cell(row, 1).value = ""
 
     # ── Downtime table ──────────────────────────────────────────────
     row += 1
-    ws.merge_cells(f"A{row}:F{row}")
+    ws.merge_cells(f"A{row}:H{row}")
     t4 = ws.cell(row, 1)
     t4.value = "Downtime"
     t4.font  = Font(bold=True, size=11, color=_HEADER_FG)
@@ -484,12 +500,12 @@ def _build_daily_summary(wb, target_date: str, designer: str,
 
     if not downtimes:
         row += 1
-        ws.merge_cells(f"A{row}:F{row}")
+        ws.merge_cells(f"A{row}:H{row}")
         ws.cell(row, 1).value = "No downtime recorded."
 
     # ── Timestamp footer ────────────────────────────────────────────
     row += 2
-    ws.merge_cells(f"A{row}:F{row}")
+    ws.merge_cells(f"A{row}:H{row}")
     ws.cell(row, 1).value = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     ws.cell(row, 1).font  = Font(italic=True, color="999999", size=9)
 
@@ -663,7 +679,10 @@ def _rebuild_dashboard(wb, today_str: str):
     _autowidth(ws, extra=6)
 
 
-def _rebuild_dashboard_file(productions_dir: str, today_str: str):
+def _rebuild_dashboard_file(productions_dir: str, today_str: str,
+                            skip_live: bool = False,
+                            skip_cache_check: bool = False,
+                            force_snapshot: bool = False):
     """
         Read ALL _Summary_*.xlsx files and write _Dashboard.xlsx with two sheets:
             - "Dashboard": snapshot for today_str, one row per designer
@@ -671,6 +690,11 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
 
         Skips the rebuild if no _Summary_*.xlsx file has changed since the
         last successful rebuild (mtime-based cache).
+
+        Flags for bulk/historical operations:
+            skip_live           → do not touch the live _Dashboard.xlsx.
+            skip_cache_check    → ignore the mtime cache (force build).
+            force_snapshot      → overwrite existing dated snapshot.
     """
     global _last_dashboard_max_mtime
     import glob as _glob
@@ -687,7 +711,7 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
 
     # ── Skip rebuild if no summary file changed since last time ──────────────
     dashboard_path = os.path.join(productions_dir, "_Dashboard.xlsx")
-    if summary_files:
+    if not skip_cache_check and summary_files:
         max_mtime = max(os.path.getmtime(f) for f in summary_files)
         if max_mtime <= _last_dashboard_max_mtime and os.path.exists(dashboard_path):
             print("[sharepoint_sync] No summary files changed, skipping Dashboard rebuild.")
@@ -732,23 +756,38 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
         ot_other = 0
         last_sync = "—"
 
-        # New explicit schema (30 cols): UE(Total) at 7, UE(Cases) at 8
+        # Historic case-type sets (each added a column when new types shipped).
+        TYPES_10 = CASE_TYPE_COLUMNS  # includes "New Impressions"
+        TYPES_9 = [t for t in CASE_TYPE_COLUMNS if t != "New Impressions"]
+
+        # Newest schema (32 cols, 10 case types incl. New Impressions)
+        if len(row_values) >= 32:
+            for i, case_type in enumerate(TYPES_10):
+                reg_explicit[case_type] = _num(row_values, 9 + i)
+            reg_other = _num(row_values, 19)
+            for i, case_type in enumerate(TYPES_10):
+                ot_explicit[case_type] = _num(row_values, 20 + i)
+            ot_other = _num(row_values, 30)
+            last_sync = row_values[31] if row_values[31] else "—"
+            return reg_explicit, reg_other, ot_explicit, ot_other, last_sync
+
+        # Previous 30-col schema (9 case types, no New Impressions)
         if len(row_values) >= 30:
-            for i, case_type in enumerate(CASE_TYPE_COLUMNS):
+            for i, case_type in enumerate(TYPES_9):
                 reg_explicit[case_type] = _num(row_values, 9 + i)
             reg_other = _num(row_values, 18)
-            for i, case_type in enumerate(CASE_TYPE_COLUMNS):
+            for i, case_type in enumerate(TYPES_9):
                 ot_explicit[case_type] = _num(row_values, 19 + i)
             ot_other = _num(row_values, 28)
             last_sync = row_values[29] if row_values[29] else "—"
             return reg_explicit, reg_other, ot_explicit, ot_other, last_sync
 
-        # Previous explicit schema (29 cols)
+        # Previous 29-col schema (9 case types, one less leading column)
         if len(row_values) >= 29:
-            for i, case_type in enumerate(CASE_TYPE_COLUMNS):
+            for i, case_type in enumerate(TYPES_9):
                 reg_explicit[case_type] = _num(row_values, 8 + i)
             reg_other = _num(row_values, 17)
-            for i, case_type in enumerate(CASE_TYPE_COLUMNS):
+            for i, case_type in enumerate(TYPES_9):
                 ot_explicit[case_type] = _num(row_values, 18 + i)
             ot_other = _num(row_values, 27)
             last_sync = row_values[28] if row_values[28] else "—"
@@ -814,7 +853,8 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
                 if d_str == today_str:
                     today_data[designer_name] = entry
             swb.close()
-        except Exception:
+        except Exception as exc:
+            log_event("sharepoint_sync", f"dashboard source summary parse skipped for {sf}: {exc}", level="WARN")
             continue
 
     # Build snapshot: include all known designers (blank row if no data today)
@@ -1009,7 +1049,8 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
     # ── Row 1: date-picker ───────────────────────────────────────────────
     try:
         _filter_date = _dt.datetime.strptime(today_str, "%Y-%m-%d").date()
-    except Exception:
+    except Exception as exc:
+        log_event("sharepoint_sync", f"history filter date parse failed for {today_str}: {exc}", level="WARN")
         _filter_date = _dt.date.today()
 
     # A1 — label
@@ -1139,32 +1180,34 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str):
 
     dashboard_path = os.path.join(productions_dir, "_Dashboard.xlsx")
     try:
-        try:
-            os.remove(dashboard_path)
-        except FileNotFoundError:
-            pass
-        _save_atomic(wb, dashboard_path)
-        # Update mtime cache so next call skips rebuild if nothing changed
-        if summary_files:
-            _last_dashboard_max_mtime = max(os.path.getmtime(f) for f in summary_files if os.path.exists(f))
+        if not skip_live:
+            try:
+                os.remove(dashboard_path)
+            except FileNotFoundError:
+                pass
+            _save_dashboard_verified(wb, dashboard_path)
+            # Update mtime cache so next call skips rebuild if nothing changed
+            if summary_files:
+                _last_dashboard_max_mtime = max(os.path.getmtime(f) for f in summary_files if os.path.exists(f))
     except PermissionError:
         # If dashboard is open/locked (Excel, preview, etc.), skip silently.
         # Daily and summary files were already saved.
         return
 
-    # Save a dated snapshot ONLY if it doesn't exist yet (once per day).
-    # This avoids OneDrive merge conflicts when multiple designers export.
+    # Save a dated snapshot. By default skipped if already present (once per
+    # day). `force_snapshot=True` overwrites — used by historical rebuild.
     snapshots_dir = os.path.join(productions_dir, "Dashboards")
     os.makedirs(snapshots_dir, exist_ok=True)
     snapshot_path = os.path.join(snapshots_dir, f"_Dashboard_{today_str}.xlsx")
-    if not os.path.exists(snapshot_path):
+    if force_snapshot or not os.path.exists(snapshot_path):
         try:
             _save_atomic(wb, snapshot_path)
         except PermissionError:
             pass
 
     # Clean up OneDrive conflict copies (e.g. _Dashboard-CRI-MACHINE.xlsx)
-    _cleanup_onedrive_conflicts(productions_dir)
+    if not skip_live:
+        _cleanup_onedrive_conflicts(productions_dir)
 
 
 def _update_team_summary(productions_dir: str, designer: str, target_date: str,
@@ -1173,7 +1216,8 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
                          ue_total: float = 0.0,
                          reg_type_counts: dict | None = None,
                          ot_type_counts:  dict | None = None,
-                         ue_cases: float = 0.0):
+                         ue_cases: float = 0.0,
+                         rebuild_dashboard: bool = True):
     """
     NEW ARCHITECTURE — no shared-file lock problem:
 
@@ -1202,8 +1246,8 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
             import shutil
             shutil.move(old_summary, summary_file)
             print(f"[sharepoint_sync] Migrated summary to {designer_dir}")
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("sharepoint_sync", f"summary migration failed {old_summary} -> {summary_file}: {exc}", level="WARN")
 
     d         = date.fromisoformat(target_date)
     week_num  = d.isocalendar()[1]
@@ -1240,19 +1284,19 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
         # Read succeeded — safe to delete and rewrite
         try:
             os.remove(summary_file)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("sharepoint_sync", f"could not remove existing summary before rewrite: {exc}", level="WARN")
 
     # ── Step 2: Build fresh workbook with all rows ────────────────────────────
     # Column layout (1-indexed):
     # 1:Date 2:Week 3:Cases% 4:DT% 5:Total% 6:RegCases 7:OTCases
     # 8:UE(Total) 9:UE(Cases)
-    # 10..18: Reg explicit CASE_TYPE_COLUMNS
-    # 19:Reg Other
-    # 20..28: OT explicit CASE_TYPE_COLUMNS
-    # 29:OT Other
-    # 30:LastSync
-    NCOLS = 30
+    # 10..(9+N): Reg explicit CASE_TYPE_COLUMNS
+    # 10+N:Reg Other
+    # (11+N)..(10+2N): OT explicit CASE_TYPE_COLUMNS
+    # 11+2N:OT Other
+    # 12+2N:LastSync
+    NCOLS = 12 + 2 * len(CASE_TYPE_COLUMNS)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = safe_name
@@ -1316,7 +1360,45 @@ def _update_team_summary(productions_dir: str, designer: str, target_date: str,
     wb.save(summary_file)   # fresh file, no lock possible
 
     # ── Step 2: Rebuild _Dashboard.xlsx from all _Summary_*.xlsx ─────────────
-    _rebuild_dashboard_file(productions_dir, target_date)
+    if rebuild_dashboard:
+        _rebuild_dashboard_file(productions_dir, target_date)
+
+
+def _save_dashboard_verified(wb, final_path: str, verify_delay: float = 5.0, retries: int = 2):
+    """Save Dashboard, re-hash after delay. If OneDrive mutated the file
+    (conflict merge or another designer's save landed), re-save so our
+    version wins. Max `retries` re-saves.
+    """
+    import hashlib
+
+    def _sha(path: str):
+        try:
+            with open(path, "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()
+        except Exception:
+            return None
+
+    _save_atomic(wb, final_path)
+    original = _sha(final_path)
+    if original is None:
+        return
+
+    for attempt in range(retries):
+        time.sleep(verify_delay)
+        current = _sha(final_path)
+        if current == original:
+            return
+        log_event("sharepoint_sync",
+                  f"dashboard mutated after save (hash mismatch), re-saving attempt {attempt + 1}",
+                  level="WARN")
+        try:
+            _save_atomic(wb, final_path)
+        except Exception as exc:
+            log_event("sharepoint_sync", f"dashboard re-save failed: {exc}", level="WARN")
+            return
+        original = _sha(final_path)
+        if original is None:
+            return
 
 
 def _save_atomic(wb, final_path: str, retries: int = 8):
@@ -1342,7 +1424,7 @@ def _save_atomic(wb, final_path: str, retries: int = 8):
             last_exc = exc
             if attempt < retries - 1:
                 # Random jitter 1–6 s so each designer backs off independently
-                time.sleep(random.uniform(1.0, 6.0))
+                time.sleep(random.uniform(*_SP_UPLOAD_JITTER))
         except Exception:
             raise
     raise last_exc
@@ -1393,11 +1475,15 @@ def export_to_sharepoint(target_date: str | None = None) -> tuple[bool, str]:
     day_dir = os.path.join(productions_dir, month_str, week_str, target_date)
     os.makedirs(day_dir, exist_ok=True)
 
+    # Compute UE upfront so daily file can show it too
+    ue_cases, ue_total, reg_type_counts, ot_type_counts = _get_ue_and_types(target_date)
+
     # Build workbook
     wb = openpyxl.Workbook()
     _build_daily_summary(wb, target_date, designer,
                          cases, ot_cases, downtimes,
-                         total_cases_pct, total_downtime_min)
+                         total_cases_pct, total_downtime_min,
+                         ue_cases=ue_cases, ue_total=ue_total)
     _build_monthly_summary(wb, year, month, designer, monthly_rows)
 
     # Save individual daily file
@@ -1411,7 +1497,6 @@ def export_to_sharepoint(target_date: str | None = None) -> tuple[bool, str]:
         return False, f"Could not save daily file:\n{e}"
 
     # ── Update shared team summary ────────────────────────────────────────────
-    ue_cases, ue_total, reg_type_counts, ot_type_counts = _get_ue_and_types(target_date)
     try:
         _update_team_summary(
             productions_dir, designer, target_date,
@@ -1431,3 +1516,375 @@ def export_to_sharepoint(target_date: str | None = None) -> tuple[bool, str]:
         f"\n\nDashboard rebuilt:\n{productions_dir}\\_Dashboard.xlsx"
         f"\n\nOneDrive will sync to SharePoint automatically."
     )
+
+
+def export_all_missing_to_sharepoint(progress_cb=None) -> tuple[bool, str]:
+    """Bulk upload daily files for every date with cases in the local DB that
+    is missing or corrupt in the shared folder. Valid existing files are
+    skipped (never overwritten). The team summary is updated per date and the
+    Dashboard is rebuilt only once at the end (protected by the stagger +
+    cooldown + verify pipeline).
+
+    progress_cb(index, total, message): optional callable for UI feedback.
+    """
+    if not _OPENPYXL_OK:
+        return False, f"openpyxl load error: {_OPENPYXL_ERROR}"
+
+    cfg = load_config()
+    designer = (cfg.get("designer_name", "Designer") or "Designer").strip() or "Designer"
+    export_folder = (cfg.get("export_folder", "") or "").strip()
+    if not export_folder:
+        return False, "Export folder not configured. Please set it in Settings."
+    if not os.path.isdir(export_folder):
+        return False, f"Export folder not found:\n{export_folder}"
+
+    productions_dir = os.path.join(export_folder, "Productions")
+    safe_name = designer.replace(" ", "_").replace("/", "-")
+
+    # ── Collect every date with local data ───────────────────────────────────
+    conn = _db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT fecha FROM cases "
+        "UNION SELECT DISTINCT fecha FROM ot_cases"
+    )
+    all_dates = sorted({r[0] for r in cur.fetchall() if r[0]})
+    conn.close()
+
+    if not all_dates:
+        return False, "No cases found in local database."
+
+    processed: list[str] = []
+    skipped: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    total = len(all_dates)
+    for idx, target_date in enumerate(all_dates, start=1):
+        try:
+            d = date.fromisoformat(target_date)
+        except ValueError:
+            failed.append((target_date, "invalid date format"))
+            continue
+
+        week_num = d.isocalendar()[1]
+        month_str = d.strftime("%Y-%m")
+        week_str = f"Week-{week_num:02d}"
+        day_dir = os.path.join(productions_dir, month_str, week_str, target_date)
+        filename = f"{safe_name}_Production_{target_date}.xlsx"
+        out_path = os.path.join(day_dir, filename)
+
+        # Skip if existing file opens successfully (considered valid)
+        if os.path.exists(out_path):
+            try:
+                _check_wb = openpyxl.load_workbook(out_path, read_only=True)
+                _check_wb.close()
+                skipped.append(target_date)
+                if progress_cb:
+                    progress_cb(idx, total, f"skip {target_date} (already uploaded)")
+                continue
+            except Exception:
+                log_event("sharepoint_sync",
+                          f"bulk: corrupt file at {out_path}, overwriting",
+                          level="WARN")
+
+        if progress_cb:
+            progress_cb(idx, total, f"building {target_date}")
+
+        try:
+            os.makedirs(day_dir, exist_ok=True)
+            cases, ot_cases, downtimes, total_cases_pct, total_downtime_min = \
+                _get_daily_data(target_date)
+            year = int(target_date[:4])
+            month = int(target_date[5:7])
+            monthly_rows = _get_monthly_data(year, month)
+            ue_cases, ue_total, reg_type_counts, ot_type_counts = \
+                _get_ue_and_types(target_date)
+
+            wb = openpyxl.Workbook()
+            _build_daily_summary(
+                wb, target_date, designer,
+                cases, ot_cases, downtimes,
+                total_cases_pct, total_downtime_min,
+                ue_cases=ue_cases, ue_total=ue_total,
+            )
+            _build_monthly_summary(wb, year, month, designer, monthly_rows)
+            _save_atomic(wb, out_path)
+
+            _update_team_summary(
+                productions_dir, designer, target_date,
+                total_cases_pct, total_downtime_min,
+                len(cases), len(ot_cases),
+                ue_total, reg_type_counts, ot_type_counts,
+                ue_cases=ue_cases,
+                rebuild_dashboard=False,  # defer to single rebuild at end
+            )
+            processed.append(target_date)
+        except Exception as exc:
+            log_event("sharepoint_sync",
+                      f"bulk: failed {target_date}: {exc}",
+                      level="ERROR")
+            failed.append((target_date, str(exc)))
+
+    # Single Dashboard rebuild at end (stagger + cooldown + verify apply)
+    if progress_cb:
+        progress_cb(total, total, "rebuilding dashboard")
+    try:
+        _rebuild_dashboard_file(productions_dir, date.today().isoformat())
+    except Exception as exc:
+        log_event("sharepoint_sync",
+                  f"bulk: dashboard rebuild failed: {exc}",
+                  level="WARN")
+
+    parts = [
+        f"Processed: {len(processed)} day(s)",
+        f"Skipped (already uploaded): {len(skipped)} day(s)",
+        f"Failed: {len(failed)} day(s)",
+    ]
+    if failed:
+        preview = "\n".join(f"  {d}: {msg}" for d, msg in failed[:10])
+        parts.append("\nFailures:\n" + preview)
+        if len(failed) > 10:
+            parts.append(f"  ... +{len(failed) - 10} more")
+    return (len(failed) == 0), "\n".join(parts)
+
+
+# ── Audit + historical rebuild ──────────────────────────────────────────────
+
+def _collect_summary_rows(productions_dir: str) -> dict:
+    """Return {date: {designer: summary_row_values_tuple}} from all summary files."""
+    import glob as _glob
+    summary_files = sorted(
+        _glob.glob(os.path.join(productions_dir, "*", "_Summary.xlsx"))
+    )
+    summary_files += sorted(
+        _glob.glob(os.path.join(productions_dir, "_Summary_*.xlsx"))
+    )
+
+    rows_by_date: dict[str, dict[str, tuple]] = {}
+    for sf in summary_files:
+        try:
+            base = os.path.basename(sf)
+            if base == "_Summary.xlsx":
+                designer_name = os.path.basename(os.path.dirname(sf)).replace("_", " ")
+            else:
+                designer_name = base[len("_Summary_"):-len(".xlsx")].replace("_", " ")
+            wb = openpyxl.load_workbook(sf, read_only=True, data_only=True)
+            ws = wb.active
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not row or not row[0]:
+                    continue
+                rows_by_date.setdefault(str(row[0]), {})[designer_name] = row
+            wb.close()
+        except Exception as exc:
+            log_event("sharepoint_sync",
+                      f"audit: could not read summary {sf}: {exc}",
+                      level="WARN")
+    return rows_by_date
+
+
+def audit_dashboard_vs_summaries(productions_dir: str | None = None
+                                 ) -> tuple[dict, str]:
+    """Compare each _Dashboard_YYYY-MM-DD.xlsx snapshot against the per-designer
+    summaries for the same date. Reports designers missing from a snapshot or
+    whose snapshot row is stale vs the summary.
+
+    Returns (issues_by_date, report_text). issues_by_date is {date: {
+        "missing_in_snapshot": [designers],
+        "missing_in_summary":  [designers],
+        "value_mismatch":      [(designer, field, snapshot_val, summary_val)],
+    }}.
+    """
+    if not _OPENPYXL_OK:
+        return {}, f"openpyxl load error: {_OPENPYXL_ERROR}"
+
+    if productions_dir is None:
+        cfg = load_config()
+        export_folder = (cfg.get("export_folder", "") or "").strip()
+        if not export_folder or not os.path.isdir(export_folder):
+            return {}, "Export folder not configured or not found."
+        productions_dir = os.path.join(export_folder, "Productions")
+
+    snapshots_dir = os.path.join(productions_dir, "Dashboards")
+    if not os.path.isdir(snapshots_dir):
+        return {}, f"No snapshots folder at {snapshots_dir}"
+
+    import glob as _glob
+    snapshot_files = sorted(
+        _glob.glob(os.path.join(snapshots_dir, "_Dashboard_*.xlsx"))
+    )
+    if not snapshot_files:
+        return {}, "No dashboard snapshots found."
+
+    rows_by_date = _collect_summary_rows(productions_dir)
+
+    issues: dict[str, dict] = {}
+    # Dashboard sheet columns: 1 Designer, 2 Cases%, 3 DT%, 4 Total%,
+    # 5 UE(Cases), 6 UE(Total), 7 RegCases, ...
+    # Summary row cols (newest schema, 32): 1 Date, 2 Week, 3 Cases%, 4 DT%,
+    # 5 Total%, 6 RegCases, 7 OTCases, 8 UE(Total), 9 UE(Cases).
+    FIELDS_TO_CHECK = [
+        ("Reg Cases",    6,  5),   # (label, dash_idx0, sum_idx0)
+        ("Cases %",      1,  2),
+        ("UE (Cases)",   4,  8),
+        ("UE (Total)",   5,  7),
+    ]
+
+    def _norm(v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            if s.endswith("%"):
+                try:
+                    return round(float(s.rstrip("%")), 1)
+                except ValueError:
+                    return s
+            try:
+                return round(float(s), 2)
+            except ValueError:
+                return s
+        try:
+            return round(float(v), 2)
+        except (TypeError, ValueError):
+            return v
+
+    for snap_path in snapshot_files:
+        fname = os.path.basename(snap_path)
+        # _Dashboard_YYYY-MM-DD.xlsx
+        try:
+            snap_date = fname[len("_Dashboard_"):-len(".xlsx")]
+        except Exception:
+            continue
+
+        try:
+            wb = openpyxl.load_workbook(snap_path, read_only=True, data_only=True)
+        except Exception as exc:
+            issues[snap_date] = {"read_error": str(exc)}
+            continue
+
+        try:
+            ws = wb["Dashboard"] if "Dashboard" in wb.sheetnames else wb.active
+        except Exception:
+            ws = wb.active
+
+        snap_designers: dict[str, tuple] = {}
+        for row in ws.iter_rows(min_row=3, values_only=True):
+            if not row or not row[0]:
+                continue
+            name = str(row[0]).strip()
+            if name.lower() in ("designer", "team total", "total"):
+                continue
+            snap_designers[name] = row
+        wb.close()
+
+        summary_map = rows_by_date.get(snap_date, {})
+        snap_names = set(snap_designers.keys())
+        sum_names = set(summary_map.keys())
+
+        missing_in_snap = sorted(sum_names - snap_names)
+        missing_in_sum = sorted(snap_names - sum_names)
+
+        mismatches: list[tuple] = []
+        for name in sorted(snap_names & sum_names):
+            snap_row = snap_designers[name]
+            sum_row = summary_map[name]
+            for label, d_idx, s_idx in FIELDS_TO_CHECK:
+                sv = _norm(snap_row[d_idx]) if d_idx < len(snap_row) else None
+                mv = _norm(sum_row[s_idx])  if s_idx < len(sum_row)  else None
+                if sv != mv:
+                    mismatches.append((name, label, sv, mv))
+
+        if missing_in_snap or missing_in_sum or mismatches:
+            issues[snap_date] = {
+                "missing_in_snapshot": missing_in_snap,
+                "missing_in_summary":  missing_in_sum,
+                "value_mismatch":      mismatches,
+            }
+
+    # Build report text
+    if not issues:
+        return issues, (
+            f"Audit OK — checked {len(snapshot_files)} snapshot(s). "
+            f"No discrepancies found."
+        )
+
+    lines = [f"Audit found issues in {len(issues)} of {len(snapshot_files)} snapshot(s):"]
+    for d in sorted(issues.keys()):
+        info = issues[d]
+        lines.append(f"\n[{d}]")
+        if "read_error" in info:
+            lines.append(f"  ! cannot read snapshot: {info['read_error']}")
+            continue
+        if info["missing_in_snapshot"]:
+            lines.append(f"  Missing in snapshot (present in summary):")
+            for n in info["missing_in_snapshot"]:
+                lines.append(f"    - {n}")
+        if info["missing_in_summary"]:
+            lines.append(f"  In snapshot but no summary row:")
+            for n in info["missing_in_summary"]:
+                lines.append(f"    - {n}")
+        if info["value_mismatch"]:
+            lines.append(f"  Value mismatches (snapshot → summary):")
+            for n, field, sv, mv in info["value_mismatch"][:8]:
+                lines.append(f"    - {n} / {field}: {sv} → {mv}")
+            if len(info["value_mismatch"]) > 8:
+                lines.append(f"    ... +{len(info['value_mismatch']) - 8} more")
+    return issues, "\n".join(lines)
+
+
+def rebuild_historical_dashboards(dates: list[str] | None = None,
+                                  productions_dir: str | None = None,
+                                  progress_cb=None) -> tuple[bool, str]:
+    """Regenerate _Dashboard_{date}.xlsx snapshots for the given dates (or
+    every date found in summaries if None). The live _Dashboard.xlsx is
+    never touched. Existing snapshots are overwritten.
+    """
+    if not _OPENPYXL_OK:
+        return False, f"openpyxl load error: {_OPENPYXL_ERROR}"
+
+    if productions_dir is None:
+        cfg = load_config()
+        export_folder = (cfg.get("export_folder", "") or "").strip()
+        if not export_folder or not os.path.isdir(export_folder):
+            return False, "Export folder not configured or not found."
+        productions_dir = os.path.join(export_folder, "Productions")
+
+    if dates is None:
+        rows_by_date = _collect_summary_rows(productions_dir)
+        dates = sorted(rows_by_date.keys())
+    else:
+        dates = sorted(set(dates))
+
+    if not dates:
+        return False, "No dates to rebuild."
+
+    rebuilt: list[str] = []
+    failed: list[tuple[str, str]] = []
+    total = len(dates)
+    for idx, d_str in enumerate(dates, start=1):
+        if progress_cb:
+            progress_cb(idx, total, f"rebuilding {d_str}")
+        try:
+            _rebuild_dashboard_file(
+                productions_dir, d_str,
+                skip_live=True,
+                skip_cache_check=True,
+                force_snapshot=True,
+            )
+            rebuilt.append(d_str)
+        except Exception as exc:
+            log_event("sharepoint_sync",
+                      f"historical rebuild failed {d_str}: {exc}",
+                      level="WARN")
+            failed.append((d_str, str(exc)))
+
+    parts = [
+        f"Rebuilt: {len(rebuilt)} snapshot(s)",
+        f"Failed: {len(failed)} snapshot(s)",
+    ]
+    if failed:
+        preview = "\n".join(f"  {d}: {msg}" for d, msg in failed[:10])
+        parts.append("\nFailures:\n" + preview)
+        if len(failed) > 10:
+            parts.append(f"  ... +{len(failed) - 10} more")
+    return (len(failed) == 0), "\n".join(parts)

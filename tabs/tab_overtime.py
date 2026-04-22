@@ -19,6 +19,20 @@ from .utils import (
     calculate_equivalent_units,
 )
 from .widgets import TimeEditWithShortcut, DateEditWithShortcut, card
+from .clipboard_import_ui import (
+    get_clipboard_case_data,
+    has_detected_case_fields,
+    show_import_confirmation,
+    build_import_summary,
+    apply_imported_case_data,
+    get_import_not_detected_message,
+    get_import_success_message,
+    get_import_reminder_message,
+)
+from .theme_table_utils import (
+    apply_table_theme, CLR_FG_LIGHT, CLR_FG_DARK,
+    get_light_theme_colors, light_row_bg, light_header_bg, light_header_fg, mix_hex,
+)
 
 
 class OvertimeTab(QWidget):
@@ -79,7 +93,7 @@ class OvertimeTab(QWidget):
         self.case_date.setMaximumWidth(180)
         self.case_date.dateChanged.connect(self.on_date_changed)
 
-        self.result_label = QLabel("—")
+        self.result_label = QLabel("â€”")
         self.result_label.setStyleSheet(
             "font-size: 14px; font-weight: 700; color: #F0883E; text-align: center;"
         )
@@ -240,7 +254,7 @@ class OvertimeTab(QWidget):
         self.estimate_label.setWordWrap(True)
         self.estimate_label.setStyleSheet("font-size:12px; color:#222222;")
         self.estimate_label.setAlignment(Qt.AlignmentFlag.AlignTop)
-        # hide the overall quick summary — we'll show per-type info next to each spinbox
+        # hide the overall quick summary â€” we'll show per-type info next to each spinbox
         self.estimate_label.hide()
 
         # counts per type area (VBox so we can add explicit styled rows)
@@ -589,6 +603,12 @@ class OvertimeTab(QWidget):
         """Calculate case value percentage."""
         return _calc_cv(std_time)
 
+    def _set_result_status(self, text: str, color: str = "#F0883E", size: int = 13, weight: str = "bold"):
+        self.result_label.setText(text)
+        self.result_label.setStyleSheet(
+            f"color: {color}; font-size: {size}px; font-weight: {weight}; text-align: center;"
+        )
+
     def calculate(self):
         region = self.region.currentText()
         tipo = self.tipo.currentText()
@@ -624,9 +644,8 @@ class OvertimeTab(QWidget):
             status = "LOW"
             color = "#F85149"
 
-        result_text = f"{efficiency:.1f}% – {status}\nOT Case Value: {case_value:.3f}%"
-        self.result_label.setText(result_text)
-        self.result_label.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold; text-align: center;")
+        result_text = f"{efficiency:.1f}% â€“ {status}\nOT Case Value: {case_value:.3f}%"
+        self._set_result_status(result_text, color=color, size=13, weight="bold")
 
     def on_date_changed(self):
         """Called when date picker changes - reload OT data for that date"""
@@ -767,13 +786,13 @@ class OvertimeTab(QWidget):
             type_label = self.estimate_type_labels.get(t)
             if type_label:
                 display_name = key or t
-                type_label.setText(f"<b>{display_name}</b> &nbsp;·&nbsp; {total_possible} posibles")
+                type_label.setText(f"<b>{display_name}</b> &nbsp;Â·&nbsp; {total_possible} posibles")
 
             info_label = self.estimate_info_labels.get(t)
             if info_label:
-                std_str = f"{std_time:.0f} min" if std_time else "—"
+                std_str = f"{std_time:.0f} min" if std_time else "â€”"
                 info_label.setText(
-                    f"\u23f1 {std_str}  |  \u2713{done_count} hechos · {remaining} faltan  |  {equiv_units_type:.2f} UE nuevas"
+                    f"\u23f1 {std_str}  |  \u2713{done_count} hechos Â· {remaining} faltan  |  {equiv_units_type:.2f} UE nuevas"
                 )
 
         # clear overall label (we use per-type labels now)
@@ -849,7 +868,7 @@ class OvertimeTab(QWidget):
             self.estimate_key_map[t] = found_key
             max_cases = int((minutes // float(std_time)) if std_time and minutes > 0 else 0)
 
-            # store max capacity as plain int (no spinbox needed — it was read-only)
+            # store max capacity as plain int (no spinbox needed â€” it was read-only)
             self.estimate_counts[t] = max_cases
 
             # Build an explicit card row so labels are always themed correctly
@@ -860,7 +879,7 @@ class OvertimeTab(QWidget):
             row_layout.setContentsMargins(6, 4, 6, 4)
             row_layout.setSpacing(2)
 
-            type_lbl = QLabel(f"<b>{display_name}</b> &nbsp;·&nbsp; {max_cases} posibles")
+            type_lbl = QLabel(f"<b>{display_name}</b> &nbsp;Â·&nbsp; {max_cases} posibles")
             type_lbl.setStyleSheet("font-size:11px; color:#e6e6e6;")
 
             info_label = QLabel("")
@@ -885,7 +904,7 @@ class OvertimeTab(QWidget):
             used_minutes += cnt * float(std_time or 0)
 
         tu_percent = (used_minutes / minutes) * 100.0 if minutes > 0 else 0.0
-        self.estimate_label.setText(f"{total_case_value:.2f}% · TU {tu_percent:.1f}%")
+        self.estimate_label.setText(f"{total_case_value:.2f}% Â· TU {tu_percent:.1f}%")
 
     def animate_ot_progress_bar(self, target_value):
         """Animate the OT progress bar to the target value"""
@@ -904,8 +923,9 @@ class OvertimeTab(QWidget):
     def update_progress_bar_style(self, light_mode: bool):
         """Update OT progress bar appearance for light/dark themes."""
         chunk = getattr(self, '_ot_progress_chunk', '#F0883E')
-        bg = '#EAEEF2' if light_mode else '#21262D'
-        text_color = '#1F2328' if light_mode else '#E6EDF3'
+        colors = get_light_theme_colors()
+        bg = colors["button_bg"] if light_mode else '#21262D'
+        text_color = colors["text_primary"] if light_mode else '#E6EDF3'
 
         try:
             self.ot_progress_bar.setStyleSheet(f"""
@@ -934,31 +954,21 @@ class OvertimeTab(QWidget):
                 self._ot_table_saved_style = self.ot_table.styleSheet() or ''
 
             if light_mode:
-                # Table header and grid colors in light mode: use grayish, high-contrast hues for readability
-                # Do NOT force per-item background here so per-item setBackground() calls
-                # (used for efficiency coloring) are respected.
-                self.ot_table.setStyleSheet("""
+                self.ot_table.setStyleSheet(f"""
                     QTableWidget {
-                        gridline-color: #E0E0E0;
-                        background-color: #ffffff;
-                        color: #222222;
+                        gridline-color: {colors["border"]};
+                        background-color: {colors["surface_bg"]};
+                        color: {colors["text_primary"]};
+                        border: 1px solid {colors["border"]};
                     }
                     QHeaderView::section {
-                        background-color: #E6E6E6;
-                        color: #242038;
-                        border: 1px solid #D0CFCF;
+                        background-color: {light_header_bg(colors)};
+                        color: {light_header_fg(colors)};
+                        border: 1px solid {colors["border"]};
                         padding: 6px;
                     }
                 """)
-
-                # (Buttons left unchanged here; only table colors are adjusted)
             else:
-                # Restore saved styles for dark mode
-                try:
-                    self.ot_table.setStyleSheet(self._ot_table_saved_style)
-                except Exception:
-                    pass
-                # restore OT table style only (buttons keep their original behavior)
                 try:
                     self.ot_table.setStyleSheet(self._ot_table_saved_style)
                 except Exception:
@@ -969,17 +979,18 @@ class OvertimeTab(QWidget):
     def update_theme_labels(self, light_mode: bool):
         """Adjust label colors so Light mode shows dark text and Dark mode preserves original light colors."""
         try:
+            colors = get_light_theme_colors()
             if light_mode:
-                tl_color = '#000000'
-                est_color = '#222222'
-                info_color = '#222222'
+                tl_color = colors["text_primary"]
+                est_color = colors["text_primary"]
+                info_color = colors["text_muted"]
             else:
                 # Use a bright/light label color for dark mode so it's readable
                 tl_color = '#e6e6e6'
                 est_color = '#e6e6e6'
                 info_color = '#bdbdbd'
 
-            # Count toggle label — prefer explicit reference if available
+            # Count toggle label â€” prefer explicit reference if available
             toggle_label = getattr(self, 'count_toggle_label', None)
             if toggle_label is None:
                 # fallback: find by text
@@ -1001,37 +1012,45 @@ class OvertimeTab(QWidget):
                 except Exception:
                     pass
             # per-type name labels
-            type_lbl_color = '#ffffff' if not light_mode else '#222222'
+            type_lbl_color = '#ffffff' if not light_mode else colors["text_primary"]
             for lbl in getattr(self, 'estimate_type_labels', {}).values():
                 try:
                     lbl.setStyleSheet(f"font-size:11px; color:{type_lbl_color};")
                 except Exception:
                     pass
-            # Update table cell foregrounds to match theme (light text on dark backgrounds, dark on light)
-            try:
-                from PySide6.QtGui import QBrush, QColor
-                from PySide6.QtWidgets import QTableWidget
-                # We'll set each item's foreground color based on its background
-                # color to ensure contrast. If the background is light, use dark
-                # text; if background is dark, use white text.
-                for table in self.findChildren(QTableWidget):
-                    for r in range(table.rowCount()):
-                        for c in range(table.columnCount()):
-                            item = table.item(r, c)
-                            if item:
-                                bg = item.background().color() if item.background() else None
-                                if bg is None:
-                                    fg = QColor(34, 32, 56) if light_mode else QColor(255, 255, 255)
-                                else:
-                                    # lightness threshold - if background is light, use dark text
-                                    fg = QColor(34, 32, 56) if bg.lightness() > 128 else QColor(255, 255, 255)
-                                item.setForeground(QBrush(fg))
-            except Exception:
-                pass
+            # Update table cell foregrounds to keep contrast on colored rows.
+            apply_table_theme(
+                self,
+                light_mode,
+                adaptive_fg_by_bg=True,
+                adaptive_default_fg=CLR_FG_DARK if light_mode else CLR_FG_LIGHT,
+            )
 
             # Ensure progress bar and table header styles are updated too
             try:
                 self.update_progress_bar_style(light_mode)
+            except Exception:
+                pass
+
+            try:
+                if light_mode:
+                    self.ot_table.setStyleSheet(f"""
+                        QTableWidget {{
+                            gridline-color: {colors["border"]};
+                            background-color: {colors["surface_bg"]};
+                            color: {colors["text_primary"]};
+                            border: 1px solid {colors["border"]};
+                        }}
+                        QHeaderView::section {{
+                            background-color: {light_header_bg(colors)};
+                            color: {light_header_fg(colors)};
+                            border: 1px solid {colors["border"]};
+                            padding: 6px;
+                            font-weight: 700;
+                        }}
+                    """)
+                else:
+                    self.ot_table.setStyleSheet(self._ot_table_saved_style)
             except Exception:
                 pass
         except Exception:
@@ -1061,6 +1080,7 @@ class OvertimeTab(QWidget):
             current_is_light = win_color.lightness() > 128
         except Exception:
             current_is_light = False
+        light_colors = get_light_theme_colors()
 
         self.ot_table.setRowCount(len(cases))
         self.ot_case_ids = []  # Store database IDs for edit/delete
@@ -1077,17 +1097,19 @@ class OvertimeTab(QWidget):
             # Yellow background for cases that don't count, otherwise zebra striping.
             # Use the palette-derived theme flag so light mode rows are light.
             if counts_for_production == 0:
-                bg_color = QColor(180, 150, 50)  # Yellow/gold for non-counting cases
+                bg_color = QColor("#E9D8A6") if current_is_light else QColor(180, 150, 50)
             else:
                 if current_is_light:
-                    bg_color = QColor(255, 255, 255) if (row_idx % 2 == 0) else QColor(250, 250, 250)
+                    bg_color = light_row_bg(row_idx, light_colors)
                 else:
                     bg_color = QColor(43, 43, 43) if (row_idx % 2 == 0) else QColor(45, 45, 45)
             
             bg_brush = QBrush(bg_color)
             
             # Determine text color based on theme
-            text_color = QColor(34, 32, 56) if current_is_light else QColor(255, 255, 255)
+            text_color = CLR_FG_DARK if current_is_light else CLR_FG_LIGHT
+            if counts_for_production == 0:
+                text_color = QColor("#A15C00") if current_is_light else QColor("#F0883E")
 
             # Case ID - bold
             case_item = QTableWidgetItem(str(case_id))
@@ -1161,7 +1183,7 @@ class OvertimeTab(QWidget):
                 else:
                     eff_item.setBackground(QBrush(QColor(244, 67, 54)))  # Red
                 # choose text color for eff cell: dark text on light theme, white on dark
-                eff_text_color = QColor(34, 32, 56) if current_is_light else QColor(255, 255, 255)
+                eff_text_color = CLR_FG_DARK if current_is_light else CLR_FG_LIGHT
                 eff_item.setForeground(QBrush(eff_text_color))
             else:
                 # Fallback: use estado if numeric efficiency missing
@@ -1169,7 +1191,7 @@ class OvertimeTab(QWidget):
                     eff_item.setBackground(QBrush(QColor(76, 175, 80)))
                 else:
                     eff_item.setBackground(QBrush(QColor(244, 67, 54)))
-                eff_item.setForeground(QBrush(QColor(255, 255, 255)))
+                eff_item.setForeground(QBrush(CLR_FG_LIGHT))
             self.ot_table.setItem(row_idx, 5, eff_item)
             
             # Value - no color, same background as other columns
@@ -1203,101 +1225,42 @@ class OvertimeTab(QWidget):
         Read the clipboard, show a confirmation dialog with the detected data,
         and fill the fields only if the user confirms.
         """
-        from sync.clipboard_import import parse_clipboard
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
+        data = get_clipboard_case_data(self.standards)
 
-        data = parse_clipboard(self.standards)
-
-        # Nothing found — show error directly, no dialog
-        if not any(data.get(k) for k in ('case_id', 'region', 'tipo', 'doctor')):
-            self.result_label.setText(
-                "Nothing detected in clipboard.\n"
-                "On the case page: press Ctrl+A then Ctrl+C, then try again."
-            )
-            self.result_label.setStyleSheet(
-                "color: #FFC107; font-size: 12px; font-weight: bold; text-align: center;"
+        # Nothing found - show error directly, no dialog
+        if not has_detected_case_fields(data):
+            self._set_result_status(
+                get_import_not_detected_message("ot"),
+                color="#FFC107",
+                size=12,
+                weight="bold",
             )
             return
 
-        # Build confirmation dialog
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Import from Clipboard")
-        dlg.setMinimumWidth(300)
-        layout = QVBoxLayout(dlg)
-        layout.setSpacing(10)
+        if not show_import_confirmation(self, data):
+            return
 
-        header = QLabel("Import this case?")
-        header.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(header)
-
-        rows = [
-            ("Case ID", data.get('case_id', '—')),
-            ("Region",  data.get('region',  '—')),
-            ("Type",    data.get('tipo',    '—')),
-            ("Doctor",  data.get('doctor',  '—')),
-        ]
-        for label_text, value in rows:
-            row_lbl = QLabel(f"<b>{label_text}:</b>  {value}")
-            row_lbl.setWordWrap(True)
-            layout.addWidget(row_lbl)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        btn_cancel = QPushButton("Cancel")
-        btn_import = QPushButton("Import")
-        btn_import.setDefault(True)
-        btn_import.setStyleSheet(
-            "background-color: #1a5c2a; color: #7ec890; font-weight: bold;"
+        imported_case_id, imported_region, imported_type = apply_imported_case_data(
+            data,
+            case_id_widget=self.case_id,
+            region_widget=self.region,
+            type_widget=self.tipo,
+            doctor_widget=self.doctor,
+            refresh_case_types_fn=self.update_case_types,
         )
-        btn_layout.addWidget(btn_cancel)
-        btn_layout.addWidget(btn_import)
-        layout.addLayout(btn_layout)
-
-        btn_cancel.clicked.connect(dlg.reject)
-        btn_import.clicked.connect(dlg.accept)
-
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        # User confirmed — fill fields
-        imported_case_id = None
-        imported_region = None
-        imported_type = None
-
-        if data.get('case_id'):
-            self.case_id.setText(data['case_id'])
-            imported_case_id = data['case_id']
-
-        if data.get('region'):
-            idx = self.region.findText(data['region'])
-            if idx >= 0:
-                self.region.blockSignals(True)
-                self.region.setCurrentIndex(idx)
-                self.region.blockSignals(False)
-                self.update_case_types()
-                imported_region = data['region']
-
-        if data.get('tipo'):
-            idx = self.tipo.findText(data['tipo'])
-            if idx >= 0:
-                self.tipo.setCurrentIndex(idx)
-                imported_type = data['tipo']
-
-        if data.get('doctor'):
-            self.doctor.setText(data['doctor'])
 
         self.start_time.setTime(QTime.currentTime())
 
-        summary_parts = [p for p in (imported_case_id, imported_region, imported_type) if p]
-        summary = " | ".join(summary_parts) if summary_parts else "Case imported"
-        self.result_label.setText(f"Imported: {summary}\nClick Calculate.")
-        self.result_label.setStyleSheet(
-            "color: #4CAF50; font-size: 11px; font-weight: bold; text-align: center;"
+        summary = build_import_summary(imported_case_id, imported_region, imported_type)
+        self._set_result_status(
+            get_import_success_message(summary, "ot"),
+            color="#4CAF50",
+            size=11,
+            weight="bold",
         )
 
         self._show_import_toast(
-            "Verify if the case is Stage RX or Bite Sync.\n"
-            "Import currently does not auto-detect this.",
+            get_import_reminder_message(),
             duration_ms=4200,
         )
 
@@ -1318,15 +1281,15 @@ class OvertimeTab(QWidget):
         end = self.end_time.time()
 
         tiempo_real = start.secsTo(end) / 60
-        if tiempo_real < 1:
-            self.result_label.setText("Invalid time (minimum 1 minute)")
+        if tiempo_real <= 0:
+            self.result_label.setText("Invalid time")
             return
 
         # Subtract only breaks the user confirmed they took today
         from tabs.breaks_dialog import calculate_break_overlap
         break_mins = calculate_break_overlap(start.toString("HH:mm"), end.toString("HH:mm"), fecha=case_date)
         tiempo_real -= break_mins
-        if tiempo_real < 1:
+        if tiempo_real <= 0:
             self.result_label.setText("Case falls entirely within break time")
             return
 
@@ -1538,3 +1501,4 @@ class OvertimeTab(QWidget):
         self.type_filter.setCurrentIndex(0)  # "All Types"
         for row in range(self.ot_table.rowCount()):
             self.ot_table.setRowHidden(row, False)
+

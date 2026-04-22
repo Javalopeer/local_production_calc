@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, QLabel,
     QTreeWidget, QTreeWidgetItem, QFileDialog, QMessageBox, QLineEdit,
@@ -16,6 +17,143 @@ from .utils import (
     DAILY_BASE_MINUTES,
     DAILY_TARGET_EQ_UNITS,
 )
+from .theme_table_utils import get_light_theme_colors, light_header_bg, light_header_fg, mix_hex
+
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_standards_dict(payload):
+    """Return canonical standards dict {region: {'Aligners': {type: float}}}."""
+    if not isinstance(payload, dict):
+        return None
+
+    normalized = {}
+    for region, region_data in payload.items():
+        if not isinstance(region, str) or not region.strip():
+            return None
+        if not isinstance(region_data, dict):
+            return None
+
+        aligners = region_data.get("Aligners")
+        if not isinstance(aligners, dict):
+            return None
+
+        out_aligners = {}
+        for case_type, value in aligners.items():
+            if not isinstance(case_type, str) or not case_type.strip():
+                return None
+            num = _safe_float(value)
+            if num is None or num <= 0:
+                return None
+            out_aligners[case_type.strip()] = float(num)
+
+        normalized[region.strip()] = {"Aligners": out_aligners}
+
+    return normalized
+
+
+def _normalize_units_eq_dict(payload):
+    """Return canonical units_eq dict {region: {type_or_100: float}}."""
+    if not isinstance(payload, dict):
+        return None
+
+    normalized = {}
+    for region, region_data in payload.items():
+        if not isinstance(region, str) or not region.strip():
+            return None
+        if not isinstance(region_data, dict):
+            return None
+
+        out_reg = {}
+        for key, value in region_data.items():
+            if not isinstance(key, str) or not key.strip():
+                return None
+            num = _safe_float(value)
+            if num is None or num <= 0:
+                return None
+            out_reg[key.strip()] = float(num)
+
+        normalized[region.strip()] = out_reg
+
+    return normalized
+
+
+def _extract_import_payload(raw_data):
+    """Detect import format and return tuple (standards_dict|None, units_eq_dict|None)."""
+    if not isinstance(raw_data, dict):
+        return None, None
+
+    # Common envelope used by some exports.
+    for envelope_key in ("data", "payload"):
+        inner = raw_data.get(envelope_key)
+        if isinstance(inner, dict):
+            raw_data = inner
+            break
+
+    # 1) Combined wrapper formats
+    wrapper_keys = [
+        ("standards", "units_eq"),
+        ("standards", "ue"),
+        ("std", "units_eq"),
+        ("std", "ue"),
+    ]
+    for std_key, ue_key in wrapper_keys:
+        if std_key in raw_data or ue_key in raw_data:
+            std_payload = _normalize_standards_dict(raw_data.get(std_key)) if std_key in raw_data else None
+            ue_payload = _normalize_units_eq_dict(raw_data.get(ue_key)) if ue_key in raw_data else None
+            return std_payload, ue_payload
+
+    # 2) Region-level combined format:
+    # { "Region": { "Aligners": {...}, "UE": {...} } }
+    has_aligners = False
+    region_combined = True
+    extracted_std = {}
+    extracted_ue = {}
+    for region, region_data in raw_data.items():
+        if not isinstance(region_data, dict):
+            region_combined = False
+            break
+        if "Aligners" not in region_data:
+            region_combined = False
+            break
+        has_aligners = True
+        extracted_std[region] = {"Aligners": region_data.get("Aligners", {})}
+        ue_part = region_data.get("UE")
+        if ue_part is None:
+            ue_part = region_data.get("units_eq")
+        if ue_part is not None:
+            extracted_ue[region] = ue_part
+
+    if region_combined and has_aligners:
+        std_payload = _normalize_standards_dict(extracted_std)
+        ue_payload = _normalize_units_eq_dict(extracted_ue) if extracted_ue else None
+        return std_payload, ue_payload
+
+    # 3) Standards-only
+    std_payload = _normalize_standards_dict(raw_data)
+    if std_payload is not None:
+        return std_payload, None
+
+    # 4) UE-only
+    ue_payload = _normalize_units_eq_dict(raw_data)
+    if ue_payload is not None:
+        return None, ue_payload
+
+    return None, None
+
+
+def _build_combined_export_payload(standards: dict, units_eq: dict) -> dict:
+    """Build canonical combined JSON payload for round-trip edits/import."""
+    return {
+        "format": "ppc-standards-combined-v1",
+        "standards": standards if isinstance(standards, dict) else {},
+        "units_eq": units_eq if isinstance(units_eq, dict) else {},
+    }
 
 
 def card(title, widget):
@@ -394,6 +532,27 @@ class StandardsTab(QWidget):
         except Exception as e:
             print(f"Error saving units_eq: {e}")
             return False
+
+    def _backup_current_files(self):
+        """Best-effort backup before destructive imports."""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = get_writable_path(os.path.join("data", "backups"))
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            std_src = get_resource_path(os.path.join("data", "standards.json"))
+            ue_src = get_resource_path(os.path.join("data", "units_eq.json"))
+            if os.path.exists(std_src):
+                with open(std_src, "r", encoding="utf-8-sig") as fsrc:
+                    std_data = json.load(fsrc)
+                with open(os.path.join(backup_dir, f"standards_{ts}.json"), "w", encoding="utf-8", newline="\n") as fdst:
+                    json.dump(std_data, fdst, indent=4, ensure_ascii=False)
+            if os.path.exists(ue_src):
+                with open(ue_src, "r", encoding="utf-8-sig") as fsrc:
+                    ue_data = json.load(fsrc)
+                with open(os.path.join(backup_dir, f"units_eq_{ts}.json"), "w", encoding="utf-8", newline="\n") as fdst:
+                    json.dump(ue_data, fdst, indent=4, ensure_ascii=False)
+        except Exception as exc:
+            print(f"[standards] backup skipped: {exc}")
     
     def init_ui(self):
         main_layout = QVBoxLayout()
@@ -401,10 +560,10 @@ class StandardsTab(QWidget):
         main_layout.setContentsMargins(15, 15, 15, 15)
         
         # Title — centered
-        title_label = QLabel("Standard Times Configuration")
-        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #4aa3ff;")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main_layout.addWidget(title_label)
+        self.title_label = QLabel("Standard Times Configuration")
+        self.title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #4aa3ff;")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.title_label)
 
         # Buttons row — right-aligned
         header_layout = QHBoxLayout()
@@ -482,35 +641,45 @@ class StandardsTab(QWidget):
     def update_theme_labels(self, is_light: bool):
         """Update tree widget colors when theme changes."""
         from PySide6.QtGui import QBrush, QColor
+        colors = get_light_theme_colors()
 
         if is_light:
+            # Title black in light mode
+            self.title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #111;")
             # Light mode: fondo claro, texto oscuro
-            fg_color = QColor(36, 32, 56)   # #242038
-            tree_css = """
-                QTreeWidget {
-                    background-color: #ffffff;
-                    alternate-background-color: #f0eef5;
-                    border: 1px solid #CAC4CE;
+            fg_color = QColor(colors["text_primary"])
+            hover_bg = mix_hex(colors["selection_bg"], colors["surface_bg"], 0.55)
+            tree_css = f"""
+                QTreeWidget {{
+                    background-color: {colors["surface_bg"]};
+                    alternate-background-color: {colors["base_bg"]};
+                    border: 1px solid {colors["border"]};
                     border-radius: 6px;
-                    color: #242038;
-                }
-                QTreeWidget::item {
+                    color: {colors["text_primary"]};
+                }}
+                QTreeWidget::item {{
                     padding: 4px;
-                    color: #242038;
-                }
-                QTreeWidget::item:selected {
-                    background-color: #8D86C9;
-                    color: #ffffff;
-                }
-                QHeaderView::section {
-                    background-color: #8D86C9;
-                    color: #ffffff;
-                    border: 1px solid #CAC4CE;
+                    color: {colors["text_primary"]};
+                }}
+                QTreeWidget::item:hover {{
+                    background-color: {hover_bg};
+                    color: {colors["text_primary"]};
+                }}
+                QTreeWidget::item:selected {{
+                    background-color: {colors["selection_bg"]};
+                    color: {colors["text_primary"]};
+                }}
+                QHeaderView::section {{
+                    background-color: {light_header_bg(colors)};
+                    color: {light_header_fg(colors)};
+                    border: 1px solid {colors["border"]};
                     padding: 6px;
                     font-weight: bold;
-                }
+                }}
             """
         else:
+            # Title blue in dark mode
+            self.title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #4aa3ff;")
             # Dark mode: fondo oscuro, texto claro
             fg_color = QColor(230, 230, 230)  # #e6e6e6
             tree_css = """
@@ -523,8 +692,11 @@ class StandardsTab(QWidget):
                 QTreeWidget::item {
                     padding: 4px;
                 }
-                QTreeWidget::item:selected {
+                QTreeWidget::item:hover {
                     background-color: #3c3c3c;
+                }
+                QTreeWidget::item:selected {
+                    background-color: #4a4a50;
                 }
                 QHeaderView::section {
                     background-color: #3c3c3c;
@@ -725,62 +897,80 @@ class StandardsTab(QWidget):
             QMessageBox.warning(self, "Error", "Failed to save one or more files.")
     
     def import_json(self):
-        """Import standards from a JSON file"""
+        """Import standards + units_eq from a combined JSON file."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import Standards JSON", "", "JSON Files (*.json)"
+            self, "Import Standards/UE JSON", "", "JSON Files (*.json)"
         )
         if file_path:
             try:
-                with open(file_path, "r") as f:
-                    new_standards = json.load(f)
-                
-                # Validate structure
-                valid = True
-                for region, data in new_standards.items():
-                    if not isinstance(data, dict) or "Aligners" not in data:
-                        valid = False
-                        break
-                    if not isinstance(data["Aligners"], dict):
-                        valid = False
-                        break
-                
-                if valid:
-                    self.standards = new_standards
-                    self._inject_new_impressions(self.standards)
+                with open(file_path, "r", encoding="utf-8-sig") as f:
+                    raw_data = json.load(f)
 
-                    recalc_reply = QMessageBox.question(
+                new_standards, new_units_eq = _extract_import_payload(raw_data)
+                if new_standards is None or new_units_eq is None:
+                    QMessageBox.warning(
                         self,
-                        "Recalculate Equivalent Units?",
-                        "Do you want to recalculate UE values from the imported standard times?\n\n"
-                        "Formula used: UE = (Std Time / 408.3) * 15",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.Yes,
+                        "Error",
+                        "Invalid JSON format.\n\n"
+                        "Only combined imports are allowed:\n"
+                        "{\"standards\": {...}, \"units_eq\": {...}}",
                     )
-                    if recalc_reply == QMessageBox.StandardButton.Yes:
-                        self.recalculate_units_eq_from_standards()
+                    return
 
-                    self.populate_tree()
-                    QMessageBox.information(
-                        self,
-                        "Success",
-                        "Standards imported successfully!\n"
-                        "Click 'Save Changes' to persist standards and UE files.",
-                    )
-                else:
-                    QMessageBox.warning(self, "Error", "Invalid JSON format. Expected structure:\n{\n  \"Region\": {\n    \"Aligners\": {\n      \"Type\": value\n    }\n  }\n}")
+                self.standards = new_standards
+                self._inject_new_impressions(self.standards)
+
+                self.units_eq = new_units_eq
+                # Keep UE in sync with synthetic type used across app.
+                for reg_data in self.units_eq.values():
+                    if isinstance(reg_data, dict) and "Secondary" in reg_data:
+                        reg_data["New Impressions"] = reg_data["Secondary"]
+
+                # Persist immediately so imports are never lost.
+                self._backup_current_files()
+                ok_std = self.save_standards()
+                ok_ue = self.save_units_eq()
+                if not (ok_std and ok_ue):
+                    QMessageBox.warning(self, "Error", "Import loaded in memory, but failed to save one or more files.")
+                    return
+
+                # Bust caches and notify app.
+                from .utils import load_standards_data
+                load_standards_data(force=True)
+                load_units_eq_data(force=True)
+
+                self.populate_tree()
+                self.standards_updated.emit()
+
+                QMessageBox.information(
+                    self,
+                    "Import Successful",
+                    "Imported and saved: Standards + UE\n"
+                    "Backup created in: data/backups",
+                )
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to import: {str(e)}")
     
     def export_json(self):
-        """Export current standards to a JSON file"""
+        """Export persisted standards + UE as a combined JSON file."""
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Standards JSON", "standards.json", "JSON Files (*.json)"
+            self, "Export Standards JSON", "standards_combined.json", "JSON Files (*.json)"
         )
         if file_path:
             try:
-                with open(file_path, "w") as f:
-                    json.dump(self.standards, f, indent=4)
-                QMessageBox.information(self, "Success", "Standards exported successfully!")
+                # Export persisted values (disk), not transient in-memory edits.
+                from .utils import load_standards_data
+                standards_disk = load_standards_data(force=True)
+                units_eq_disk = load_units_eq_data(force=True)
+                payload = _build_combined_export_payload(standards_disk, units_eq_disk)
+                with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(payload, f, indent=4, ensure_ascii=False)
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    "Combined JSON exported successfully!\n"
+                    "Includes: standards + units_eq",
+                )
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to export: {str(e)}")
     

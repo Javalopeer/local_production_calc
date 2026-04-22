@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QDateEdit, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QFrame, QSizePolicy, QScrollArea, QGroupBox,
-    QGridLayout,
+    QGridLayout, QBoxLayout,
 )
 from PySide6.QtCore import QDate, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush
@@ -111,6 +111,13 @@ def _draw_legend(painter: QPainter, series: list, rc: QRect):
             y += 16
 
 
+def _label_stride(n: int, max_labels: int = 10) -> int:
+    """Return stride for x-axis labels so long ranges stay readable."""
+    if n <= 0:
+        return 1
+    return max(1, math.ceil(n / max_labels))
+
+
 # ---------------------------------------------------------------------------
 # Base chart widget
 # ---------------------------------------------------------------------------
@@ -164,8 +171,10 @@ class StackedBarChart(_ChartBase):
         _draw_axes(p, rc)
 
         n = len(self._x_labels)
-        gap = max(4, rc.width() // (n * 4))
-        bar_w = max(4, (rc.width() - gap * (n + 1)) // n)
+        slot = rc.width() / max(n, 1)
+        bar_w = max(1, int(slot * 0.72))
+        if bar_w > 40:
+            bar_w = 40
         totals = [
             sum(s[2][i] for s in self._series if i < len(s[2]))
             for i in range(n)
@@ -179,9 +188,11 @@ class StackedBarChart(_ChartBase):
         f = QFont()
         f.setPointSize(7)
         p.setFont(f)
+        stride = _label_stride(n, max_labels=10)
+        val_stride = _label_stride(n, max_labels=12)
 
         for i, lbl in enumerate(self._x_labels):
-            x = rc.x() + gap + i * (bar_w + gap)
+            x = rc.x() + int(i * slot + (slot - bar_w) / 2)
             bottom = rc.bottom()
             acc = 0.0
             for _name, color, vals in self._series:
@@ -193,13 +204,24 @@ class StackedBarChart(_ChartBase):
                     y_top = bottom - int((acc + v) / max_val * rc.height())
                     p.drawRect(x, y_top, bar_w, h)
                 acc += v
+            # Show total UE above selected bars for readability.
+            if acc > 0 and bar_w >= 8 and (i == n - 1 or i % val_stride == 0):
+                y_top_total = bottom - int(acc / max_val * rc.height())
+                y_text = max(rc.y() + 2, y_top_total - 12)
+                p.setPen(QPen(_TEXT))
+                p.drawText(
+                    QRect(x - 10, y_text, max(22, bar_w + 20), 12),
+                    Qt.AlignmentFlag.AlignCenter,
+                    f"{acc:.1f}",
+                )
             # x-axis label
-            p.setPen(QPen(_MUTED))
-            p.drawText(
-                QRect(x - 4, rc.bottom() + 4, bar_w + 8, 20),
-                Qt.AlignmentFlag.AlignCenter,
-                lbl,
-            )
+            if i == 0 or i == n - 1 or i % stride == 0:
+                p.setPen(QPen(_MUTED))
+                p.drawText(
+                    QRect(x - 10, rc.bottom() + 4, bar_w + 20, 20),
+                    Qt.AlignmentFlag.AlignCenter,
+                    lbl,
+                )
 
         _draw_legend(p, self._series, rc)
         p.end()
@@ -233,7 +255,19 @@ class LineChart(_ChartBase):
         _paint_bg(p, self)
         _draw_axes(p, rc)
 
-        all_v = list(self._values)
+        raw_values = [max(0.0, float(v or 0.0)) for v in self._values]
+        plot_values = list(raw_values)
+        capped = False
+        if len(raw_values) >= 8:
+            sorted_vals = sorted(raw_values)
+            idx = int((len(sorted_vals) - 1) * 0.90)
+            p90 = sorted_vals[idx]
+            cap = max(300.0, p90 * 3.0, float(self._ref_line or 0.0))
+            if any(v > cap for v in raw_values):
+                plot_values = [min(v, cap) for v in raw_values]
+                capped = True
+
+        all_v = list(plot_values)
         if self._ref_line is not None:
             all_v.append(self._ref_line)
         max_val = max(all_v) if all_v else 1.0
@@ -249,7 +283,7 @@ class LineChart(_ChartBase):
         ]
         ys = [
             rc.bottom() - int(v / max_val * rc.height())
-            for v in self._values
+            for v in plot_values
         ]
 
         # Reference line
@@ -279,11 +313,20 @@ class LineChart(_ChartBase):
         f.setPointSize(7)
         p.setFont(f)
         p.setPen(QPen(_MUTED))
-        for x, lbl in zip(xs, self._x_labels):
+        stride = _label_stride(len(xs), max_labels=10)
+        for i, (x, lbl) in enumerate(zip(xs, self._x_labels)):
+            if i == 0 or i == len(xs) - 1 or i % stride == 0:
+                p.drawText(
+                    QRect(x - 24, rc.bottom() + 4, 48, 20),
+                    Qt.AlignmentFlag.AlignCenter,
+                    lbl,
+                )
+        if capped:
+            p.setPen(QPen(_MUTED))
             p.drawText(
-                QRect(x - 20, rc.bottom() + 4, 40, 20),
-                Qt.AlignmentFlag.AlignCenter,
-                lbl,
+                QRect(rc.x(), rc.y() - 12, rc.width(), 12),
+                Qt.AlignmentFlag.AlignRight,
+                "Scaled for outliers",
             )
         p.end()
 
@@ -365,7 +408,7 @@ class PieChart(_ChartBase):
             p.drawText(
                 QRect(cx + 14, cy, col_w - 16, 17),
                 Qt.AlignmentFlag.AlignVCenter,
-                f"{short_lbl} {pct:.0f}%",
+                f"{short_lbl} {pct:.0f}% ({val:.1f})",
             )
         p.end()
 
@@ -514,10 +557,10 @@ class DashboardTab(QWidget):
         root.setSpacing(18)
 
         # ── Title ──────────────────────────────────────────────────────
-        title = QLabel("Dashboard")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6EDF3; letter-spacing: 0.5px;")
-        root.addWidget(title)
+        self.title_label = QLabel("Dashboard")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6EDF3; letter-spacing: 0.5px;")
+        root.addWidget(self.title_label)
 
         # ── Filters ────────────────────────────────────────────────────
         fb = QGroupBox("Filters")
@@ -563,34 +606,39 @@ class DashboardTab(QWidget):
         btn_refresh.setMinimumWidth(90)
         btn_refresh.clicked.connect(self.refresh)
 
-        # Row 0: From | To | Region
-        for col, (lbl_text, widget) in enumerate([
-            ("From:",   self.date_from),
-            ("To:",     self.date_to),
-            ("Region:", self.cmb_region),
-        ]):
-            lbl = QLabel(lbl_text)
+        lbl_from = QLabel("From:")
+        lbl_to = QLabel("To:")
+        lbl_region = QLabel("Region:")
+        lbl_type = QLabel("Type:")
+        lbl_source = QLabel("Source:")
+        for lbl in (lbl_from, lbl_to, lbl_region, lbl_type, lbl_source):
             lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-            flay.addWidget(lbl,    0, col * 2)
-            flay.addWidget(widget, 0, col * 2 + 1)
 
-        # Row 1: Type | Source | Refresh
-        for col, (lbl_text, widget) in enumerate([
-            ("Type:",   self.cmb_type),
-            ("Source:", self.cmb_source),
-        ]):
-            lbl = QLabel(lbl_text)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-            flay.addWidget(lbl,    1, col * 2)
-            flay.addWidget(widget, 1, col * 2 + 1)
+        # Row 0: From | To
+        flay.addWidget(lbl_from, 0, 0)
+        flay.addWidget(self.date_from, 0, 1)
+        flay.addWidget(lbl_to, 0, 2)
+        flay.addWidget(self.date_to, 0, 3)
 
-        flay.addWidget(btn_refresh, 1, 4, Qt.AlignmentFlag.AlignLeft)
-        flay.setColumnStretch(5, 1)
+        # Row 1: Region full width
+        flay.addWidget(lbl_region, 1, 0)
+        flay.addWidget(self.cmb_region, 1, 1, 1, 5)
 
-        # Row 2: Date preset shortcuts
+        # Row 2: Type | Source | Refresh
+        flay.addWidget(lbl_type, 2, 0)
+        flay.addWidget(self.cmb_type, 2, 1)
+        flay.addWidget(lbl_source, 2, 2)
+        flay.addWidget(self.cmb_source, 2, 3)
+        flay.addWidget(btn_refresh, 2, 4, 1, 2, Qt.AlignmentFlag.AlignLeft)
+
+        flay.setColumnStretch(1, 1)
+        flay.setColumnStretch(3, 1)
+        flay.setColumnStretch(5, 2)
+
+        # Row 3: Date preset shortcuts
         presets_lbl = QLabel("Quick:")
         presets_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-        flay.addWidget(presets_lbl, 2, 0)
+        flay.addWidget(presets_lbl, 3, 0)
 
         presets_bar = QWidget()
         presets_layout = QHBoxLayout(presets_bar)
@@ -631,7 +679,7 @@ class DashboardTab(QWidget):
         presets_layout.addWidget(btn_month)
         presets_layout.addStretch()
 
-        flay.addWidget(presets_bar, 2, 1, 1, 5)
+        flay.addWidget(presets_bar, 3, 1, 1, 5)
 
         root.addWidget(fb)
 
@@ -659,12 +707,12 @@ class DashboardTab(QWidget):
         self._bar.setMinimumSize(220, 220)
         self._line = LineChart()
         self._line.setMinimumSize(220, 220)
-        bar_grp  = _chart_group("Daily UE — REG vs OT", self._bar)
-        line_grp = _chart_group("Efficiency % Trend",   self._line)
-        bar_grp.setMinimumHeight(260)
-        line_grp.setMinimumHeight(260)
-        self._ch1.addWidget(bar_grp)
-        self._ch1.addWidget(line_grp)
+        self._bar_grp  = _chart_group("Daily UE — REG vs OT", self._bar)
+        self._line_grp = _chart_group("Efficiency % Trend",   self._line)
+        self._bar_grp.setMinimumHeight(260)
+        self._line_grp.setMinimumHeight(260)
+        self._ch1.addWidget(self._bar_grp)
+        self._ch1.addWidget(self._line_grp)
         root.addLayout(self._ch1)
 
         # ── Charts row 2 ──────────────────────────────────────────────
@@ -674,12 +722,12 @@ class DashboardTab(QWidget):
         self._pie.setMinimumSize(220, 240)
         self._donut = PieChart(hole=0.5)
         self._donut.setMinimumSize(220, 240)
-        pie_grp   = _chart_group("UE by Region",    self._pie)
-        donut_grp = _chart_group("UE by Case Type", self._donut)
-        pie_grp.setMinimumHeight(280)
-        donut_grp.setMinimumHeight(280)
-        self._ch2.addWidget(pie_grp)
-        self._ch2.addWidget(donut_grp)
+        self._pie_grp   = _chart_group("UE by Region",    self._pie)
+        self._donut_grp = _chart_group("UE by Case Type", self._donut)
+        self._pie_grp.setMinimumHeight(280)
+        self._donut_grp.setMinimumHeight(280)
+        self._ch2.addWidget(self._pie_grp)
+        self._ch2.addWidget(self._donut_grp)
         root.addLayout(self._ch2)
 
         # ── Insights panel ────────────────────────────────────────────
@@ -723,8 +771,7 @@ class DashboardTab(QWidget):
         super().resizeEvent(event)
         if not hasattr(self, "_tbl_row"):   # guard: fires before _init_ui completes
             return
-        from PySide6.QtWidgets import QBoxLayout
-        two_col = event.size().width() >= 750
+        two_col = event.size().width() >= 980
         direction = (
             QBoxLayout.Direction.LeftToRight
             if two_col
@@ -773,7 +820,11 @@ class DashboardTab(QWidget):
             where += " AND tipo_caso = ?"
             params.append(tipo)
         sql = (
-            f"SELECT fecha, region, tipo_caso, COUNT(*) AS cnt, SUM(efficiency) AS sum_eff, SUM(case_value) AS sum_cv "
+            f"SELECT fecha, region, tipo_caso, "
+            f"COUNT(*) AS cnt_cases, "
+            f"SUM(CASE WHEN efficiency BETWEEN 0 AND 1000 THEN efficiency ELSE 0 END) AS sum_eff, "
+            f"SUM(CASE WHEN efficiency BETWEEN 0 AND 1000 THEN 1 ELSE 0 END) AS cnt_eff, "
+            f"SUM(case_value) AS sum_cv "
             f"FROM {table} "
             f"WHERE {where} "
             f"GROUP BY fecha, region, tipo_caso "
@@ -785,7 +836,7 @@ class DashboardTab(QWidget):
             conn = get_connection()
             cur  = conn.cursor()
             cur.execute(sql, params)
-            for fecha, reg, tipo_c, cnt, sum_eff, sum_cv in cur.fetchall():
+            for fecha, reg, tipo_c, cnt, sum_eff, cnt_eff, sum_cv in cur.fetchall():
                 ue = calculate_equivalent_units(
                     units_eq,
                     reg or "",
@@ -799,6 +850,7 @@ class DashboardTab(QWidget):
                     "tipo":     tipo_c,
                     "count":    cnt or 0,
                     "sum_eff":  sum_eff or 0.0,
+                    "eff_count": cnt_eff or 0,
                     "ue":       ue,
                 })
             conn.close()
@@ -831,8 +883,10 @@ class DashboardTab(QWidget):
         total_reg  = sum(r["count"]   for r in reg_rows)
         total_ot   = sum(r["count"]   for r in ot_rows)
         total_ue   = sum(r["ue"]      for r in reg_rows) + sum(r["ue"] for r in ot_rows)
-        sum_eff    = sum(r["sum_eff"] for r in reg_rows)
-        avg_eff    = sum_eff / total_reg if total_reg else 0.0
+        all_rows   = reg_rows + ot_rows
+        sum_eff    = sum(r["sum_eff"] for r in all_rows)
+        eff_count  = sum(r.get("eff_count", 0) for r in all_rows)
+        avg_eff    = sum_eff / eff_count if eff_count else 0.0
         total_down = sum(down_map.values())
 
         self.kpi_reg.set_value(str(total_reg))
@@ -848,23 +902,30 @@ class DashboardTab(QWidget):
 
     def _update_charts(self, reg_rows, ot_rows):
         daily: dict[str, dict] = defaultdict(
-            lambda: {"ue_reg": 0.0, "ue_ot": 0.0, "sum_eff": 0.0, "cnt_reg": 0}
+            lambda: {"ue_reg": 0.0, "ue_ot": 0.0, "sum_eff": 0.0, "cnt_eff": 0}
         )
         for r in reg_rows:
             d = daily[r["fecha"]]
             d["ue_reg"]  += r["ue"]
             d["sum_eff"] += r["sum_eff"]
-            d["cnt_reg"] += r["count"]
+            d["cnt_eff"] += r.get("eff_count", 0)
         for r in ot_rows:
-            daily[r["fecha"]]["ue_ot"] += r["ue"]
+            d = daily[r["fecha"]]
+            d["ue_ot"] += r["ue"]
+            d["sum_eff"] += r["sum_eff"]
+            d["cnt_eff"] += r.get("eff_count", 0)
 
         dates  = sorted(daily.keys())
-        short  = [d[5:] for d in dates]          # MM-DD
+        years = {d[:4] for d in dates}
+        if len(years) > 1:
+            short = [f"{d[2:4]}-{d[5:]}" for d in dates]   # YY-MM-DD
+        else:
+            short = [d[5:] for d in dates]                 # MM-DD
         ue_reg = [daily[d]["ue_reg"] for d in dates]
         ue_ot  = [daily[d]["ue_ot"]  for d in dates]
         avg_eff = [
-            daily[d]["sum_eff"] / daily[d]["cnt_reg"]
-            if daily[d]["cnt_reg"] else 0.0
+            daily[d]["sum_eff"] / daily[d]["cnt_eff"]
+            if daily[d]["cnt_eff"] else 0.0
             for d in dates
         ]
 
@@ -882,6 +943,12 @@ class DashboardTab(QWidget):
 
         st = sorted(by_type.items(), key=lambda x: -x[1])
         self._donut.set_data([x[0] for x in st], [x[1] for x in st])
+
+        total_ue = sum(v for _, v in sr)
+        if hasattr(self, "_pie_grp"):
+            self._pie_grp.setTitle(f"UE by Region (% of {total_ue:.2f} total UE)")
+        if hasattr(self, "_donut_grp"):
+            self._donut_grp.setTitle(f"UE by Case Type (% of {total_ue:.2f} total UE)")
 
     # ------------------------------------------------------------------
     # Advice update
@@ -968,12 +1035,13 @@ class DashboardTab(QWidget):
         high_eff_rows = []   # (avg, loc)
         low_eff_rows  = []   # (avg, loc)
         for r in reg_rows:
-            if r["count"] > 0:
-                avg = r["sum_eff"] / r["count"]
+            eff_n = r.get("eff_count", 0)
+            if eff_n > 0:
+                avg = r["sum_eff"] / eff_n
                 loc = f"{r['fecha']} | {r['region']} | {r['tipo']}"
                 if avg > 300:
                     high_eff_rows.append((avg, loc))
-                elif avg < 20 and r["count"] >= 3:
+                elif avg < 20 and eff_n >= 3:
                     low_eff_rows.append((avg, loc))
 
         if len(high_eff_rows) == 1:
@@ -1147,17 +1215,20 @@ class DashboardTab(QWidget):
     def _update_daily_table(self, reg_rows, ot_rows, down_map):
         daily: dict[str, dict] = defaultdict(
             lambda: {"reg": 0, "ot": 0, "ue_reg": 0.0, "ue_ot": 0.0,
-                     "sum_eff": 0.0, "down": 0.0}
+                     "sum_eff": 0.0, "eff_count": 0, "down": 0.0}
         )
         for r in reg_rows:
             d = daily[r["fecha"]]
             d["reg"]     += r["count"]
             d["ue_reg"]  += r["ue"]
             d["sum_eff"] += r["sum_eff"]
+            d["eff_count"] += r.get("eff_count", 0)
         for r in ot_rows:
             d = daily[r["fecha"]]
             d["ot"]    += r["count"]
             d["ue_ot"] += r["ue"]
+            d["sum_eff"] += r["sum_eff"]
+            d["eff_count"] += r.get("eff_count", 0)
         for fecha, mins in down_map.items():
             daily[fecha]["down"] = mins
 
@@ -1165,7 +1236,7 @@ class DashboardTab(QWidget):
         self.tbl_daily.setRowCount(len(dates))
         for i, fecha in enumerate(dates):
             d   = daily[fecha]
-            avg = d["sum_eff"] / d["reg"] if d["reg"] else 0.0
+            avg = d["sum_eff"] / d["eff_count"] if d["eff_count"] else 0.0
             _fill_row(self.tbl_daily, i, [
                 fecha,
                 str(d["reg"]),
@@ -1182,23 +1253,26 @@ class DashboardTab(QWidget):
 
     def _update_region_table(self, reg_rows, ot_rows):
         by_region: dict[str, dict] = defaultdict(
-            lambda: {"reg": 0, "ot": 0, "ue": 0.0, "sum_eff": 0.0}
+            lambda: {"reg": 0, "ot": 0, "ue": 0.0, "sum_eff": 0.0, "eff_count": 0}
         )
         for r in reg_rows:
             d = by_region[r["region"] or "Unknown"]
             d["reg"]     += r["count"]
             d["ue"]      += r["ue"]
             d["sum_eff"] += r["sum_eff"]
+            d["eff_count"] += r.get("eff_count", 0)
         for r in ot_rows:
             d = by_region[r["region"] or "Unknown"]
             d["ot"] += r["count"]
             d["ue"] += r["ue"]
+            d["sum_eff"] += r["sum_eff"]
+            d["eff_count"] += r.get("eff_count", 0)
 
         regions = sorted(by_region.keys())
         self.tbl_region.setRowCount(len(regions))
         for i, region in enumerate(regions):
             d   = by_region[region]
-            avg = d["sum_eff"] / d["reg"] if d["reg"] else 0.0
+            avg = d["sum_eff"] / d["eff_count"] if d["eff_count"] else 0.0
             _fill_row(self.tbl_region, i, [
                 region,
                 str(d["reg"]),
@@ -1212,4 +1286,7 @@ class DashboardTab(QWidget):
     # ------------------------------------------------------------------
 
     def update_theme_labels(self, is_light: bool):
-        pass
+        if is_light:
+            self.title_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #111; letter-spacing: 0.5px;")
+        else:
+            self.title_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6EDF3; letter-spacing: 0.5px;")

@@ -4,12 +4,15 @@ import threading
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTimeEdit, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QComboBox, QMessageBox,
-    QHeaderView, QDialog, QTextEdit, QDialogButtonBox, QVBoxLayout, QLabel
+    QHeaderView, QDialog, QTextEdit, QDialogButtonBox, QSizePolicy,
+    QApplication,
 )
 from PySide6.QtCore import QTime, QDate, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from db.database import get_connection
+from .theme_table_utils import CLR_FG_LIGHT
 from sync.app_config import load_config
+from sync.app_logger import log_event
 from datetime import datetime
 try:
     from sync.downtime_approval import (
@@ -25,8 +28,22 @@ except Exception as _approval_err:
 try:
     from sync.teams_notify import notify_downtime_submitted
     _TEAMS_OK = True
-except Exception:
+except Exception as _teams_err:
+    log_event("downtime_manager", f"teams notify module unavailable: {_teams_err}", level="WARN")
     _TEAMS_OK = False
+
+
+# Reasons that affect the whole team and do NOT require supervisor approval.
+# Downtimes with these reasons are inserted with status='approved' and skip the
+# approval export + Teams notification.
+AUTO_APPROVED_REASONS = {
+    "Corporate Event",
+    "Evacuation Drill",
+    "Extended Weekly Huddle",
+    "Gemba & listening Events",
+    "Spark Town Hall",
+    "Team Meeting",
+}
 
 
 class DowntimeManager(QWidget):
@@ -51,7 +68,25 @@ class DowntimeManager(QWidget):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(15_000)  # 15 seconds
         self._poll_timer.timeout.connect(self._poll_approvals)
+        self._poll_timer.timeout.connect(self.load_downtimes)
         self._poll_timer.start()
+        # Stop the timer if the widget is destroyed so it can't fire on a
+        # deleted C++ object (which would crash the app on shutdown).
+        self.destroyed.connect(self._stop_poll_timer)
+
+    def _stop_poll_timer(self, *_args):
+        """Idempotent timer stop. Called on widget destruction and on close."""
+        timer = getattr(self, "_poll_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._poll_timer = None
+
+    def closeEvent(self, event):
+        self._stop_poll_timer()
+        super().closeEvent(event)
 
     def _handle_poll_result(self, updated: int):
         """Handle poll results on the main thread (via signal)."""
@@ -62,8 +97,8 @@ class DowntimeManager(QWidget):
             try:
                 from sync.sharepoint_sync import export_to_sharepoint
                 threading.Thread(target=export_to_sharepoint, daemon=True).start()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_event("downtime_manager", f"post-approval sharepoint export trigger failed: {exc}", level="WARN")
 
     def _poll_approvals(self, silent: bool = True):
         """Poll the shared approval Excel for supervisor responses."""
@@ -114,6 +149,7 @@ class DowntimeManager(QWidget):
                     f"({mins}m {secs}s ago).\n"
                     "If the supervisor already responded, OneDrive may not have synced yet.")
         except Exception:
+            log_event("downtime_manager", "approval file info read failed", level="WARN")
             return ""
 
     def set_date(self, date_str: str):
@@ -124,20 +160,22 @@ class DowntimeManager(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(8)
 
         # Input section
         input_layout = QHBoxLayout()
+        input_layout.setSpacing(6)
 
         input_layout.addWidget(QLabel("Start:"))
         self.downtime_start = QTimeEdit()
         self.downtime_start.setTime(QTime.currentTime())
-        self.downtime_start.setMaximumWidth(90)
+        self.downtime_start.setMinimumWidth(90)
         input_layout.addWidget(self.downtime_start)
 
         input_layout.addWidget(QLabel("End:"))
         self.downtime_end = QTimeEdit()
         self.downtime_end.setTime(QTime.currentTime())
-        self.downtime_end.setMaximumWidth(90)
+        self.downtime_end.setMinimumWidth(90)
         input_layout.addWidget(self.downtime_end)
 
         input_layout.addWidget(QLabel("Reason:"))
@@ -178,13 +216,23 @@ class DowntimeManager(QWidget):
             "Software",
             "Spark Town Hall",
             "Survey",
+            "Team Meeting",
             "Training",
             "Translation",
             "WorkDay Courses"
 
         ])
-        self.downtime_reason.setMaximumWidth(135)
+        self.downtime_reason.setMinimumWidth(180)
+        self.downtime_reason.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.downtime_reason.setStyleSheet("""
+            QComboBox { padding-right: 26px; }
+            QComboBox::drop-down {
+                width: 22px;
+                border-left: 1px solid rgba(130, 130, 130, 0.35);
+            }
+        """)
         input_layout.addWidget(self.downtime_reason)
+        input_layout.setStretch(input_layout.count() - 1, 1)
 
         add_btn = QPushButton("Add")
         add_btn.setMaximumWidth(75)
@@ -197,14 +245,19 @@ class DowntimeManager(QWidget):
 
         # Table
         self.table = QTableWidget()
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(["Start", "End", "Dur.(min)", "Reason", "Status", "Responded By"])
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.cellClicked.connect(self.on_cell_clicked)
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table.setStyleSheet("""
+            QTableWidget::item:selected {
+                background-color: transparent;
+            }
+        """)
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
@@ -217,6 +270,8 @@ class DowntimeManager(QWidget):
         self.table.setColumnWidth(2, 72)
         self.table.setColumnWidth(4, 70)
         self.table.setColumnWidth(5, 120)
+        self.table.setMinimumHeight(180)
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         main_layout.addWidget(self.table)
 
         # Buttons layout - centered
@@ -243,6 +298,7 @@ class DowntimeManager(QWidget):
         main_layout.addLayout(buttons_layout)
 
         self.setLayout(main_layout)
+        self._apply_table_layout_mode()
 
     def add_downtime(self):
         start = self.downtime_start.time().toString("HH:mm")
@@ -256,21 +312,25 @@ class DowntimeManager(QWidget):
         if duration < 0:
             duration += 24 * 60
 
-        detalle = self._get_downtime_detail()
+        detalle = self._get_downtime_detail(reason)
         if detalle is None:
             return  # Cancelado por el usuario
+
+        auto_approve = reason in AUTO_APPROVED_REASONS
+        initial_status = "approved" if auto_approve else "pending"
 
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO downtimes (fecha, hora_inicio, hora_fin, razon, duracion, status, detalle)
-            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             self.current_date,
             start,
             end,
             reason,
             duration,
+            initial_status,
             detalle
         ))
         dt_id = cursor.lastrowid
@@ -279,6 +339,15 @@ class DowntimeManager(QWidget):
         self.load_downtimes()
         self.downtime_start.setTime(QTime.currentTime())
         self.downtime_end.setTime(QTime.currentTime())
+
+        # Team-wide reasons skip approval workflow entirely
+        if auto_approve:
+            log_event("downtime_manager",
+                      f"auto-approved team downtime: {reason} ({duration} min)",
+                      level="INFO")
+            if self.on_update_callback:
+                self.on_update_callback()
+            return
 
         # Export + Teams notification in background to avoid blocking UI
         if _APPROVAL_OK or _TEAMS_OK:
@@ -301,13 +370,23 @@ class DowntimeManager(QWidget):
         if self.on_update_callback:
             self.on_update_callback()
 
-    def _get_downtime_detail(self) -> str:
+    def _get_downtime_detail(self, reason: str) -> str | None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Detalle")
-        dialog.setFixedSize(320, 150)
+        needs_case_id = reason.strip().lower() == "multitreatment"
+        dialog.setMinimumWidth(360)
+        dialog.setMinimumHeight(170 if not needs_case_id else 215)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+        case_id_input = None
+        if needs_case_id:
+            case_label = QLabel("Case ID (requerido para Multitreatment):")
+            case_label.setStyleSheet("font-size: 11px;")
+            layout.addWidget(case_label)
+            case_id_input = QLineEdit()
+            case_id_input.setPlaceholderText("Ej: 123456789")
+            layout.addWidget(case_id_input)
         label = QLabel("Describe el motivo del downtime:")
         label.setStyleSheet("font-size: 11px;")
         layout.addWidget(label)
@@ -320,8 +399,38 @@ class DowntimeManager(QWidget):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         if dialog.exec() == QDialog.Accepted:
-            return text_edit.toPlainText().strip()
+            detail = text_edit.toPlainText().strip()
+            if needs_case_id:
+                case_id = (case_id_input.text().strip() if case_id_input else "")
+                if not case_id:
+                    QMessageBox.warning(self, "Case ID requerido", "Para Multitreatment debes ingresar Case ID.")
+                    return None
+                if detail:
+                    return f"Case ID: {case_id} | {detail}"
+                return f"Case ID: {case_id}"
+            return detail
         return None
+
+    def _is_light_mode(self) -> bool:
+        app = QApplication.instance()
+        if not app:
+            return False
+        return "background-color: #F6F8FA" in (app.styleSheet() or "")
+
+    def update_theme_labels(self, is_light: bool):
+        """Hook called by parent when theme changes — reloads table so item
+        foregrounds are recomputed with the new theme."""
+        self.load_downtimes()
+
+    def _normalize_status(self, status: str) -> str:
+        s = (status or "").strip().lower()
+        if s in ("accept", "accepted", "approve"):
+            return "approved"
+        if s in ("reject",):
+            return "rejected"
+        if s in ("pending", "approved", "rejected"):
+            return s
+        return "approved"
 
     def load_downtimes(self):
         conn = get_connection()
@@ -338,13 +447,21 @@ class DowntimeManager(QWidget):
         rows = cursor.fetchall()
         conn.close()
 
+        # Reset cell widgets from previous load to avoid stale labels stacking
+        for _r in range(self.table.rowCount()):
+            self.table.removeCellWidget(_r, 4)
         self.table.setRowCount(len(rows))
         self.row_ids = []
 
         _STATUS_COLORS = {
-            "pending":  QColor(255, 193, 7),    # amber
-            "rejected": QColor(244, 67, 54),    # red
-            "approved": QColor(76, 175, 80),    # green
+            "pending":  QColor(0, 0, 0, 0),     # transparent background
+            "rejected": QColor(0, 0, 0, 0),     # transparent background
+            "approved": QColor(0, 0, 0, 0),     # transparent background
+        }
+        _STATUS_TEXT_COLORS = {
+            "pending":  QColor("#F1C40F"),       # yellow text
+            "rejected": QColor("#E74C3C"),       # red text
+            "approved": QColor("#2ECC71"),       # green text
         }
         _STATUS_LABELS = {
             "pending":  "Pending",
@@ -354,7 +471,7 @@ class DowntimeManager(QWidget):
 
         for idx, row in enumerate(rows):
             row_id, start, end, duration, reason, status, detalle, resp_by, resp_at = row
-            status = (status or "approved").lower()
+            status = self._normalize_status(status)
             resp_by = resp_by or ""
             resp_at = resp_at or ""
 
@@ -379,8 +496,13 @@ class DowntimeManager(QWidget):
                     resp_tooltip += f"\nDate/Time: {resp_at}"
                 resp_tooltip += f"\nDecision: {_STATUS_LABELS.get(status, status)}"
 
+            is_light = self._is_light_mode()
+            fg_default = QColor("#1F2328") if is_light else CLR_FG_LIGHT
             for col, val in enumerate(values):
-                item = QTableWidgetItem(str(val))
+                # Col 4 (Status) is rendered via a QLabel widget below; keep
+                # the underlying item empty so text doesn't bleed through.
+                item_text = "" if col == 4 else str(val)
+                item = QTableWidgetItem(item_text)
                 if col == 5 and resp_tooltip:
                     item.setToolTip(resp_tooltip)
                 else:
@@ -388,14 +510,47 @@ class DowntimeManager(QWidget):
                 # Only colour the Status cell (col 4); highlight entire row when editing
                 if self.edit_mode and idx == self.current_edit_row:
                     item.setBackground(QColor(70, 130, 180))
+                    item.setForeground(QColor("#FFFFFF"))
                 elif col == 4:
-                    item.setBackground(_STATUS_COLORS.get(status, QColor(128, 128, 128)))
-                    item.setForeground(QColor(255, 255, 255))
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                else:
+                    item.setForeground(fg_default)
                 self.table.setItem(idx, col, item)
+
+                # Status cell: setCellWidget bypasses the global QTableWidget::item
+                # stylesheet that otherwise suppresses setBackground() on items.
+                if col == 4:
+                    if self.edit_mode and idx == self.current_edit_row:
+                        bg_css, fg_css = "#4682B4", "#FFFFFF"
+                    else:
+                        bg = _STATUS_COLORS.get(status, QColor(128, 128, 128))
+                        fg = _STATUS_TEXT_COLORS.get(status, CLR_FG_LIGHT)
+                        bg_css = "transparent" if bg.alpha() == 0 else bg.name()
+                        fg_css = fg.name()
+                    lbl = QLabel(_STATUS_LABELS.get(status, status))
+                    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    lbl.setStyleSheet(
+                        f"background-color: {bg_css}; color: {fg_css}; padding: 0px;"
+                    )
+                    self.table.setCellWidget(idx, 4, lbl)
 
             self.row_ids.append(row_id)
 
         # Fixed columns are set once in init_ui; Reason stretches automatically
+        self._apply_table_layout_mode()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_table_layout_mode()
+
+    def _apply_table_layout_mode(self):
+        """Adjust table columns for narrow layouts so rows remain visible."""
+        compact = self.width() < 560
+        self.table.setColumnWidth(0, 64 if compact else 72)   # Start
+        self.table.setColumnWidth(1, 64 if compact else 72)   # End
+        self.table.setColumnWidth(2, 74 if compact else 86)   # Dur(min)
+        self.table.setColumnWidth(4, 70 if compact else 80)   # Status
+        self.table.setColumnWidth(5, 86 if compact else 108)  # Responded By
 
     def on_cell_clicked(self, row, column):
         """Handle cell click - delete if in delete mode"""
@@ -442,16 +597,17 @@ class DowntimeManager(QWidget):
         if duration < 0:
             duration += 24 * 60
         
-        # Update database
+        # Update database (team-wide reasons auto-approve on edit too)
+        new_status = "approved" if reason in AUTO_APPROVED_REASONS else "pending"
         row_id = self.row_ids[self.current_edit_row]
         conn = get_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             UPDATE downtimes
-            SET hora_inicio = ?, hora_fin = ?, razon = ?, duracion = ?, status = 'pending'
+            SET hora_inicio = ?, hora_fin = ?, razon = ?, duracion = ?, status = ?
             WHERE id = ?
-        """, (start, end, reason, duration, row_id))
+        """, (start, end, reason, duration, new_status, row_id))
         
         conn.commit()
         conn.close()

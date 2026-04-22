@@ -18,7 +18,8 @@ import time
 from datetime import datetime, date
 
 from db.database import get_connection
-from sync.app_config import load_config
+from sync.app_config import load_config, get_excel_sheet_password
+from sync.app_logger import log_event
 from tabs.utils import (
     DAILY_BASE_MINUTES,
     load_units_eq_data,
@@ -28,6 +29,7 @@ from tabs.utils import (
 
 PRODUCTION_TARGET_PCT = 95.0
 UE_TARGET = 14.0
+_EXCEL_RETRY_SLEEP_S = 1  # wait between Excel save retries (file lock)
 
 SHARED_JUSTIFICATION_FILE = "_Daily_Justifications.xlsx"
 
@@ -328,8 +330,8 @@ def export_justification(designer_name: str, fecha: str, metrics: dict, justific
                         if r_designer != designer_name.strip().lower() or r_date != fecha:
                             existing_over.append(r)
             wb_old.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event("daily_performance", f"read old justification wb: {exc}", level="WARN")
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -390,7 +392,7 @@ def export_justification(designer_name: str, fecha: str, metrics: dict, justific
 
     # Protect entire sheet — read-only but allow filtering
     ws.protection.sheet = True
-    ws.protection.password = "spark2026"
+    ws.protection.password = get_excel_sheet_password()
     ws.protection.autoFilter = False
     ws.protection.sort = False
     ws.protection.enable()
@@ -450,7 +452,7 @@ def export_justification(designer_name: str, fecha: str, metrics: dict, justific
     ws2.auto_filter.ref = f"A1:K{ov_idx}"
 
     ws2.protection.sheet = True
-    ws2.protection.password = "spark2026"
+    ws2.protection.password = get_excel_sheet_password()
     ws2.protection.autoFilter = False
     ws2.protection.sort = False
     ws2.protection.enable()
@@ -462,7 +464,8 @@ def export_justification(designer_name: str, fecha: str, metrics: dict, justific
             return True
         except PermissionError:
             if attempt < 2:
-                time.sleep(1)
-        except Exception:
+                time.sleep(_EXCEL_RETRY_SLEEP_S)
+        except Exception as exc:
+            log_event("daily_performance", f"save justification attempt {attempt + 1}: {exc}", level="WARN")
             return False
     return False

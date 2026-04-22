@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit,
-    QPushButton, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox
+    QPushButton, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QApplication
 )
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QBrush
@@ -13,6 +13,10 @@ from .utils import (
     calculate_equivalent_units,
     calculate_downtime_equivalent_units,
     DAILY_BASE_MINUTES,
+)
+from .theme_table_utils import (
+    apply_table_theme, CLR_FG_LIGHT, CLR_FG_DARK,
+    get_light_theme_colors, light_row_bg, light_header_bg, light_header_fg, mix_hex,
 )
 
 
@@ -115,7 +119,7 @@ class ProductionTab(QWidget):
         self.stats_avg = QLabel("Avg Eff: -")
         self.stats_total = QLabel("Cases: -")
         self.stats_ok = QLabel("Value: -")
-        self.stats_low = QLabel("🟢OK: - | 🔴LOW: -")
+        self.stats_low = QLabel("OK: - | LOW: -")
 
         # Saved dark-mode style for stats so we can restore it on theme change
         stat_dark_style = "padding: 6px 12px; border: 1px solid #3c3c3c; border-radius: 4px; background-color: #2b2b2b; font-size: 11px;"
@@ -186,7 +190,7 @@ class ProductionTab(QWidget):
         self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
             "Case ID", "Doctor", "Region", "Type", "Start", "End", 
-            "Time", "Eff %", "Value %", "Und Eq"
+            "Time", "Eff %", "Value %", "UE"
         ])
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(True)
@@ -209,7 +213,7 @@ class ProductionTab(QWidget):
         
         # Set column widths - Doctor bigger, Value same as Type
         header = self.table.horizontalHeader()
-        self.table.setColumnWidth(0, 85)   # Case ID
+        self.table.setColumnWidth(0, 115)  # Case ID
         self.table.setColumnWidth(1, 100)  # Doctor
         self.table.setColumnWidth(2, 100)  # Region
         self.table.setColumnWidth(3, 70)   # Type
@@ -220,13 +224,13 @@ class ProductionTab(QWidget):
         self.table.setColumnWidth(8, 60)   # Value
         self.table.setColumnWidth(9, 50)   # Units Eq
         header.setStretchLastSection(False)
-        
-        # Set fixed width for table - reduced to eliminate empty space
-        table_width = 95 + 100 + 100 + 70 + 55 + 55 + 40 + 50 + 60 + 50 + 10  # columns + 5px
-        self.table.setFixedWidth(table_width)
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # Set max width - table shows horizontal scroll if window narrower
+        table_width = 115 + 100 + 100 + 70 + 55 + 55 + 40 + 55 + 60 + 50 + 15  # columns + padding
+        self.table.setMaximumWidth(table_width)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.setMinimumHeight(200)  # Minimum height
-        
+
         # Use a container to center the table while allowing it to grow
         table_container = QHBoxLayout()
         table_container.addStretch()
@@ -288,20 +292,20 @@ class ProductionTab(QWidget):
         self.setLayout(main_layout)
 
     def resizeEvent(self, event):
-        """Hide Eff % column when width < 695px and adjust table width"""
+        """Hide Eff % column when width < 725px and adjust table width"""
         super().resizeEvent(event)
         width = event.size().width()
-        
-        # Column widths: 85+100+100+70+55+55+40+55+60+50+15 = 685 (full)
-        # Without Eff: 85+100+100+70+55+55+40+60+50+15 = 630
-        
+
+        # Column widths: 115+100+100+70+55+55+40+55+60+50+15 = 715 (full)
+        # Without Eff: 115+100+100+70+55+55+40+60+50+15 = 660
+
         # Column 7 is "Eff %"
-        if width < 695:
+        if width < 725:
             self.table.setColumnHidden(7, True)
-            self.table.setFixedWidth(630)  # Without Eff column
+            self.table.setFixedWidth(660)  # Without Eff column
         else:
             self.table.setColumnHidden(7, False)
-            self.table.setFixedWidth(685)  # Full width
+            self.table.setFixedWidth(715)  # Full width
 
     def load_regions_and_types(self):
         """Load unique regions and types for filters based on current mode"""
@@ -465,10 +469,10 @@ class ProductionTab(QWidget):
         total_value = sum(row[11] for row in prod_filtered)  # case_value at index 11
         avg_efficiency = sum(row[9] for row in prod_filtered) / total_cases if total_cases > 0 else 0  # efficiency at index 9
 
-        self.stats_avg.setText(f"Avg Eff: {avg_efficiency:.1f}%")
-        self.stats_total.setText(f"Cases: {total_cases}")
-        self.stats_ok.setText(f"Value: {total_value:.2f}%")
-        self.stats_low.setText(f"🟢OK: {ok_count} | 🔴LOW: {low_count}")
+        self.stats_avg.setText(f"Avg Eff: {avg_efficiency:,.1f}%")
+        self.stats_total.setText(f"Cases: {total_cases:,}")
+        self.stats_ok.setText(f"Value: {total_value:,.2f}%")
+        self.stats_low.setText(f"OK: {ok_count:,} | LOW: {low_count:,}")
         
         # Determine current theme using application palette
         try:
@@ -478,6 +482,7 @@ class ProductionTab(QWidget):
             current_is_light = win_color.lightness() > 128
         except Exception:
             current_is_light = False
+        light_colors = get_light_theme_colors()
 
         sorted_dates = sorted(grouped.keys(), reverse=True)
 
@@ -485,16 +490,18 @@ class ProductionTab(QWidget):
         _dt_map = {}
         if sorted_dates:
             conn_dt = get_connection()
-            cur_dt = conn_dt.cursor()
-            placeholders = ",".join("?" for _ in sorted_dates)
-            cur_dt.execute(
-                f"SELECT fecha, SUM(duracion) FROM downtimes "
-                f"WHERE fecha IN ({placeholders}) AND (status = 'approved' OR status IS NULL) "
-                f"GROUP BY fecha",
-                sorted_dates,
-            )
-            _dt_map = {r[0]: r[1] for r in cur_dt.fetchall()}
-            conn_dt.close()
+            try:
+                cur_dt = conn_dt.cursor()
+                placeholders = ",".join("?" for _ in sorted_dates)
+                cur_dt.execute(
+                    f"SELECT fecha, SUM(duracion) FROM downtimes "
+                    f"WHERE fecha IN ({placeholders}) AND (status = 'approved' OR status IS NULL) "
+                    f"GROUP BY fecha",
+                    sorted_dates,
+                )
+                _dt_map = {r[0]: r[1] for r in cur_dt.fetchall()}
+            finally:
+                conn_dt.close()
 
         # Count rows needed (date header rows + type-breakdown row + cases)
         total_rows = 0
@@ -529,8 +536,8 @@ class ProductionTab(QWidget):
 
             # Theme colors for header rows
             if current_is_light:
-                date_bg = QColor(230, 230, 230)
-                date_fg = QColor(34, 32, 56)
+                date_bg = QColor(light_header_bg(light_colors))
+                date_fg = QColor(light_header_fg(light_colors))
             else:
                 date_bg = QColor(75, 75, 85)
                 date_fg = QColor(220, 220, 220)
@@ -572,8 +579,8 @@ class ProductionTab(QWidget):
                 )
                 units_item = QTableWidgetItem(line2)
                 if current_is_light:
-                    u_bg = QColor(220, 220, 230)
-                    u_fg = QColor(50, 50, 80)
+                    u_bg = QColor(mix_hex(light_colors["surface_bg"], light_colors["selection_bg"], 0.50))
+                    u_fg = QColor(light_colors["text_primary"])
                 else:
                     u_bg = QColor(65, 65, 78)
                     u_fg = QColor(200, 210, 225)
@@ -599,8 +606,8 @@ class ProductionTab(QWidget):
             breakdown_text = "    " + "   │   ".join(breakdown_parts) + "    "
             breakdown_item = QTableWidgetItem(breakdown_text)
             if current_is_light:
-                sub_bg = QColor(215, 215, 225)
-                sub_fg = QColor(60, 60, 90)
+                sub_bg = QColor(mix_hex(light_colors["surface_bg"], light_colors["selection_bg"], 0.70))
+                sub_fg = QColor(light_colors["text_muted"])
             else:
                 sub_bg = QColor(55, 55, 68)
                 sub_fg = QColor(180, 195, 210)
@@ -627,29 +634,32 @@ class ProductionTab(QWidget):
                 # Check if case counts for production (count_production at index 12)
                 # Default to 1 if None or not present
                 counts_for_production = case[12] if (len(case) > 12 and case[12] is not None) else 1
-                
-                # Yellow background for cases that don't count (count_production == 0)
-                if counts_for_production == 0:
-                    bg_color = QColor(180, 150, 50)  # Yellow/gold for non-counting cases
+
+                if current_is_light:
+                    bg_color = light_row_bg(case_idx, light_colors)
                 else:
-                    if current_is_light:
-                        bg_color = QColor(255, 255, 255) if (case_idx % 2 == 0) else QColor(250, 250, 250)
-                    else:
-                        bg_color = QColor(43, 43, 43) if (case_idx % 2 == 0) else QColor(55, 55, 55)
-                
+                    bg_color = QColor(43, 43, 43) if (case_idx % 2 == 0) else QColor(55, 55, 55)
+
                 bg_brush = QBrush(bg_color)
-                
+
                 # Case ID - Bold (case_id at index 1)
-                # Determine text color for row based on theme
-                text_color = QColor(34, 32, 56) if current_is_light else QColor(255, 255, 255)
+                # Determine text color for row based on theme; dim grey for non-counting cases
+                if counts_for_production == 0:
+                    text_color = QColor("#A15C00") if current_is_light else QColor("#F0883E")
+                else:
+                    text_color = CLR_FG_DARK if current_is_light else CLR_FG_LIGHT
 
                 comment = (case[13] if len(case) > 13 else "") or ""
                 case_id_text = f"{case[1]} \U0001F4AC" if comment.strip() else str(case[1])
+                if counts_for_production == 0:
+                    case_id_text = f"{case_id_text} (NC)"
                 case_id_item = QTableWidgetItem(case_id_text)
                 case_id_item.setBackground(bg_brush)
                 case_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 bold_font = QFont()
                 bold_font.setBold(True)
+                if counts_for_production == 0:
+                    bold_font.setItalic(True)
                 case_id_item.setFont(bold_font)
                 case_id_item.setForeground(QBrush(text_color))
                 if comment.strip():
@@ -689,7 +699,7 @@ class ProductionTab(QWidget):
                 else:
                     time_item.setBackground(QBrush(QColor(244, 67, 54)))  # Red
                 # time badge text should be white for contrast
-                time_item.setForeground(QBrush(QColor(255, 255, 255)))
+                time_item.setForeground(QBrush(CLR_FG_LIGHT))
                 time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row_idx, 6, time_item)
                 
@@ -709,7 +719,7 @@ class ProductionTab(QWidget):
                         efficiency_item.setBackground(QBrush(QColor(255, 193, 7)))
                     else:
                         efficiency_item.setBackground(QBrush(QColor(244, 67, 54)))
-                    eff_text_color = QColor(34, 32, 56) if current_is_light else QColor(255, 255, 255)
+                    eff_text_color = CLR_FG_DARK if current_is_light else CLR_FG_LIGHT
                     efficiency_item.setForeground(QBrush(eff_text_color))
                 else:
                     # fallback to estado-based coloring
@@ -717,7 +727,7 @@ class ProductionTab(QWidget):
                         efficiency_item.setBackground(QBrush(QColor(76, 175, 80)))
                     else:
                         efficiency_item.setBackground(QBrush(QColor(244, 67, 54)))
-                    efficiency_item.setForeground(QBrush(QColor(255, 255, 255)))
+                    efficiency_item.setForeground(QBrush(CLR_FG_LIGHT))
                 self.table.setItem(row_idx, 7, efficiency_item)
                 
                 # Case Value - no color, same background as other columns
@@ -736,6 +746,16 @@ class ProductionTab(QWidget):
                 self.table.setItem(row_idx, 9, units_eq_item)
                 
                 row_idx += 1
+
+        # Tooltip pass: show full content on hover for truncated cells.
+        for r in range(self.table.rowCount()):
+            for c in range(self.table.columnCount()):
+                item = self.table.item(r, c)
+                if not item:
+                    continue
+                text = item.text() or ""
+                if text and not item.toolTip():
+                    item.setToolTip(text)
 
     def edit_selected_case(self):
         """Emit signal to edit selected case - handled by main window"""
@@ -799,20 +819,19 @@ class ProductionTab(QWidget):
     def update_theme_labels(self, is_light: bool):
         """Adjust widgets when theme changes.
 
-        - In light mode: make Regular button use the app purple `#725AC1` when active,
-          ensure OT button keeps its style, and make stat labels use a light background
-          with purple text to match the light theme.
+        - In light mode: use user-configured light palette for table, buttons and stats.
         - In dark mode: restore the previous dark styles.
         """
+        colors = get_light_theme_colors()
         # Foreground color for table items: dark text on light theme, white on dark
-        fg_color = QColor(34, 32, 56) if is_light else QColor(255, 255, 255)
+        fg_color = QColor(colors["text_primary"]) if is_light else CLR_FG_LIGHT
 
         # Title color: use dark primary text in light mode, original blue in dark
         try:
             for lbl in self.findChildren(QLabel):
                 if lbl.text().strip() == "Production & Percentages":
                     if is_light:
-                        lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #242038;")
+                        lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {colors['text_primary']};")
                     else:
                         lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #4aa3ff;")
                     break
@@ -821,59 +840,41 @@ class ProductionTab(QWidget):
 
         # Light-mode stylesheet to match Downtime visuals
         light_bg_css = (
-            ' QTableWidget { background-color: #efefef; gridline-color: #e0e0e0; } '
-            ' QHeaderView::section { background-color: #8D86C9; color: white; border: none; padding: 6px; } '
+            f' QTableWidget {{ background-color: {colors["surface_bg"]}; gridline-color: {colors["border"]}; border: 1px solid {colors["border"]}; }} '
+            f' QHeaderView::section {{ background-color: {light_header_bg(colors)}; color: {light_header_fg(colors)}; border: 1px solid {colors["border"]}; padding: 6px; }} '
         )
 
-        for table in self.findChildren(QTableWidget):
-            # apply or restore stylesheet
-            if is_light:
-                base = getattr(table, '_saved_style', table.styleSheet() or '')
-                table.setStyleSheet(base + light_bg_css)
-            else:
-                if hasattr(table, '_saved_style'):
-                    table.setStyleSheet(table._saved_style)
-
-            # Update each item's foreground based on its background for good contrast.
-            for r in range(table.rowCount()):
-                for c in range(table.columnCount()):
-                    item = table.item(r, c)
-                    if item:
-                        bg = item.background().color() if item.background() else None
-                        if bg is None:
-                            # fallback to theme-level fg
-                            fg = fg_color
-                        else:
-                            fg = QColor(34, 32, 56) if bg.lightness() > 128 else QColor(255, 255, 255)
-                        item.setForeground(QBrush(fg))
+        apply_table_theme(
+            self,
+            is_light,
+            light_append_css=light_bg_css,
+            adaptive_fg_by_bg=True,
+            adaptive_default_fg=fg_color,
+        )
 
         # Adjust Regular / OT button colors to match light theme preferences
         try:
             if is_light:
-                # Regular active color = purple #725AC1, OT keep its orange when active
                 if self.current_mode == 'reg':
                     self.btn_reg.setStyleSheet("""
-                        QPushButton { background-color: #725AC1; color: white; border: none; border-radius: 4px; font-weight: bold; }
+                        QPushButton { background-color: """ + colors["accent"] + """; color: white; border: none; border-radius: 4px; font-weight: bold; }
                     """)
-                    # OT inactive in light mode
-                    self.btn_ot.setStyleSheet("""
-                        QPushButton { background-color: #3c3c3c; color: white; border: 1px solid #5a5a5a; border-radius: 4px; font-weight: bold; }
-                        QPushButton:hover { background-color: #4a4a4a; }
-                    """)
+                    self.btn_ot.setStyleSheet(
+                        f"QPushButton {{ background-color: {colors['button_bg']}; color: {colors['text_primary']}; "
+                        f"border: 1px solid {colors['border']}; border-radius: 4px; font-weight: bold; }}"
+                    )
                 else:
-                    # OT active, regular inactive
                     self.btn_ot.setStyleSheet("""
                         QPushButton { background-color: #FF9800; color: white; border: none; border-radius: 4px; font-weight: bold; }
                     """)
-                    self.btn_reg.setStyleSheet("""
-                        QPushButton { background-color: #3c3c3c; color: white; border: 1px solid #5a5a5a; border-radius: 4px; font-weight: bold; }
-                        QPushButton:hover { background-color: #4a4a4a; }
-                    """)
+                    self.btn_reg.setStyleSheet(
+                        f"QPushButton {{ background-color: {colors['button_bg']}; color: {colors['text_primary']}; "
+                        f"border: 1px solid {colors['border']}; border-radius: 4px; font-weight: bold; }}"
+                    )
 
-                # Light-mode stat style: white bg, purple text
                 stat_light_style = (
-                    'padding: 6px 12px; border: 1px solid #CAC4CE; '
-                    'border-radius: 4px; background-color: #FFFFFF; color: #725AC1; font-size: 11px;'
+                    f'padding: 6px 12px; border: 1px solid {colors["border"]}; '
+                    f'border-radius: 4px; background-color: {colors["surface_bg"]}; color: {colors["text_primary"]}; font-size: 11px;'
                 )
                 for stat in [self.stats_avg, self.stats_total, self.stats_ok, self.stats_low]:
                     try:

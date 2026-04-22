@@ -139,7 +139,7 @@ class TestDatabase:
 
     def test_schema_version_is_set(self, tmp_db):
         import db.database as dbmod
-        assert dbmod.get_db_version() == 1
+        assert dbmod.get_db_version() == dbmod.CURRENT_SCHEMA_VERSION
 
     def test_insert_and_read_case(self, tmp_db):
         row_id = _insert_case(tmp_db)

@@ -11,17 +11,19 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 
-from sync.app_config import load_config
+from sync.app_config import get_teams_webhook_url
+from sync.app_logger import log_event
+
+_WEBHOOK_TIMEOUT_S = 10  # seconds to wait for Power Automate response
 
 
 def _get_webhook_url() -> str | None:
     """Return the configured Teams webhook URL, or None."""
-    cfg = load_config()
-    url = cfg.get("teams_webhook", "").strip()
+    url = get_teams_webhook_url().strip()
     if not url:
         return None
     if not url.startswith("https://"):
-        print("[teams_notify] Invalid webhook URL (must start with https://)")
+        log_event("teams_notify", "invalid webhook URL (must start with https://)", level="WARN")
         return None
     return url
 
@@ -71,17 +73,17 @@ def notify_downtime_submitted(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=_WEBHOOK_TIMEOUT_S) as resp:
             status = resp.status
             if status in (200, 202):
-                print(f"[teams_notify] Notification sent ({status}).")
+                log_event("teams_notify", f"notification sent status={status} dt_id={dt_id}")
                 return True
             else:
-                print(f"[teams_notify] Unexpected status: {status}")
+                log_event("teams_notify", f"unexpected status={status} dt_id={dt_id}", level="WARN")
                 return False
     except urllib.error.HTTPError as e:
-        print(f"[teams_notify] HTTP error {e.code}: {e.reason}")
+        log_event("teams_notify", f"http error code={e.code} reason={e.reason} dt_id={dt_id}", level="WARN")
         return False
     except Exception as exc:
-        print(f"[teams_notify] Failed to send: {exc}")
+        log_event("teams_notify", f"send failed dt_id={dt_id}: {exc}", level="WARN")
         return False

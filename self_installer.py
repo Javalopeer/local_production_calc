@@ -45,8 +45,9 @@ def _notify(title: str, message: str) -> None:
     try:
         import ctypes
         ctypes.windll.user32.MessageBoxW(0, message, title, 0x40)  # 0x40 = MB_ICONINFORMATION
-    except Exception:
-        pass
+    except Exception as exc:
+        import sys as _sys
+        print(f"[self_installer] MessageBox failed: {exc}", file=_sys.stderr)
 
 
 def check_and_install() -> bool:
