@@ -138,6 +138,136 @@ class CenteredTabWidget(QTabWidget):
         bar.installEventFilter(self)
         self._centering = False  # re-entry guard
 
+        # Stop the per-tab "size flicker" when switching tabs: by default
+        # QTabWidget sizes its inner QStackedWidget to the current page's
+        # sizeHint, so changing pages briefly relayouts everything. Pin a
+        # single Expanding policy on the stacked area + ignore the per-page
+        # size hint so the widget stays put across switches.
+        from PySide6.QtWidgets import QStackedWidget, QSizePolicy
+        stacked = self.findChild(QStackedWidget)
+        if stacked is not None:
+            stacked.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+
+        # Slide + fade transition on every tab switch. The page slides in
+        # from the side opposite to the tab you came from (jumping forward
+        # = enter from right, jumping back = enter from left). Duration is
+        # long enough (320 ms) to read but short enough to stay snappy.
+        self._fade_anim = None
+        self._prev_tab_index = self.currentIndex()
+        self.currentChanged.connect(self._animate_tab_change)
+
+    # By default, QTabWidget.sizeHint asks the *current* page for its hint
+    # which makes the parent layout request a different size when you switch
+    # tabs (the visible "grow then settle" you noticed). Returning the union
+    # of every page's hint keeps the geometry stable across switches.
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
+        hint = QSize(0, 0)
+        for i in range(self.count()):
+            page = self.widget(i)
+            if page is None:
+                continue
+            ph = page.sizeHint()
+            hint = QSize(max(hint.width(), ph.width()),
+                         max(hint.height(), ph.height()))
+        # Fall back to the default if no pages report a hint yet
+        base = super().sizeHint()
+        return QSize(max(hint.width(), base.width()),
+                     max(hint.height(), base.height()))
+
+    def minimumSizeHint(self):
+        from PySide6.QtCore import QSize
+        hint = QSize(0, 0)
+        for i in range(self.count()):
+            page = self.widget(i)
+            if page is None:
+                continue
+            ph = page.minimumSizeHint()
+            hint = QSize(max(hint.width(), ph.width()),
+                         max(hint.height(), ph.height()))
+        base = super().minimumSizeHint()
+        return QSize(max(hint.width(), base.width()),
+                     max(hint.height(), base.height()))
+
+    # ── tab-switch fade animation ────────────────────────────────────────────
+
+    def _animate_tab_change(self, index: int):
+        """Slide-in + fade-in transition for the newly selected tab.
+
+        Direction follows the navigation: when you click a tab to the right
+        of the current one, the new page slides in from the right; when you
+        go left, it slides in from the left. Combined with an opacity
+        fade so the effect is unmistakable. ~320 ms with OutCubic easing.
+        Reentrancy-safe: a new switch cancels any in-flight animation.
+        """
+        from PySide6.QtCore import (
+            QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QPoint,
+        )
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+        page = self.widget(index)
+        if page is None:
+            self._prev_tab_index = index
+            return
+
+        prev = getattr(self, "_prev_tab_index", index)
+        # If somehow no movement, still play (e.g., forced re-selection).
+        direction = 1 if index >= prev else -1
+        self._prev_tab_index = index
+
+        if self._fade_anim is not None:
+            try:
+                self._fade_anim.stop()
+            except Exception:
+                pass
+
+        # ── Opacity (fade-in) ────────────────────────────────────────────
+        effect = QGraphicsOpacityEffect(page)
+        effect.setOpacity(0.0)
+        page.setGraphicsEffect(effect)
+        fade = QPropertyAnimation(effect, b"opacity")
+        fade.setDuration(320)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # ── Position (slide-in) ──────────────────────────────────────────
+        # Slide distance scales with the tab area width so the motion is
+        # always proportional to the visible content (~25 % of width).
+        slide_distance = max(60, int(page.width() * 0.25))
+        start_x = direction * slide_distance
+        start_pos = QPoint(start_x, page.y())
+        end_pos = QPoint(0, page.y())
+        page.move(start_pos)
+        slide = QPropertyAnimation(page, b"pos")
+        slide.setDuration(320)
+        slide.setStartValue(start_pos)
+        slide.setEndValue(end_pos)
+        slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(fade)
+        group.addAnimation(slide)
+
+        def _cleanup():
+            try:
+                page.setGraphicsEffect(None)
+                # Make sure the page rests exactly where the layout wants it
+                page.move(end_pos)
+            except Exception:
+                pass
+            if self._fade_anim is group:
+                self._fade_anim = None
+
+        group.finished.connect(_cleanup)
+        self._fade_anim = group
+        group.start()
+
     # ── event filter on the tab bar ───────────────────────────────────────────
 
     def eventFilter(self, obj, event):
@@ -941,7 +1071,10 @@ if __name__ == "__main__":
         border: none;
         border-radius: 6px;
     }
-    QTableWidget::item { padding: 6px 8px; border: none; }
+    /* `border: none` here would force Qt's QSS painter to take over and
+       ignore per-cell setBackground() — we use that to colour Eff% / Time
+       cells. Padding alone leaves item brushes painting through. */
+    QTableWidget::item { padding: 6px 8px; }
     QTableWidget::item:selected { background-color: #1C2D4F; }
     QHeaderView { background-color: #0D1117; }
     QHeaderView::section {

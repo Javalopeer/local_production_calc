@@ -896,9 +896,23 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str,
     tc.alignment = Alignment(horizontal="center", vertical="center")
     ws_dash.row_dimensions[1].height = 28
 
+    # ── Row 2: live-data notice ──────────────────────────────────────────
+    # The xlsx is rebuilt each time someone saves a case, but OneDrive has
+    # eventual consistency, so this snapshot is generally a few minutes
+    # behind the source data. The app's Dashboard → Equipo tab reads the
+    # same source files every 30 s so it's always the freshest view.
+    ws_dash.merge_cells(f"A2:{_gcl(DASH_COLS)}2")
+    nc = ws_dash.cell(2, 1)
+    nc.value = ("Para datos en tiempo real abre la app  →  Dashboard  →  Equipo. "
+                "Este archivo se actualiza solo cuando alguien guarda un caso.")
+    nc.font      = Font(italic=True, size=10, color="555555")
+    nc.fill      = PatternFill("solid", fgColor="FFF8E1")
+    nc.alignment = Alignment(horizontal="center", vertical="center")
+    ws_dash.row_dimensions[2].height = 22
+
     for ci, h in enumerate(dash_headers, 1):
-        _hdr(ws_dash.cell(2, ci), h)
-    ws_dash.freeze_panes = "A3"
+        _hdr(ws_dash.cell(3, ci), h)
+    ws_dash.freeze_panes = "A4"
 
     for ri, entry in enumerate(today_rows):
         (
@@ -918,7 +932,7 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str,
             ot_other,
             last_sync,
         ) = entry
-        row = ri + 3
+        row = ri + 4  # row 1 = title, row 2 = live-data notice, row 3 = headers
         bg = _GREY_ROW if ri % 2 == 0 else "FFFFFF"
         no_data = (reg_cases == 0 and ot_cases == 0 and last_sync == "—")
 
@@ -971,7 +985,7 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str,
     # Team averages row
     active_today = [e for e in today_rows if not (e[6] == 0 and e[7] == 0 and e[14] == "—")]
     if active_today:
-        tr = len(today_rows) + 3
+        tr = len(today_rows) + 4  # +4 to account for title/notice/header
         n  = len(active_today)
         TOTALS_BG = "2D2D2D"
         _hdr(ws_dash.cell(tr,  1), f"TEAM AVG  ({n} designers)",
@@ -1194,16 +1208,21 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str,
         # Daily and summary files were already saved.
         return
 
-    # Save a dated snapshot. By default skipped if already present (once per
-    # day). `force_snapshot=True` overwrites — used by historical rebuild.
+    # Save a dated snapshot. We ALWAYS overwrite — previously this skipped
+    # the write when the file already existed, which froze each daily
+    # snapshot at whatever state the *first* designer's sync produced
+    # (typically near-empty, before most of the team had logged anything).
+    # Late syncs and backdated edits then never propagated to the snapshot,
+    # making historical dashboards look like nobody worked that day.
     snapshots_dir = os.path.join(productions_dir, "Dashboards")
     os.makedirs(snapshots_dir, exist_ok=True)
     snapshot_path = os.path.join(snapshots_dir, f"_Dashboard_{today_str}.xlsx")
-    if force_snapshot or not os.path.exists(snapshot_path):
-        try:
-            _save_atomic(wb, snapshot_path)
-        except PermissionError:
-            pass
+    try:
+        _save_atomic(wb, snapshot_path)
+    except PermissionError:
+        # Someone has the historical snapshot open; skip silently — next
+        # rebuild will retry.
+        pass
 
     # Clean up OneDrive conflict copies (e.g. _Dashboard-CRI-MACHINE.xlsx)
     if not skip_live:

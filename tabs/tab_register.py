@@ -53,6 +53,9 @@ class RegisterTab(QWidget):
         self._editing_id  = None        # db id being edited (None = new case)
         self._import_toast = None
         self._import_toast_timer = None
+        # Theme state — main emits themeChanged(is_light) and update_theme_labels
+        # writes this. False until first signal arrives (app boots dark).
+        self._light_mode_active = False
         self._mode_state = {
             "regular": {},
             "overtime": {},
@@ -551,6 +554,10 @@ class RegisterTab(QWidget):
     def update_theme_labels(self, is_light: bool):
         """Apply light/dark table styles while preserving per-cell badge colors."""
         from PySide6.QtGui import QColor
+        # Remember the active theme so other render paths (notably the OT
+        # table + OT progress bar in `_load_ot_day_cases`) pick the right
+        # palette regardless of any QApplication stylesheet quirk.
+        self._light_mode_active = bool(is_light)
         colors = get_light_theme_colors()
         fg_color = QColor(colors["text_primary"]) if is_light else CLR_FG_LIGHT
         light_css = (
@@ -577,10 +584,61 @@ class RegisterTab(QWidget):
                 pass
 
     def _is_light_mode(self) -> bool:
-        app = QApplication.instance()
-        if not app:
-            return False
-        return "background-color: #F6F8FA" in (app.styleSheet() or "")
+        """Return the last theme state pushed via update_theme_labels.
+
+        Other tabs route theme changes through `themeChanged` → an
+        instance flag flipped in `update_theme_labels`. This is the only
+        source of truth that survives custom light palettes (the previous
+        substring-based check on `app.styleSheet()` broke whenever the
+        user customized the light palette, so OT-mode widgets ended up
+        styled as dark while the rest of the UI was light).
+        """
+        return bool(getattr(self, "_light_mode_active", False))
+
+    def _lookup_std_time(self, region: str | None, tipo: str | None):
+        """Return the standard time (minutes) for region+type, or None."""
+        if not region or not tipo:
+            return None
+        try:
+            return self.standards[region]["Aligners"][tipo]
+        except (KeyError, TypeError):
+            return None
+
+    @staticmethod
+    def _paint_efficiency_cell(item, eff_value):
+        """Color a cell green/yellow/red based on efficiency thresholds."""
+        from PySide6.QtGui import QBrush, QColor
+        try:
+            ev = float(eff_value)
+        except (TypeError, ValueError):
+            return
+        if ev >= 100:
+            item.setBackground(QBrush(QColor(76, 175, 80)))
+        elif ev >= 95:
+            item.setBackground(QBrush(QColor(255, 193, 7)))
+        else:
+            item.setBackground(QBrush(QColor(244, 67, 54)))
+
+    @staticmethod
+    def _paint_time_cell(item, tiempo_real, std_time):
+        """Color a Time cell green when within the standard, red when over.
+
+        Same green/red used by the Eff% cell so a row reads consistently:
+        if Time is red, Eff is going to be red too.
+        """
+        from PySide6.QtGui import QBrush, QColor
+        try:
+            real = float(tiempo_real)
+            std = float(std_time)
+        except (TypeError, ValueError):
+            return
+        if std <= 0:
+            return
+        # 5 % grace before flipping to red so a borderline case isn't punished
+        if real <= std * 1.05:
+            item.setBackground(QBrush(QColor(76, 175, 80)))
+        else:
+            item.setBackground(QBrush(QColor(244, 67, 54)))
     
     def resizeEvent(self, event):
         """Handle resize to switch between horizontal and vertical layout"""
@@ -1164,6 +1222,11 @@ class RegisterTab(QWidget):
             bold.setBold(True)
             ue_val = calculate_equivalent_units(self.units_eq, region or "", tipo or "", cv or 0.0, count=1)
 
+            # Look up the expected std_time for this case so we can colour the
+            # Time cell the same way Eff% gets coloured (green = within
+            # standard, red = exceeded).
+            std_time = self._lookup_std_time(region, tipo)
+
             vals = [
                 str(case_id or ""),
                 str(doctor or ""),
@@ -1181,17 +1244,10 @@ class RegisterTab(QWidget):
                 item.setToolTip(text)
                 if col == 0:
                     item.setFont(bold)
+                if col == 3 and tiempo and std_time:
+                    self._paint_time_cell(item, tiempo, std_time)
                 if col == 4 and eff:
-                    try:
-                        ev = float(eff)
-                        if ev >= 100:
-                            item.setBackground(QBrush(QColor(76, 175, 80)))
-                        elif ev >= 95:
-                            item.setBackground(QBrush(QColor(255, 193, 7)))
-                        else:
-                            item.setBackground(QBrush(QColor(244, 67, 54)))
-                    except Exception:
-                        pass
+                    self._paint_efficiency_cell(item, eff)
                 self.reg_day_table.setItem(i, col, item)
 
     def _load_ot_day_cases(self):
@@ -1289,6 +1345,7 @@ class RegisterTab(QWidget):
             bold = QFont(); bold.setBold(True)
 
             ue_val = calculate_equivalent_units(self.units_eq, region or "", tipo or "", cv or 0.0, count=1)
+            std_time = self._lookup_std_time(region, tipo)
 
             vals = [str(case_id or ""), str(doctor or ""), str(tipo or ""), f"{tiempo:.0f}" if tiempo else "-",
                     f"{eff:.0f}" if eff else "-", f"{cv:.2f}" if cv else "-", f"{ue_val:.2f}"]
@@ -1300,18 +1357,10 @@ class RegisterTab(QWidget):
                 item.setToolTip(text)
                 if col == 0:
                     item.setFont(bold)
-                # Color efficiency cell
+                if col == 3 and tiempo and std_time:
+                    self._paint_time_cell(item, tiempo, std_time)
                 if col == 4 and eff:
-                    try:
-                        ev = float(eff)
-                        if ev >= 100:
-                            item.setBackground(QBrush(QColor(76, 175, 80)))
-                        elif ev >= 95:
-                            item.setBackground(QBrush(QColor(255, 193, 7)))
-                        else:
-                            item.setBackground(QBrush(QColor(244, 67, 54)))
-                    except Exception:
-                        pass
+                    self._paint_efficiency_cell(item, eff)
                 self.ot_reg_table.setItem(i, col, item)
 
     def _delete_selected_ot_case(self):
@@ -1409,13 +1458,18 @@ class RegisterTab(QWidget):
         if not show_import_confirmation(self, data):
             return
 
-        # Extra confirmation when importing into OT mode. The case will be
-        # stamped with the current time, so we check that against the regular
-        # schedule (05:40 – 15:14). The user gets a tailored message depending
-        # on whether the current time lands inside or outside regular hours,
-        # since either case is worth a sanity check before recording as OT.
-        if self._mode == "overtime":
-            if not self._confirm_ot_import_time():
+        # Extra confirmation popup. Fires when EITHER:
+        #   * we're in OT mode (regardless of clock time), OR
+        #   * the current time is outside regular hours 05:40 - 15:14
+        #     (regardless of mode — likely OT slipped into Regular by mistake).
+        # Tailored message based on mode + time so the user knows why they're
+        # being warned.
+        now = QTime.currentTime()
+        in_regular_hours = (
+            self._REGULAR_START <= now <= self._REGULAR_END
+        )
+        if self._mode == "overtime" or not in_regular_hours:
+            if not self._confirm_ot_import_time(now, in_regular_hours):
                 return
 
         imported_case_id, imported_region, imported_type = apply_imported_case_data(
@@ -1441,25 +1495,23 @@ class RegisterTab(QWidget):
             duration_ms=4200,
         )
 
-    # Regular working schedule used to flag suspicious OT imports.
+    # Regular working schedule used to flag suspicious imports.
     _REGULAR_START = QTime(5, 40)
     _REGULAR_END   = QTime(15, 14)
 
-    def _confirm_ot_import_time(self) -> bool:
-        """Show a confirmation popup before importing a case under OT mode.
+    def _confirm_ot_import_time(self, now: QTime, in_regular_hours: bool) -> bool:
+        """Confirmation popup for risky imports.
 
-        Returns True if the user confirmed, False to abort the import.
-
-        Two messages depending on whether the current time falls inside the
-        regular schedule (05:40 - 15:14): inside is the riskier case (OT
-        being logged during regular hours), outside is the normal case but
-        we still ask just to be safe per user request.
+        Returns True if the user confirmed, False to abort. Picks one of
+        three messages so the user understands which rule fired:
+          1. OT mode + within regular hours  → loudest warning
+          2. OT mode + outside regular hours → normal OT confirm
+          3. Regular mode + outside regular hours → "should this be OT?"
         """
-        now = QTime.currentTime()
-        in_regular = self._REGULAR_START <= now <= self._REGULAR_END
+        is_ot = self._mode == "overtime"
         now_str = now.toString("HH:mm")
 
-        if in_regular:
+        if is_ot and in_regular_hours:
             title = "Importar como OT en horario regular"
             text = (
                 f"Hora actual: {now_str}\n\n"
@@ -1467,11 +1519,20 @@ class RegisterTab(QWidget):
                 "dentro del horario regular (05:40 a 15:14).\n\n"
                 "¿Seguro desea proseguir?"
             )
-        else:
+        elif is_ot:
             title = "Confirmar importación OT"
             text = (
                 f"Hora actual: {now_str}\n\n"
                 "El caso se importará como OT (fuera de horario regular).\n\n"
+                "¿Seguro desea proseguir?"
+            )
+        else:
+            # Regular mode but outside the regular schedule — likely OT
+            title = "Importar como Regular fuera de horario"
+            text = (
+                f"Hora actual: {now_str}\n\n"
+                "Este caso se importará como Regular pero la hora actual\n"
+                "está fuera del horario regular (05:40 a 15:14).\n\n"
                 "¿Seguro desea proseguir?"
             )
 

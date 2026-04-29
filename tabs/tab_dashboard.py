@@ -13,9 +13,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QDateEdit, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QFrame, QSizePolicy, QScrollArea, QGroupBox,
-    QGridLayout, QBoxLayout,
+    QGridLayout, QBoxLayout, QStackedWidget, QButtonGroup,
 )
-from PySide6.QtCore import QDate, QRect, QRectF, Qt
+from PySide6.QtCore import QDate, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush
 
 from db.database import get_connection
@@ -541,12 +541,54 @@ class DashboardTab(QWidget):
     def _init_ui(self):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Top bar with view toggle (Personal | Equipo) ──────────────
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(20, 14, 20, 6)
+        top_bar.setSpacing(8)
+        self.title_label = QLabel("Dashboard")
+        self.title_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6EDF3; letter-spacing: 0.5px;")
+        top_bar.addWidget(self.title_label)
+        top_bar.addStretch()
+
+        self.btn_view_team = QPushButton("Equipo")
+        self.btn_view_personal = QPushButton("Personal")
+        for b in (self.btn_view_team, self.btn_view_personal):
+            b.setCheckable(True)
+            b.setMinimumWidth(82)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Default: Equipo
+        self.btn_view_team.setChecked(True)
+        view_group = QButtonGroup(self)
+        view_group.setExclusive(True)
+        view_group.addButton(self.btn_view_team, 0)
+        view_group.addButton(self.btn_view_personal, 1)
+        view_group.idClicked.connect(self._on_view_changed)
+        self._view_group = view_group
+        top_bar.addWidget(self.btn_view_team)
+        top_bar.addWidget(self.btn_view_personal)
+        outer.addLayout(top_bar)
+        self._apply_view_button_styles()
+
+        # ── Stacked container: index 0 = team, 1 = personal ────────────
+        self._view_stack = QStackedWidget()
+        outer.addWidget(self._view_stack)
+
+        team_page = self._build_team_page()
+        self._view_stack.addWidget(team_page)
+
+        # The original personal dashboard goes inside its own page
+        personal_page = QWidget()
+        personal_outer = QVBoxLayout(personal_page)
+        personal_outer.setContentsMargins(0, 0, 0, 0)
+        self._view_stack.addWidget(personal_page)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        outer.addWidget(scroll)
+        personal_outer.addWidget(scroll)
 
         container = QWidget()
         container.setMinimumWidth(440)
@@ -555,12 +597,6 @@ class DashboardTab(QWidget):
         root = QVBoxLayout(container)
         root.setContentsMargins(20, 18, 20, 22)
         root.setSpacing(18)
-
-        # ── Title ──────────────────────────────────────────────────────
-        self.title_label = QLabel("Dashboard")
-        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6EDF3; letter-spacing: 0.5px;")
-        root.addWidget(self.title_label)
 
         # ── Filters ────────────────────────────────────────────────────
         fb = QGroupBox("Filters")
@@ -781,7 +817,251 @@ class DashboardTab(QWidget):
             layout.setDirection(direction)
 
     # ------------------------------------------------------------------
-    # Refresh
+    # Team view (reads shared Excel: Productions/<Designer>/_Summary.xlsx)
+    # ------------------------------------------------------------------
+
+    _TEAM_POLL_MS = 30_000  # 30 seconds — match the user's stated cadence
+    _FRESHNESS_TICK_MS = 1_000
+
+    def _build_team_page(self) -> QWidget:
+        """Compact team-wide view rendered from the shared SharePoint folder."""
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(20, 18, 20, 22)
+        v.setSpacing(14)
+
+        header_row = QHBoxLayout()
+        self.team_date_picker = QDateEdit(QDate.currentDate())
+        self.team_date_picker.setCalendarPopup(True)
+        self.team_date_picker.setDisplayFormat("yyyy-MM-dd")
+        self.team_date_picker.setMinimumWidth(120)
+        self.team_date_picker.dateChanged.connect(lambda _d: self._refresh_team_view())
+        header_row.addWidget(QLabel("Fecha:"))
+        header_row.addWidget(self.team_date_picker)
+        header_row.addStretch()
+        self.team_freshness_label = QLabel("Cargando…")
+        self.team_freshness_label.setStyleSheet(
+            "color: #8B949E; font-size: 11px;"
+        )
+        header_row.addWidget(self.team_freshness_label)
+        v.addLayout(header_row)
+
+        # 4 KPI cards
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(12)
+        self.kpi_team_size   = _Card("Enrolados",        accent="#388BFD")
+        self.kpi_team_active = _Card("Activos hoy",      accent="#3FB950")
+        self.kpi_team_avg    = _Card("Avg Production %", accent="#A371F7")
+        self.kpi_team_ue     = _Card("Total UE",         accent="#F0883E")
+        for c in (self.kpi_team_size, self.kpi_team_active, self.kpi_team_avg, self.kpi_team_ue):
+            c.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            kpi_row.addWidget(c)
+        v.addLayout(kpi_row)
+
+        # People table
+        self.tbl_team = _make_table(["Designer", "Production %", "UE", "Cases"])
+        self.tbl_team.setMinimumHeight(360)
+        self.tbl_team.setSortingEnabled(False)  # we sort manually by % desc
+        v.addWidget(self.tbl_team, 1)
+
+        # Polling timer
+        self._team_poll_timer = QTimer(self)
+        self._team_poll_timer.setInterval(self._TEAM_POLL_MS)
+        self._team_poll_timer.timeout.connect(self._refresh_team_view)
+        self._team_poll_timer.start()
+
+        # Freshness ticker (updates "hace X seg" every second)
+        self._team_last_load_ts: float | None = None
+        self._team_last_load_ok: bool = False
+        self._team_freshness_timer = QTimer(self)
+        self._team_freshness_timer.setInterval(self._FRESHNESS_TICK_MS)
+        self._team_freshness_timer.timeout.connect(self._update_freshness_label)
+        self._team_freshness_timer.start()
+
+        # Stop timers when widget is destroyed so they don't fire on a dead C++ obj.
+        self.destroyed.connect(self._stop_team_timers)
+
+        # Kick the first load shortly after the UI is up
+        QTimer.singleShot(250, self._refresh_team_view)
+
+        return page
+
+    def _stop_team_timers(self, *_):
+        for attr in ("_team_poll_timer", "_team_freshness_timer"):
+            t = getattr(self, attr, None)
+            if t is not None:
+                try:
+                    t.stop()
+                except Exception:
+                    pass
+
+    def _on_view_changed(self, view_id: int):
+        # 0 = Equipo, 1 = Personal
+        self._view_stack.setCurrentIndex(view_id)
+        self._apply_view_button_styles()
+        if view_id == 0:
+            # Refresh team data immediately when re-entering the team view
+            self._refresh_team_view()
+
+    def _apply_view_button_styles(self):
+        sel = (
+            "QPushButton { background-color: #1F6FEB; color: white; "
+            "border: none; border-radius: 4px; padding: 5px 14px; "
+            "font-weight: 600; font-size: 12px; }"
+        )
+        unsel = (
+            "QPushButton { background-color: transparent; color: #8B949E; "
+            "border: 1px solid #30363D; border-radius: 4px; padding: 5px 14px; "
+            "font-size: 12px; } "
+            "QPushButton:hover { color: #E6EDF3; border-color: #5A6068; }"
+        )
+        self.btn_view_team.setStyleSheet(sel if self.btn_view_team.isChecked() else unsel)
+        self.btn_view_personal.setStyleSheet(sel if self.btn_view_personal.isChecked() else unsel)
+
+    def _refresh_team_view(self):
+        """Read the shared folder, repopulate KPIs + table. Silent on failure."""
+        from datetime import datetime
+        target_date = self.team_date_picker.date().toString("yyyy-MM-dd")
+        try:
+            rows = self._load_team_summaries(target_date)
+        except Exception as exc:
+            print(f"[Dashboard team] load failed: {exc}")
+            self._team_last_load_ok = False
+            self._update_freshness_label()
+            return
+
+        # KPIs
+        enrolled = rows["enrolled_count"]
+        active = sum(1 for r in rows["people"] if r["pct"] > 0 or r["cases"] > 0)
+        active_rows = [r for r in rows["people"] if r["pct"] > 0 or r["cases"] > 0]
+        avg_pct = (sum(r["pct"] for r in active_rows) / len(active_rows)) if active_rows else 0.0
+        total_ue = sum(r["ue"] for r in rows["people"])
+
+        self.kpi_team_size.set_value(str(enrolled))
+        self.kpi_team_active.set_value(str(active))
+        self.kpi_team_avg.set_value(f"{avg_pct:.1f}%")
+        self.kpi_team_ue.set_value(f"{total_ue:.1f}")
+
+        # Table — only people with any activity today, sorted by % desc.
+        visible = sorted(active_rows, key=lambda r: r["pct"], reverse=True)
+        self.tbl_team.setRowCount(len(visible))
+        for i, r in enumerate(visible):
+            it_name = QTableWidgetItem(r["designer"])
+            it_pct  = QTableWidgetItem(f"{r['pct']:.1f}%")
+            it_ue   = QTableWidgetItem(f"{r['ue']:.2f}")
+            it_cs   = QTableWidgetItem(str(r["cases"]))
+            it_pct.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_ue.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_cs.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Soft colour cue on the % cell
+            if r["pct"] >= 100:
+                it_pct.setForeground(QBrush(QColor("#3FB950")))
+            elif r["pct"] >= 85:
+                it_pct.setForeground(QBrush(QColor("#D29922")))
+            else:
+                it_pct.setForeground(QBrush(QColor("#F85149")))
+            for col, item in enumerate((it_name, it_pct, it_ue, it_cs)):
+                self.tbl_team.setItem(i, col, item)
+
+        import time as _time
+        self._team_last_load_ts = _time.time()
+        self._team_last_load_ok = True
+        self._update_freshness_label()
+
+    def _update_freshness_label(self):
+        import time as _time
+        if not self._team_last_load_ok or self._team_last_load_ts is None:
+            self.team_freshness_label.setText("Sin datos del equipo")
+            self.team_freshness_label.setStyleSheet("color: #F85149; font-size: 11px;")
+            return
+        age = int(_time.time() - self._team_last_load_ts)
+        if age < 60:
+            text = f"Última actualización: hace {age} seg"
+        elif age < 3600:
+            text = f"Última actualización: hace {age // 60} min"
+        else:
+            text = f"Última actualización: hace {age // 3600} h"
+        # Amber if older than 5 minutes (sync probably stalled)
+        color = "#F0883E" if age > 300 else "#8B949E"
+        self.team_freshness_label.setText(text)
+        self.team_freshness_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+
+    def _load_team_summaries(self, target_date: str) -> dict:
+        """Walk Productions/<Designer>/_Summary.xlsx and pull the row for `target_date`.
+
+        Returns {"enrolled_count": int, "people": [ {designer, pct, ue, cases} ] }.
+        Returns empty if the shared folder isn't configured.
+        """
+        try:
+            import openpyxl
+        except Exception:
+            return {"enrolled_count": 0, "people": []}
+
+        from sync.app_config import load_config
+        cfg = load_config()
+        export_folder = (cfg.get("export_folder") or "").strip()
+        if not export_folder or not os.path.isdir(export_folder):
+            return {"enrolled_count": 0, "people": []}
+
+        productions_dir = os.path.join(export_folder, "Productions")
+        if not os.path.isdir(productions_dir):
+            return {"enrolled_count": 0, "people": []}
+
+        people = []
+        designer_dirs = []
+        try:
+            for entry in os.listdir(productions_dir):
+                full = os.path.join(productions_dir, entry)
+                if not os.path.isdir(full):
+                    continue
+                summary = os.path.join(full, "_Summary.xlsx")
+                if os.path.isfile(summary):
+                    designer_dirs.append((entry, summary))
+        except Exception as exc:
+            print(f"[Dashboard team] scan dir failed: {exc}")
+
+        for designer_name, summary_path in designer_dirs:
+            display = designer_name.replace("_", " ")
+            pct, ue, cases = 0.0, 0.0, 0
+            try:
+                wb = openpyxl.load_workbook(summary_path, read_only=True, data_only=True)
+                ws = wb.active
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if not row or row[0] != target_date:
+                        continue
+                    pct = self._parse_pct(row[4]) if len(row) > 4 else 0.0
+                    ue = float(row[7] or 0) if len(row) > 7 else 0.0
+                    reg_cases = int(row[5] or 0) if len(row) > 5 else 0
+                    ot_cases = int(row[6] or 0) if len(row) > 6 else 0
+                    cases = reg_cases + ot_cases
+                    break
+                wb.close()
+            except Exception as exc:
+                # File might be locked by Excel on the other machine; skip silently.
+                continue
+            people.append({
+                "designer": display,
+                "pct": pct,
+                "ue": ue,
+                "cases": cases,
+            })
+
+        return {"enrolled_count": len(designer_dirs), "people": people}
+
+    @staticmethod
+    def _parse_pct(value) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        s = str(value).strip().rstrip("%")
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    # ------------------------------------------------------------------
+    # Refresh (Personal view)
     # ------------------------------------------------------------------
 
     def refresh(self):

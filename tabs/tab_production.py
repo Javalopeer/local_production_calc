@@ -31,6 +31,10 @@ class ProductionTab(QWidget):
         self.days_per_page = 2  # Show 2 complete day blocks per page
         self.total_pages = 1
         self.filtered_cases = []  # Store filtered cases for pagination
+        # Theme state — main emits themeChanged(is_light) and update_theme_labels
+        # writes this. Defaults to False so dark colours are used at boot
+        # (the app always starts in dark mode regardless of OS palette).
+        self._light_mode_active = False
         self.load_units_eq()
         self.init_ui()
         self.load_regions_and_types()
@@ -478,14 +482,13 @@ class ProductionTab(QWidget):
         self.stats_ok.setText(f"Value: {total_value:,.2f}%")
         self.stats_low.setText(f"OK: {ok_count:,} | LOW: {low_count:,}")
         
-        # Determine current theme using application palette
-        try:
-            from PySide6.QtGui import QPalette
-            pal = QApplication.instance().palette()
-            win_color = pal.color(QPalette.ColorRole.Window)
-            current_is_light = win_color.lightness() > 128
-        except Exception:
-            current_is_light = False
+        # Theme detection — read the value pushed by update_theme_labels
+        # (which is wired to main's themeChanged signal). The previous
+        # palette-based check was unreliable because QApplication.setStyleSheet
+        # does NOT change the palette; on machines where the OS theme is
+        # light, palette.lightness() returned light even when the app was
+        # in dark mode, so foreground colours collapsed to dark-on-dark.
+        current_is_light = bool(getattr(self, "_light_mode_active", False))
         light_colors = get_light_theme_colors()
 
         sorted_dates = sorted(grouped.keys(), reverse=True)
@@ -795,6 +798,9 @@ class ProductionTab(QWidget):
         - In light mode: use user-configured light palette for table, buttons and stats.
         - In dark mode: restore the previous dark styles.
         """
+        # Remember the active theme so filter_data() picks the right
+        # foreground/background palette every time it re-renders rows.
+        self._light_mode_active = bool(is_light)
         colors = get_light_theme_colors()
         # Foreground color for table items: dark text on light theme, white on dark
         fg_color = QColor(colors["text_primary"]) if is_light else CLR_FG_LIGHT
@@ -824,6 +830,14 @@ class ProductionTab(QWidget):
             adaptive_fg_by_bg=True,
             adaptive_default_fg=fg_color,
         )
+
+        # Re-render rows so each cell picks up the new theme's text colour
+        # (apply_table_theme alone updates existing items but our render
+        # also paints status-driven badges; safer to repopulate).
+        try:
+            self.filter_data()
+        except Exception:
+            pass
 
         # Adjust Regular / OT button colors to match light theme preferences
         try:
