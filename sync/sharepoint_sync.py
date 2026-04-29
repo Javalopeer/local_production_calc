@@ -37,7 +37,7 @@ except Exception as _e:
 from db.database import DB_PATH
 from sync.app_config import load_config
 from sync.app_logger import log_event
-from tabs.utils import calculate_downtime_equivalent_units, DAILY_BASE_MINUTES
+from tabs.utils import DAILY_BASE_MINUTES
 
 # ── Colour palette ──────────────────────────────────────────────────────────
 _BLUE       = "2D89EF"
@@ -356,7 +356,7 @@ def _get_ue_and_types(target_date: str):
     for (tipo,) in ot_rows:
         ot_type_counts[tipo] = ot_type_counts.get(tipo, 0) + 1
 
-    ue_total = ue_cases + calculate_downtime_equivalent_units(downtime_total_min)
+    ue_total = ue_cases  # downtime no longer contributes to equivalent units
 
     return ue_cases, ue_total, reg_type_counts, ot_type_counts
 

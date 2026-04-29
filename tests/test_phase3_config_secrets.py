@@ -16,27 +16,8 @@ def _mk_temp_base() -> Path:
     return base
 
 
-def test_get_teams_webhook_env_priority(monkeypatch):
-    import sync.app_config as ac
-
-    monkeypatch.setenv(ac.ENV_TEAMS_WEBHOOK, "https://env.example/hook")
-    monkeypatch.setattr(ac, "load_config", lambda: {"teams_webhook": "https://local.example/hook"})
-    assert ac.get_teams_webhook_url() == "https://env.example/hook"
-
-
-def test_get_teams_webhook_local_then_shared(monkeypatch):
-    import sync.app_config as ac
-
-    monkeypatch.delenv(ac.ENV_TEAMS_WEBHOOK, raising=False)
-
-    local_cfg = {"teams_webhook": "https://local.example/hook", "export_folder": "X"}
-    monkeypatch.setattr(ac, "load_config", lambda: local_cfg)
-    monkeypatch.setattr(ac, "_load_shared_config", lambda _: {"teams_webhook": "https://shared.example/hook"})
-    assert ac.get_teams_webhook_url() == "https://local.example/hook"
-
-    local_cfg_empty = {"teams_webhook": "", "export_folder": "X"}
-    monkeypatch.setattr(ac, "load_config", lambda: local_cfg_empty)
-    assert ac.get_teams_webhook_url() == "https://shared.example/hook"
+# Teams webhook config was removed when the manual copy-paste flow replaced
+# the Power Automate / Adaptive Card approval pipeline.
 
 
 def test_get_excel_sheet_password_fallback_chain(monkeypatch):
@@ -64,12 +45,12 @@ def test_save_shared_config_uses_loaded_export_folder(monkeypatch):
     base = _mk_temp_base()
     try:
         monkeypatch.setattr(ac, "load_config", lambda: {"export_folder": str(base)})
-        ok = ac.save_shared_config({"teams_webhook": "https://shared.example/hook"})
+        ok = ac.save_shared_config({"excel_sheet_password": "shared_pw"})
         assert ok is True
 
         shared_file = base / "_shared_config.json"
         assert shared_file.exists()
         data = json.loads(shared_file.read_text(encoding="utf-8"))
-        assert data["teams_webhook"] == "https://shared.example/hook"
+        assert data["excel_sheet_password"] == "shared_pw"
     finally:
         shutil.rmtree(base, ignore_errors=True)

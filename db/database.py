@@ -41,7 +41,7 @@ def get_data_path():
 DB_PATH = os.path.join(get_data_path(), "cases.db")
 
 # Current schema version - increment when making DB changes
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 4
 
 
 def _get_legacy_db_candidates() -> list:
@@ -436,7 +436,12 @@ def _ensure_base_tables(cursor) -> None:
             detalle TEXT DEFAULT '',
             responded_by TEXT DEFAULT '',
             responded_at TEXT DEFAULT '',
-            downtime_case_id TEXT DEFAULT ''
+            downtime_case_id TEXT DEFAULT '',
+            client_uid TEXT DEFAULT '',
+            synced_to_excel INTEGER DEFAULT 0,
+            synced_to_teams INTEGER DEFAULT 0,
+            sync_attempts INTEGER DEFAULT 0,
+            last_sync_error TEXT DEFAULT ''
         )
         """
     )
@@ -498,6 +503,45 @@ def _migration_v2(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_downtimes_case_id ON downtimes(downtime_case_id)")
 
 
+def _migration_v3(cursor) -> None:
+    """Sync-tracking columns for the resilient downtime queue.
+
+    - client_uid: client-side UUID for idempotent retries across machines/restarts.
+    - synced_to_excel: 1 once the row reached the shared per-designer xlsx.
+    - synced_to_teams: legacy flag from the retired webhook flow; always 1 now.
+    - sync_attempts / last_sync_error: diagnostics for the retry worker.
+    """
+    _ensure_column(cursor, "downtimes", "client_uid",       "client_uid TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "synced_to_excel",  "synced_to_excel INTEGER DEFAULT 0")
+    _ensure_column(cursor, "downtimes", "synced_to_teams",  "synced_to_teams INTEGER DEFAULT 0")
+    _ensure_column(cursor, "downtimes", "sync_attempts",    "sync_attempts INTEGER DEFAULT 0")
+    _ensure_column(cursor, "downtimes", "last_sync_error",  "last_sync_error TEXT DEFAULT ''")
+    # Backfill: rows that already existed before v3 are assumed synced (they were
+    # created and exported under the old code path). Resending them now would
+    # duplicate work and might re-fire Teams cards for ancient DTs.
+    cursor.execute(
+        "UPDATE downtimes SET synced_to_excel = 1, synced_to_teams = 1 "
+        "WHERE synced_to_excel = 0 AND synced_to_teams = 0"
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_downtimes_unsynced "
+                   "ON downtimes(synced_to_excel, synced_to_teams, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_downtimes_client_uid "
+                   "ON downtimes(client_uid)")
+
+
+def _migration_v4(cursor) -> None:
+    """One-time backlog cleanup after switching to the manual approval flow.
+
+    Power Automate / Teams webhook approvals were retired. Any DT still sitting
+    in 'pending' from the old flow will never get a supervisor decision, so we
+    flip them all to 'approved' once. New DTs always start pending and the
+    user marks them Approved/Rejected in-app after pasting to Teams.
+    """
+    cursor.execute(
+        "UPDATE downtimes SET status = 'approved' WHERE status = 'pending'"
+    )
+
+
 def _get_db_version_from_cursor(cursor) -> int:
     if not _table_exists(cursor, "db_metadata"):
         return 0
@@ -533,11 +577,47 @@ def _run_schema_migrations(conn) -> int:
         _set_db_version_from_cursor(cursor, 2)
         version = 2
 
+    if version < 3:
+        _migration_v3(cursor)
+        _set_db_version_from_cursor(cursor, 3)
+        version = 3
+
+    if version < 4:
+        _migration_v4(cursor)
+        _set_db_version_from_cursor(cursor, 4)
+        version = 4
+
     return version
 
 
+_WAL_INIT_DONE = False
+
+
+def _ensure_wal_mode(conn: sqlite3.Connection) -> None:
+    """Enable WAL mode + busy timeout once per process. Cheap to re-run."""
+    global _WAL_INIT_DONE
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=15000")
+        _WAL_INIT_DONE = True
+    except Exception as _e:
+        # OneDrive-hosted DBs can occasionally reject WAL — fall back silently
+        print(f"[db] WAL init skipped: {_e}")
+
+
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    """Open a SQLite connection with a generous timeout so OneDrive
+    file-locking does not freeze the UI thread.
+
+    `timeout=30` lets SQLite retry for up to 30 s when the file is
+    momentarily locked by the SharePoint sync thread. WAL mode is enabled
+    on the first connection of the process for better concurrent reads.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
+    if not _WAL_INIT_DONE:
+        _ensure_wal_mode(conn)
+    return conn
 
 def get_db_version():
     """Get the current database schema version"""

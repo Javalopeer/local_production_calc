@@ -1,5 +1,6 @@
 import os
 import threading
+import uuid
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTimeEdit, QLineEdit,
@@ -19,31 +20,78 @@ try:
         export_pending_downtimes,
         poll_and_process_responses,
         get_approval_path,
+        export_approval_history,
     )
     _APPROVAL_OK = True
 except Exception as _approval_err:
     print(f"[downtime_manager] Approval module unavailable: {_approval_err}")
     _APPROVAL_OK = False
 
-try:
-    from sync.teams_notify import notify_downtime_submitted
-    _TEAMS_OK = True
-except Exception as _teams_err:
-    log_event("downtime_manager", f"teams notify module unavailable: {_teams_err}", level="WARN")
-    _TEAMS_OK = False
+# Local mirror of the pending-status string.
+STATUS_PENDING_LOCAL = "pending"
+STATUS_APPROVED_LOCAL = "approved"
+STATUS_REJECTED_LOCAL = "rejected"
 
 
-# Reasons that affect the whole team and do NOT require supervisor approval.
-# Downtimes with these reasons are inserted with status='approved' and skip the
-# approval export + Teams notification.
-AUTO_APPROVED_REASONS = {
-    "Corporate Event",
-    "Evacuation Drill",
-    "Extended Weekly Huddle",
-    "Gemba & listening Events",
-    "Spark Town Hall",
-    "Team Meeting",
-}
+# ── Sync-state helpers ───────────────────────────────────────────────────────
+# Flip the per-row sync flags when a destination confirms receipt. Idempotent —
+# safe to call from any thread, but keep them tiny (single UPDATE) so the lock
+# window stays small under WAL.
+
+def _mark_excel_synced(dt_id: int) -> None:
+    if not dt_id:
+        return
+    try:
+        conn = get_connection()
+        conn.execute(
+            "UPDATE downtimes SET synced_to_excel = 1, last_sync_error = '' "
+            "WHERE id = ?",
+            (int(dt_id),),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        log_event("downtime_manager",
+                  f"_mark_excel_synced({dt_id}) failed: {exc}",
+                  level="WARN")
+
+
+def _mark_teams_synced(dt_id: int) -> None:
+    if not dt_id:
+        return
+    try:
+        conn = get_connection()
+        conn.execute(
+            "UPDATE downtimes SET synced_to_teams = 1 WHERE id = ?",
+            (int(dt_id),),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        log_event("downtime_manager",
+                  f"_mark_teams_synced({dt_id}) failed: {exc}",
+                  level="WARN")
+
+
+def _bump_sync_attempt(dt_id: int, err_msg: str = "") -> None:
+    """Increment sync_attempts and stash the last error for diagnostics."""
+    if not dt_id:
+        return
+    try:
+        conn = get_connection()
+        conn.execute(
+            "UPDATE downtimes "
+            "SET sync_attempts = COALESCE(sync_attempts, 0) + 1, "
+            "    last_sync_error = ? "
+            "WHERE id = ?",
+            (str(err_msg)[:500], int(dt_id)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        log_event("downtime_manager",
+                  f"_bump_sync_attempt({dt_id}) failed: {exc}",
+                  level="WARN")
 
 
 class DowntimeManager(QWidget):
@@ -57,9 +105,11 @@ class DowntimeManager(QWidget):
         self.edit_mode = False
         self.current_edit_row = -1
         self.current_date = datetime.now().strftime("%Y-%m-%d")
+        self._retry_in_progress = False
         self.init_ui()
         self.load_downtimes()
         self._start_poll_timer()
+        self._start_retry_timer()
 
     def _start_poll_timer(self):
         """Poll the approval Excel every 15 seconds for supervisor responses."""
@@ -84,8 +134,108 @@ class DowntimeManager(QWidget):
                 pass
             self._poll_timer = None
 
+    # ── Retry worker for unsynced downtimes ─────────────────────────────────
+    # Every 60 s, scan for rows where synced_to_excel=0 OR (status=pending AND
+    # synced_to_teams=0) and retry the missing destination. Silent — the user
+    # only notices via the per-row status icon.
+    def _start_retry_timer(self):
+        if not _APPROVAL_OK:
+            return
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setInterval(60_000)  # 60 seconds
+        self._retry_timer.timeout.connect(self._retry_unsynced_downtimes)
+        self._retry_timer.start()
+        self.destroyed.connect(self._stop_retry_timer)
+        # Kick once shortly after startup to clear any backlog from prior session
+        QTimer.singleShot(5_000, self._retry_unsynced_downtimes)
+
+    def _stop_retry_timer(self, *_args):
+        timer = getattr(self, "_retry_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._retry_timer = None
+
+    def _retry_unsynced_downtimes(self):
+        """Find pending unsynced downtimes and retry their failed destinations.
+
+        Runs in a background thread so the UI never blocks. Reentrancy-guarded
+        with `_retry_in_progress` so back-to-back ticks don't pile up.
+        """
+        if self._retry_in_progress:
+            return
+        self._retry_in_progress = True
+
+        def _run():
+            try:
+                self._do_retry_unsynced()
+            except Exception as exc:
+                log_event("downtime_manager",
+                          f"retry worker crashed: {exc}",
+                          level="WARN")
+            finally:
+                self._retry_in_progress = False
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _do_retry_unsynced(self):
+        """Retry the Excel export when needed.
+
+        Triggers an export when EITHER:
+          - some row has synced_to_excel=0 (insert/edit/status-change failed
+            to propagate), OR
+          - it has been more than _FORCE_RESYNC_SECONDS since the last export
+            (catches deletions that failed to propagate, since a deleted row
+            leaves no flag behind to retry from).
+        """
+        if not _APPROVAL_OK:
+            return
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM downtimes WHERE synced_to_excel = 0 LIMIT 1"
+            )
+            has_unsynced = cur.fetchone() is not None
+            conn.close()
+        except Exception as exc:
+            print(f"[downtime_manager] retry: query failed: {exc}")
+            return
+
+        import time as _time
+        now = _time.time()
+        last = getattr(self, "_last_force_resync_ts", 0.0)
+        force_due = (now - last) >= self._FORCE_RESYNC_SECONDS
+
+        if not has_unsynced and not force_due:
+            return
+
+        cfg = load_config()
+        designer = cfg.get("designer_name", "")
+        try:
+            ok = export_pending_downtimes(designer)
+            if ok:
+                self._last_force_resync_ts = now
+            else:
+                log_event("downtime_manager",
+                          "retry export returned False", level="WARN")
+        except Exception as exc:
+            log_event("downtime_manager",
+                      f"retry export crashed: {exc}", level="WARN")
+            return
+
+        try:
+            QTimer.singleShot(0, self.load_downtimes)
+        except Exception:
+            pass
+
+    _FORCE_RESYNC_SECONDS = 300  # 5-minute periodic full resync as a safety net
+
     def closeEvent(self, event):
         self._stop_poll_timer()
+        self._stop_retry_timer()
         super().closeEvent(event)
 
     def _handle_poll_result(self, updated: int):
@@ -246,8 +396,11 @@ class DowntimeManager(QWidget):
         # Table
         self.table = QTableWidget()
         self.table.setAlternatingRowColors(False)
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["Start", "End", "Dur.(min)", "Reason", "Status", "Responded By"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels([
+            "Start", "End", "Dur.(min)", "Reason", "Status",
+            "Sync", "Actions",
+        ])
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -265,11 +418,13 @@ class DowntimeManager(QWidget):
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(0, 52)
         self.table.setColumnWidth(1, 52)
         self.table.setColumnWidth(2, 72)
-        self.table.setColumnWidth(4, 70)
-        self.table.setColumnWidth(5, 120)
+        self.table.setColumnWidth(4, 80)
+        self.table.setColumnWidth(5, 44)
+        self.table.setColumnWidth(6, 220)
         self.table.setMinimumHeight(180)
         self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         main_layout.addWidget(self.table)
@@ -316,22 +471,22 @@ class DowntimeManager(QWidget):
         if detalle is None:
             return  # Cancelado por el usuario
 
-        auto_approve = reason in AUTO_APPROVED_REASONS
-        initial_status = "approved" if auto_approve else "pending"
-
+        # New flow: every DT starts in pending. The user pastes it to Teams
+        # via the Copy button, the supervisor reacts, and the user marks it
+        # Approved or Rejected manually inside the app. No auto-approval.
+        client_uid = str(uuid.uuid4())
+        # synced_to_teams is repurposed as "manually marked by user" (always 1
+        # to keep the retry worker out of the Teams loop, which no longer exists).
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO downtimes (fecha, hora_inicio, hora_fin, razon, duracion, status, detalle)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO downtimes
+                (fecha, hora_inicio, hora_fin, razon, duracion, status, detalle,
+                 client_uid, synced_to_excel, synced_to_teams)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
         """, (
-            self.current_date,
-            start,
-            end,
-            reason,
-            duration,
-            initial_status,
-            detalle
+            self.current_date, start, end, reason, duration,
+            STATUS_PENDING_LOCAL, detalle, client_uid,
         ))
         dt_id = cursor.lastrowid
         conn.commit()
@@ -340,33 +495,24 @@ class DowntimeManager(QWidget):
         self.downtime_start.setTime(QTime.currentTime())
         self.downtime_end.setTime(QTime.currentTime())
 
-        # Team-wide reasons skip approval workflow entirely
-        if auto_approve:
-            log_event("downtime_manager",
-                      f"auto-approved team downtime: {reason} ({duration} min)",
-                      level="INFO")
-            if self.on_update_callback:
-                self.on_update_callback()
-            return
-
-        # Export + Teams notification in background to avoid blocking UI
-        if _APPROVAL_OK or _TEAMS_OK:
+        # Kick off the Excel export in the background. The retry worker keeps
+        # trying every 60 s until synced_to_excel flips to 1, so a transient
+        # OneDrive lock here is NOT data loss.
+        if _APPROVAL_OK:
             cfg = load_config()
             designer = cfg.get("designer_name", "")
-            _date = self.current_date
-            def _bg_export():
-                if _APPROVAL_OK:
-                    export_pending_downtimes(designer)
-                if _TEAMS_OK:
-                    notify_downtime_submitted(
-                        designer=designer, fecha=_date,
-                        start=start, end=end, duration=duration,
-                        reason=reason, detalle=detalle,
-                        dt_id=dt_id,
-                    )
-            threading.Thread(target=_bg_export, daemon=True).start()
+            def _bg_first_sync():
+                try:
+                    ok = export_pending_downtimes(designer)
+                    if not ok:
+                        _bump_sync_attempt(dt_id, "first export returned False")
+                except Exception as exc:
+                    log_event("downtime_manager",
+                              f"first sync failed for DT #{dt_id}: {exc}",
+                              level="WARN")
+                    _bump_sync_attempt(dt_id, str(exc))
+            threading.Thread(target=_bg_first_sync, daemon=True).start()
 
-        # Trigger callback to update production
         if self.on_update_callback:
             self.on_update_callback()
 
@@ -433,23 +579,28 @@ class DowntimeManager(QWidget):
         return "approved"
 
     def load_downtimes(self):
-        conn = get_connection()
-        cursor = conn.cursor()
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, hora_inicio, hora_fin, duracion, razon, status, detalle,
+                       COALESCE(synced_to_excel, 0),
+                       COALESCE(last_sync_error, '')
+                FROM downtimes
+                WHERE fecha = ?
+                ORDER BY hora_inicio DESC
+            """, (self.current_date,))
+            rows = cursor.fetchall()
+            conn.close()
+        except Exception as exc:
+            print(f"[downtime_manager] load_downtimes failed: {exc}")
+            return
 
-        cursor.execute("""
-            SELECT id, hora_inicio, hora_fin, duracion, razon, status, detalle,
-                   responded_by, responded_at
-            FROM downtimes
-            WHERE fecha = ?
-            ORDER BY hora_inicio DESC
-        """, (self.current_date,))
-
-        rows = cursor.fetchall()
-        conn.close()
-
-        # Reset cell widgets from previous load to avoid stale labels stacking
+        # Reset cell widgets from previous load to avoid stale labels stacking.
+        # Cols 4 (Status), 5 (Sync), 6 (Actions) all use cell widgets.
         for _r in range(self.table.rowCount()):
-            self.table.removeCellWidget(_r, 4)
+            for _c in (4, 5, 6):
+                self.table.removeCellWidget(_r, _c)
         self.table.setRowCount(len(rows))
         self.row_ids = []
 
@@ -469,56 +620,37 @@ class DowntimeManager(QWidget):
             "rejected": "Rejected",
         }
 
+        compact = self.width() < 720  # threshold to switch inline → dropdown
+
         for idx, row in enumerate(rows):
-            row_id, start, end, duration, reason, status, detalle, resp_by, resp_at = row
+            (row_id, start, end, duration, reason, status, detalle,
+             sync_excel, last_err) = row
             status = self._normalize_status(status)
-            resp_by = resp_by or ""
-            resp_at = resp_at or ""
 
-            # Format responded_by with timestamp if available
-            resp_display = resp_by
-            if resp_at and resp_by:
-                # Show just the date/time portion if it's a full ISO timestamp
-                try:
-                    dt = datetime.fromisoformat(resp_at.replace("Z", "+00:00"))
-                    resp_display = f"{resp_by} ({dt.strftime('%m/%d %H:%M')})"
-                except (ValueError, TypeError):
-                    resp_display = f"{resp_by} ({resp_at})"
-
-            values = [start, end, str(duration), reason, _STATUS_LABELS.get(status, status), resp_display]
+            values = [start, end, str(duration), reason,
+                      _STATUS_LABELS.get(status, status),
+                      "", ""]  # cols 5 (sync) and 6 (actions) rendered as widgets
 
             tooltip = detalle if detalle else reason
-            # Build a detailed tooltip for the Responded By column
-            resp_tooltip = ""
-            if resp_by:
-                resp_tooltip = f"Responded by: {resp_by}"
-                if resp_at:
-                    resp_tooltip += f"\nDate/Time: {resp_at}"
-                resp_tooltip += f"\nDecision: {_STATUS_LABELS.get(status, status)}"
 
             is_light = self._is_light_mode()
             fg_default = QColor("#1F2328") if is_light else CLR_FG_LIGHT
             for col, val in enumerate(values):
-                # Col 4 (Status) is rendered via a QLabel widget below; keep
-                # the underlying item empty so text doesn't bleed through.
-                item_text = "" if col == 4 else str(val)
+                # Cols 4 (status), 5 (sync), 6 (actions) are widgets below;
+                # keep underlying items empty so text doesn't bleed through.
+                item_text = "" if col in (4, 5, 6) else str(val)
                 item = QTableWidgetItem(item_text)
-                if col == 5 and resp_tooltip:
-                    item.setToolTip(resp_tooltip)
-                else:
-                    item.setToolTip(tooltip)
-                # Only colour the Status cell (col 4); highlight entire row when editing
+                item.setToolTip(tooltip)
                 if self.edit_mode and idx == self.current_edit_row:
                     item.setBackground(QColor(70, 130, 180))
                     item.setForeground(QColor("#FFFFFF"))
-                elif col == 4:
+                elif col in (4, 5, 6):
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
                 else:
                     item.setForeground(fg_default)
                 self.table.setItem(idx, col, item)
 
-                # Status cell: setCellWidget bypasses the global QTableWidget::item
-                # stylesheet that otherwise suppresses setBackground() on items.
+                # Status cell (col 4) rendered as label widget for solid bg
                 if col == 4:
                     if self.edit_mode and idx == self.current_edit_row:
                         bg_css, fg_css = "#4682B4", "#FFFFFF"
@@ -534,6 +666,40 @@ class DowntimeManager(QWidget):
                     )
                     self.table.setCellWidget(idx, 4, lbl)
 
+            # ── Sync icon (col 5) ───────────────────────────────────────────
+            # Reflects ONLY synced_to_excel now. Status decides ✓/⏳/✗ color.
+            #   ✓ green  = excel synced + status approved
+            #   ⏳ amber = excel synced + status pending (waiting on user mark)
+            #   ✗ red    = excel synced + status rejected
+            #   ⚠ red    = NOT synced to excel — retry worker will handle it
+            if sync_excel == 0:
+                sync_icon, sync_color = "⚠", "#E74C3C"
+                sync_tip = "Pending sync to shared Excel"
+                if last_err:
+                    sync_tip += f"\nLast error: {last_err}"
+            elif status == STATUS_PENDING_LOCAL:
+                sync_icon, sync_color = "⏳", "#F1C40F"
+                sync_tip = "Synced — paste to Teams, then mark Approved/Rejected"
+            elif status == STATUS_REJECTED_LOCAL:
+                sync_icon, sync_color = "✗", "#E74C3C"
+                sync_tip = "Synced — rejected"
+            else:
+                sync_icon, sync_color = "✓", "#2ECC71"
+                sync_tip = "Synced — approved"
+            sync_lbl = QLabel(sync_icon)
+            sync_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            sync_lbl.setStyleSheet(
+                f"color: {sync_color}; font-size: 14px; font-weight: bold;"
+            )
+            sync_lbl.setToolTip(sync_tip)
+            self.table.setCellWidget(idx, 5, sync_lbl)
+
+            # ── Actions (col 6) ─────────────────────────────────────────────
+            # In wide mode: 3 inline buttons [Copy] [✓] [✗].
+            # In compact mode: a single dropdown menu with the same actions.
+            actions_widget = self._build_actions_widget(row_id, status, compact)
+            self.table.setCellWidget(idx, 6, actions_widget)
+
             self.row_ids.append(row_id)
 
         # Fixed columns are set once in init_ui; Reason stretches automatically
@@ -545,12 +711,220 @@ class DowntimeManager(QWidget):
 
     def _apply_table_layout_mode(self):
         """Adjust table columns for narrow layouts so rows remain visible."""
-        compact = self.width() < 560
-        self.table.setColumnWidth(0, 64 if compact else 72)   # Start
-        self.table.setColumnWidth(1, 64 if compact else 72)   # End
-        self.table.setColumnWidth(2, 74 if compact else 86)   # Dur(min)
+        compact = self.width() < 720
+        self.table.setColumnWidth(0, 56 if compact else 72)   # Start
+        self.table.setColumnWidth(1, 56 if compact else 72)   # End
+        self.table.setColumnWidth(2, 64 if compact else 86)   # Dur(min)
         self.table.setColumnWidth(4, 70 if compact else 80)   # Status
-        self.table.setColumnWidth(5, 86 if compact else 108)  # Responded By
+        self.table.setColumnWidth(5, 36 if compact else 44)   # Sync icon
+        self.table.setColumnWidth(6, 96 if compact else 220)  # Actions
+
+    # ── Actions cell (Copy + Approve + Reject) ─────────────────────────────
+    def _build_actions_widget(self, dt_id: int, status: str, compact: bool):
+        """Build the Actions cell. Inline buttons in wide layout, dropdown in
+        compact layout (so labels never get clipped on narrow windows)."""
+        from PySide6.QtWidgets import QWidget, QHBoxLayout, QMenu
+
+        if compact:
+            # Single dropdown button with all 3 actions
+            btn = QPushButton("Actions ▾")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color: #2D2F36; color: #E6EDF3; "
+                "border: 1px solid #444; border-radius: 3px; padding: 2px 6px; "
+                "font-size: 11px; } "
+                "QPushButton:hover { background-color: #383B43; } "
+                "QPushButton::menu-indicator { image: none; width: 0; }"
+            )
+            menu = QMenu(btn)
+            menu.addAction("Copy for Teams",
+                           lambda _id=dt_id: self._copy_dt_for_teams(_id))
+            if status == STATUS_PENDING_LOCAL:
+                menu.addSeparator()
+                menu.addAction("Mark Approved",
+                               lambda _id=dt_id: self._set_dt_status(_id, STATUS_APPROVED_LOCAL))
+                menu.addAction("Mark Rejected",
+                               lambda _id=dt_id: self._set_dt_status(_id, STATUS_REJECTED_LOCAL))
+            else:
+                menu.addSeparator()
+                menu.addAction("Reset to Pending",
+                               lambda _id=dt_id: self._set_dt_status(_id, STATUS_PENDING_LOCAL))
+            btn.setMenu(menu)
+            return btn
+
+        # Wide layout — 3 inline buttons in a horizontal container
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(2, 1, 2, 1)
+        layout.setSpacing(4)
+
+        copy_btn = QPushButton("Copy")
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        copy_btn.setToolTip("Copy DT details to clipboard, ready to paste in Teams")
+        copy_btn.setStyleSheet(
+            "QPushButton { background-color: #1F6FEB; color: white; border: none; "
+            "border-radius: 3px; padding: 3px 8px; font-size: 11px; font-weight: 600; } "
+            "QPushButton:hover { background-color: #388BFD; } "
+            "QPushButton:pressed { background-color: #1A5FCF; }"
+        )
+        copy_btn.clicked.connect(lambda _checked=False, _id=dt_id: self._copy_dt_for_teams(_id))
+        layout.addWidget(copy_btn)
+
+        if status == STATUS_PENDING_LOCAL:
+            ok_btn = QPushButton("✓")
+            ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            ok_btn.setToolTip("Mark this DT as Approved")
+            ok_btn.setMaximumWidth(34)
+            ok_btn.setStyleSheet(
+                "QPushButton { background-color: #2EA043; color: white; border: none; "
+                "border-radius: 3px; padding: 3px 0; font-size: 12px; font-weight: 700; } "
+                "QPushButton:hover { background-color: #3FB950; }"
+            )
+            ok_btn.clicked.connect(
+                lambda _checked=False, _id=dt_id: self._set_dt_status(_id, STATUS_APPROVED_LOCAL))
+            layout.addWidget(ok_btn)
+
+            no_btn = QPushButton("✗")
+            no_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            no_btn.setToolTip("Mark this DT as Rejected")
+            no_btn.setMaximumWidth(34)
+            no_btn.setStyleSheet(
+                "QPushButton { background-color: #DA3633; color: white; border: none; "
+                "border-radius: 3px; padding: 3px 0; font-size: 12px; font-weight: 700; } "
+                "QPushButton:hover { background-color: #F85149; }"
+            )
+            no_btn.clicked.connect(
+                lambda _checked=False, _id=dt_id: self._set_dt_status(_id, STATUS_REJECTED_LOCAL))
+            layout.addWidget(no_btn)
+        else:
+            # Already decided — offer a small "reset to pending" undo
+            undo_btn = QPushButton("↺")
+            undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            undo_btn.setToolTip("Reset to Pending")
+            undo_btn.setMaximumWidth(34)
+            undo_btn.setStyleSheet(
+                "QPushButton { background-color: #444C56; color: #C9D1D9; border: none; "
+                "border-radius: 3px; padding: 3px 0; font-size: 12px; } "
+                "QPushButton:hover { background-color: #545D69; }"
+            )
+            undo_btn.clicked.connect(
+                lambda _checked=False, _id=dt_id: self._set_dt_status(_id, STATUS_PENDING_LOCAL))
+            layout.addWidget(undo_btn)
+
+        layout.addStretch()
+        return container
+
+    def _copy_dt_for_teams(self, dt_id: int):
+        """Build a Teams-ready text block for this DT and put it on the clipboard."""
+        if not dt_id:
+            return
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT fecha, hora_inicio, hora_fin, duracion, razon, detalle, "
+                "       COALESCE(downtime_case_id, '') "
+                "FROM downtimes WHERE id = ?",
+                (int(dt_id),),
+            )
+            r = cur.fetchone()
+            conn.close()
+        except Exception as exc:
+            QMessageBox.warning(self, "Copy failed", f"Could not load DT #{dt_id}: {exc}")
+            return
+        if not r:
+            QMessageBox.warning(self, "Copy failed", f"DT #{dt_id} not found.")
+            return
+
+        fecha, h_ini, h_fin, dur, razon, detalle, pid = r
+
+        lines = [
+            f"Razon: {razon or ''}",
+            f"Hora inicio - Hora final: {h_ini or ''} - {h_fin or ''}",
+            f"Total: {int(dur or 0)} min",
+            f"Descripcion: {detalle or ''}",
+        ]
+        if pid:
+            lines.append(f"PID: {pid}")
+        text = "\n".join(lines)
+
+        try:
+            QApplication.clipboard().setText(text)
+        except Exception as exc:
+            QMessageBox.warning(self, "Copy failed", f"Clipboard error: {exc}")
+            return
+
+        self._flash_status("Copied — paste it in the Teams chat")
+
+    def _set_dt_status(self, dt_id: int, new_status: str):
+        """User marks a DT as approved/rejected/pending after Teams reaction."""
+        if not dt_id or new_status not in (
+                STATUS_PENDING_LOCAL, STATUS_APPROVED_LOCAL, STATUS_REJECTED_LOCAL):
+            return
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            # When the user changes the decision, mark the row as needing
+            # re-export so the shared Excel reflects the new status.
+            cur.execute(
+                "UPDATE downtimes "
+                "SET status = ?, synced_to_excel = 0, "
+                "    responded_by = COALESCE(NULLIF(?, ''), responded_by), "
+                "    responded_at = ? "
+                "WHERE id = ?",
+                (
+                    new_status,
+                    self._current_designer_name(),
+                    datetime.now().isoformat(timespec="seconds")
+                        if new_status != STATUS_PENDING_LOCAL else "",
+                    int(dt_id),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            QMessageBox.warning(self, "Status update failed",
+                                f"Could not update DT #{dt_id}: {exc}")
+            return
+
+        self.load_downtimes()
+        if self.on_update_callback:
+            self.on_update_callback()
+
+        # Push the new status to the shared Excel in the background
+        if _APPROVAL_OK:
+            designer = self._current_designer_name()
+            threading.Thread(
+                target=lambda: export_pending_downtimes(designer),
+                daemon=True,
+            ).start()
+
+    def _current_designer_name(self) -> str:
+        try:
+            cfg = load_config()
+            return cfg.get("designer_name", "") or ""
+        except Exception:
+            return ""
+
+    def _flash_status(self, msg: str, ms: int = 1800):
+        """Temporary toast shown in the parent window's status bar, if present.
+        Falls back to a tooltip near the table on the next paint cycle."""
+        try:
+            wnd = self.window()
+            sb = getattr(wnd, "statusBar", None)
+            if callable(sb):
+                wnd.statusBar().showMessage(msg, ms)
+                return
+        except Exception:
+            pass
+        # Fallback: brief QMessageBox-less hint via window title flicker
+        try:
+            wnd = self.window()
+            old_title = wnd.windowTitle()
+            wnd.setWindowTitle(f"{msg}   —   {old_title}")
+            QTimer.singleShot(ms, lambda: wnd.setWindowTitle(old_title))
+        except Exception:
+            pass
 
     def on_cell_clicked(self, row, column):
         """Handle cell click - delete if in delete mode"""
@@ -597,17 +971,19 @@ class DowntimeManager(QWidget):
         if duration < 0:
             duration += 24 * 60
         
-        # Update database (team-wide reasons auto-approve on edit too)
-        new_status = "approved" if reason in AUTO_APPROVED_REASONS else "pending"
+        # Editing a DT resets it to pending and clears the synced flag so the
+        # retry worker re-uploads the modified data to the shared Excel.
         row_id = self.row_ids[self.current_edit_row]
         conn = get_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
             UPDATE downtimes
-            SET hora_inicio = ?, hora_fin = ?, razon = ?, duracion = ?, status = ?
+            SET hora_inicio = ?, hora_fin = ?, razon = ?, duracion = ?,
+                status = 'pending', synced_to_excel = 0,
+                responded_by = '', responded_at = ''
             WHERE id = ?
-        """, (start, end, reason, duration, new_status, row_id))
+        """, (start, end, reason, duration, row_id))
         
         conn.commit()
         conn.close()
@@ -750,9 +1126,21 @@ class DowntimeManager(QWidget):
         conn.close()
 
         self.load_downtimes()
-        
+
         if self.on_update_callback:
             self.on_update_callback()
+
+        # Re-export this designer's xlsx so the deletion propagates to the
+        # shared folder. export_pending_downtimes reads the full local table
+        # and rewrites _DT_<designer>.xlsx from scratch, so a deleted row
+        # simply disappears. The consolidated file picks the change up on
+        # its next rebuild (also kicked off by export_pending_downtimes).
+        if _APPROVAL_OK:
+            designer = self._current_designer_name()
+            threading.Thread(
+                target=lambda: export_pending_downtimes(designer),
+                daemon=True,
+            ).start()
 
     def delete_downtime(self):
         """Toggle delete mode"""

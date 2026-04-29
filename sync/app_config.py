@@ -9,7 +9,6 @@ from sync import get_local_app_dir
 from sync.app_logger import log_event
 
 _CONFIG_PATH = get_local_app_dir("config.json")
-ENV_TEAMS_WEBHOOK = "PCALC_TEAMS_WEBHOOK"
 ENV_EXCEL_SHEET_PASSWORD = "PCALC_EXCEL_SHEET_PASSWORD"
 
 
@@ -17,8 +16,6 @@ def _load_dotenv():
     """Load variables from <app_dir>/.env into os.environ (never overwrites existing vars).
 
     Format: KEY=value  (lines starting with # ignored, quotes stripped).
-    Users can place sensitive values like PCALC_TEAMS_WEBHOOK here instead of
-    storing them in config.json.
     """
     env_path = get_local_app_dir(".env")
     if not os.path.exists(env_path):
@@ -87,11 +84,10 @@ def _default_export_folder() -> str:
 
 
 _DEFAULTS = {
-    "designer_name": "",        
-    "name_confirmed": False,   
+    "designer_name": "",
+    "name_confirmed": False,
     "export_folder": "",
     "auto_sync_hours": 0,
-    "teams_webhook": "",
     "excel_sheet_password": "",
     "light_theme_colors": {},
     "auto_discover_dbs": True,
@@ -100,7 +96,7 @@ _DEFAULTS = {
 
 def _load_shared_config(export_folder: str) -> dict:
     """Read _shared_config.json from the shared Reports folder.
-    This file contains team-wide settings like the webhook URL."""
+    This file contains team-wide settings like the Excel sheet password."""
     if not export_folder:
         return {}
     shared_path = os.path.join(export_folder, "_shared_config.json")
@@ -146,11 +142,6 @@ def load_config() -> dict:
     # Pre-fill designer name from Windows if never set
     if not cfg.get("designer_name"):
         cfg["designer_name"] = get_windows_display_name()
-    # Auto-load teams_webhook from shared config if not set locally
-    if not cfg.get("teams_webhook"):
-        shared = _load_shared_config(cfg.get("export_folder", ""))
-        if shared.get("teams_webhook"):
-            cfg["teams_webhook"] = shared["teams_webhook"]
     return cfg
 
 
@@ -171,11 +162,6 @@ def _resolve_config_value(key: str, env_var: str, cfg: dict | None = None) -> st
         return local_val
     shared = _load_shared_config(str(base.get("export_folder", "")).strip())
     return str(shared.get(key, "")).strip()
-
-
-def get_teams_webhook_url(cfg: dict | None = None) -> str:
-    """Resolve Teams webhook URL (env → local config → shared config → "")."""
-    return _resolve_config_value("teams_webhook", ENV_TEAMS_WEBHOOK, cfg)
 
 
 def get_excel_sheet_password(cfg: dict | None = None) -> str:

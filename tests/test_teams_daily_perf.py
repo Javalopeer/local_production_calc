@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Tests for teams_notify and daily_performance core logic.
+Tests for daily_performance core logic.
 """
 import os
 import sqlite3
@@ -24,63 +24,6 @@ def _mem_db():
 
 def _patched_conn(uri):
     return lambda: sqlite3.connect(uri, uri=True)
-
-
-# ── sync.teams_notify ─────────────────────────────────────────────────────────
-
-def test_notify_no_webhook_returns_false(monkeypatch):
-    from sync import teams_notify as tn
-    monkeypatch.setattr(tn, "get_teams_webhook_url", lambda: "")
-    result = tn.notify_downtime_submitted("Alice", "2026-04-15", "09:00", "09:30", 30, "Meeting")
-    assert result is False
-
-
-def test_notify_invalid_url_returns_false(monkeypatch):
-    from sync import teams_notify as tn
-    monkeypatch.setattr(tn, "get_teams_webhook_url", lambda: "http://bad.url")
-    result = tn.notify_downtime_submitted("Alice", "2026-04-15", "09:00", "09:30", 30, "Meeting")
-    assert result is False
-
-
-def test_notify_http_200_returns_true(monkeypatch):
-    import urllib.request
-    from sync import teams_notify as tn
-
-    monkeypatch.setattr(tn, "get_teams_webhook_url", lambda: "https://hooks.example.com/notify")
-
-    fake_resp = MagicMock()
-    fake_resp.__enter__ = lambda s: s
-    fake_resp.__exit__ = MagicMock(return_value=False)
-    fake_resp.status = 200
-
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: fake_resp)
-    result = tn.notify_downtime_submitted("Alice", "2026-04-15", "09:00", "09:30", 30, "Meeting")
-    assert result is True
-
-
-def test_notify_http_error_returns_false(monkeypatch):
-    import urllib.error
-    import urllib.request
-    from sync import teams_notify as tn
-
-    monkeypatch.setattr(tn, "get_teams_webhook_url", lambda: "https://hooks.example.com/notify")
-
-    def _raise(req, timeout):
-        raise urllib.error.HTTPError("url", 500, "Server Error", {}, None)
-
-    monkeypatch.setattr(urllib.request, "urlopen", _raise)
-    result = tn.notify_downtime_submitted("Alice", "2026-04-15", "09:00", "09:30", 30, "Meeting")
-    assert result is False
-
-
-def test_notify_network_exception_returns_false(monkeypatch):
-    import urllib.request
-    from sync import teams_notify as tn
-
-    monkeypatch.setattr(tn, "get_teams_webhook_url", lambda: "https://hooks.example.com/notify")
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(OSError("no route")))
-    result = tn.notify_downtime_submitted("Alice", "2026-04-15", "09:00", "09:30", 30, "Meeting")
-    assert result is False
 
 
 # ── sync.daily_performance ────────────────────────────────────────────────────

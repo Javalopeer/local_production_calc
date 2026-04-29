@@ -1,31 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-Downtime Approval Workflow — per-designer files + consolidated view.
+Downtime export — per-designer files + consolidated history.
 
-Architecture (scales to 30+ designers without conflicts):
+Architecture (scales to 50+ designers without conflicts):
   1. Designer adds a downtime → status = 'pending' in local DB.
-  2. App writes ONLY this designer's rows to their own file:
+  2. The user pastes the DT into Teams using the Copy button. The supervisor
+     reacts with a like/heart/thumbs-down in Teams. Then the user, back in
+     their own app, marks the DT Approved or Rejected manually.
+  3. App writes ONLY this designer's rows to their own file:
        Downtime/designers_dt/_DT_<DesignerName>.xlsx
      No other designer ever touches this file → zero write conflicts.
-  3. App reads ALL designers_dt/_DT_*.xlsx files and builds a consolidated file:
+  4. App reads ALL designers_dt/_DT_*.xlsx files and rebuilds a read-only
+     consolidated history view at:
        Downtime/_Downtime_Approvals.xlsx
-     If this write fails (locked by supervisor), it silently skips — next
-     cycle will rebuild it.  The supervisor's edits are never overwritten
-     because the consolidated file is rebuilt from scratch each time.
-  4. Supervisor opens _Downtime_Approvals.xlsx, changes Status to
-     'approved' or 'rejected', then saves.
-  5. Each designer's app polls _Downtime_Approvals.xlsx every 15 s,
-     reads only their own rows, and applies changes to local DB.
+     Used by leads to audit who logged what and the current status.
 """
 
 import glob
-import json
 import os
 import time
 from datetime import datetime
 
 from db.database import get_connection
-from sync import get_local_app_dir
 from sync.app_config import load_config, get_excel_sheet_password
 from sync.app_logger import log_event
 
@@ -41,41 +37,8 @@ CONSOLIDATED_FILE = "_Downtime_Approvals.xlsx"
 # Cache: track the latest mtime of _DT_*.xlsx files to skip unnecessary rebuilds
 _last_rebuild_max_mtime: float = 0.0
 
-# Poll cache: remember last consolidated-file mtime so we only load the
-# workbook when it actually changed. Falls back to a full read every
-# `_POLL_FORCE_EVERY` cycles in case Power Automate updates via Excel
-# Online don't bump the filesystem mtime on OneDrive sync.
-_last_polled_consolidated_mtime: float = 0.0
-_poll_skip_count: int = 0
-_POLL_FORCE_EVERY = 5
-
 # Track failed exports so they can be retried on next poll cycle
 _pending_retry_designer: str = ""
-
-# Track already-processed Teams response files to avoid re-processing.
-# Persisted locally so each machine tracks independently without
-# renaming/deleting files from the shared folder.
-_LOCAL_PROCESSED_FILE = get_local_app_dir("processed_responses.json")
-
-def _load_processed_responses() -> set:
-    """Load the set of already-processed response file basenames from local disk."""
-    try:
-        with open(_LOCAL_PROCESSED_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    except Exception as exc:
-        log_event("downtime_approval", f"load processed responses failed: {exc}", level="WARN")
-        return set()
-
-def _save_processed_responses(processed: set) -> None:
-    """Persist the set of processed response basenames to local disk."""
-    os.makedirs(os.path.dirname(_LOCAL_PROCESSED_FILE), exist_ok=True)
-    try:
-        with open(_LOCAL_PROCESSED_FILE, "w", encoding="utf-8") as f:
-            json.dump(sorted(processed), f)
-    except Exception as exc:
-        log_event("downtime_approval", f"save processed responses failed: {exc}", level="WARN")
-
-_processed_response_files: set = _load_processed_responses()
 
 _OPENPYXL_OK = False
 try:
@@ -100,14 +63,14 @@ def _thin():
 _README_TEXT = (
     "Downtime folder\n"
     "================\n\n"
-    "For approval history, open:\n"
-    "  _Approval_History.xlsx\n\n"
-    "It shows every downtime request with the responder name and timestamp.\n\n"
+    "For team-wide history, open:\n"
+    "  _Downtime_Approvals.xlsx     — every DT, every designer, every status.\n\n"
     "Do NOT edit:\n"
-    "  _Downtime_Approvals.xlsx    — managed by Power Automate / the app.\n"
-    "  designers_dt\\_DT_<name>.xlsx — individual designer files.\n"
-    "  responses\\response_*.json   — Teams adaptive card responses.\n\n"
-    "Manual edits to those files will be overwritten by the next rebuild.\n"
+    "  _Downtime_Approvals.xlsx     — rebuilt automatically from designer files.\n"
+    "  designers_dt\\_DT_<name>.xlsx  — each designer's own xlsx.\n\n"
+    "Manual edits will be overwritten by the next rebuild.\n"
+    "Approvals/rejections are now made directly inside each user's app after\n"
+    "they paste the DT into the supervisor's Teams chat.\n"
 )
 
 
@@ -310,6 +273,8 @@ def export_pending_downtimes(designer_name: str) -> bool:
         ORDER BY fecha DESC, hora_inicio DESC
     """)
     all_rows = cur.fetchall()
+    # IDs we'll mark as synced_to_excel after a successful save
+    all_ids = [r[0] for r in all_rows]
     conn.close()
 
     pending = [r for r in all_rows if r[6] == STATUS_PENDING]
@@ -367,6 +332,25 @@ def export_pending_downtimes(designer_name: str) -> bool:
 
     # ── Rebuild consolidated file ────────────────────────────────────────────
     _rebuild_consolidated(force=True)
+
+    # ── Mark every exported row as synced_to_excel ──────────────────────────
+    # The designer's xlsx is the source of truth other machines read from, so
+    # once the save returned True every row in `all_rows` has reached the
+    # shared folder. The retry worker uses this flag to know it can stop
+    # retrying these IDs.
+    if all_ids:
+        try:
+            conn = get_connection()
+            placeholders = ",".join("?" for _ in all_ids)
+            conn.execute(
+                f"UPDATE downtimes SET synced_to_excel = 1, last_sync_error = '' "
+                f"WHERE id IN ({placeholders})",
+                all_ids,
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            print(f"[downtime_approval] Could not flag rows synced_to_excel: {exc}")
 
     _pending_retry_designer = ""
     return True
@@ -447,33 +431,13 @@ def _rebuild_consolidated(force: bool = False) -> bool:
             print("[downtime_approval] No designer files changed, skipping rebuild.")
             return True
 
-    # ── First, read any existing supervisor edits from the consolidated file ─
-    #    so we can preserve their approved/rejected status changes
-    supervisor_edits = {}  # (designer_lower, id) → status
-    if os.path.exists(consolidated_path):
-        wb_old = _read_workbook(consolidated_path)
-        if wb_old is not None:
-            try:
-                ws_old = wb_old.active
-                for r in ws_old.iter_rows(min_row=2, values_only=True):
-                    if not r or r[0] is None:
-                        continue
-                    row_designer = str(r[0] or "").strip()
-                    if row_designer.startswith("("):
-                        continue
-                    try:
-                        row_id = int(r[1])
-                        status = str(r[7] or "").strip().lower()
-                    except (TypeError, ValueError):
-                        continue
-                    if status in (STATUS_APPROVED, STATUS_REJECTED):
-                        supervisor_edits[(row_designer.lower(), row_id)] = status
-                wb_old.close()
-            except Exception as exc:
-                log_event("downtime_approval", f"failed reading existing consolidated edits: {exc}", level="WARN")
-
-    # ── Collect pending rows from all designer files ─────────────────────────
-    all_pending = []  # list of 10-tuples (designer, id, date, start, end, dur, reason, status, responded_by, responded_at)
+    # ── Collect rows from each designer file ────────────────────────────────
+    # Each designer's _DT_<name>.xlsx is the source of truth for their own
+    # rows; the consolidated file is just a read-only view that aggregates
+    # them. Supervisor edits used to live in the consolidated file under the
+    # old Power Automate flow — that workflow was retired, so we no longer
+    # try to preserve them here.
+    all_pending = []
     all_history = []
 
     def _pad10(r):
@@ -487,7 +451,6 @@ def _rebuild_consolidated(force: bool = False) -> bool:
         if wb is None:
             continue
         try:
-            # Read Pending sheet
             ws = wb.active
             for r in ws.iter_rows(min_row=2, values_only=True):
                 if not r or r[0] is None:
@@ -495,21 +458,8 @@ def _rebuild_consolidated(force: bool = False) -> bool:
                 row_designer = str(r[0] or "").strip()
                 if row_designer.startswith("("):
                     continue
-                row_tuple = _pad10(r)
-                # Check if supervisor already changed status in consolidated
-                try:
-                    row_id = int(r[1])
-                    key = (row_designer.lower(), row_id)
-                    if key in supervisor_edits:
-                        # Preserve supervisor's edit
-                        row_list = list(row_tuple)
-                        row_list[7] = supervisor_edits[key]
-                        row_tuple = tuple(row_list)
-                except (TypeError, ValueError):
-                    pass
-                all_pending.append(row_tuple)
+                all_pending.append(_pad10(r))
 
-            # Read History sheet
             if "History" in wb.sheetnames:
                 ws_hist = wb["History"]
                 for r in ws_hist.iter_rows(min_row=2, values_only=True):
@@ -535,7 +485,7 @@ def _rebuild_consolidated(force: bool = False) -> bool:
                "Responded By", "Responded At"]
     _write_header(ws, headers, PatternFill("solid", fgColor="2D89EF"))
 
-    note = ws.cell(1, 12, "► Managed by Power Automate. Responses tracked per designer.")
+    note = ws.cell(1, 12, "► Read-only history. Each designer marks their own DTs in their app.")
     note.font = Font(italic=True, color="555555")
 
     _locked   = Protection(locked=True)
@@ -688,202 +638,29 @@ def _set_column_widths(ws):
     ws.row_dimensions[1].height = 22
 
 
-# ── poll ─────────────────────────────────────────────────────────────────────
-
-def _poll_teams_responses(designer_name: str = "") -> int:
-    """Read response_*.json files from Downtime/responses/ and apply decisions.
-
-    Each file is created by Power Automate when a supervisor clicks
-    Approve or Reject on the Teams Adaptive Card.
-
-    Expected JSON format:
-        {"dt_id": 91, "decision": "approved", "designer": "Name",
-         "responded_by": "Name", "responded_at": "..."}
-
-    Only processes files whose "designer" field matches *designer_name*
-    (case-insensitive).  Files without a designer field are accepted for
-    backwards compatibility but matched only by dt_id.
-
-    Returns the number of downtimes updated.
-    """
-    downtime_dir = _get_downtime_dir()
-    if not downtime_dir:
-        return 0
-
-    responses_dir = os.path.join(downtime_dir, "responses")
-    if not os.path.isdir(responses_dir):
-        return 0
-
-    # Read both .json and .json.done (old builds renamed files in shared folder)
-    files = glob.glob(os.path.join(responses_dir, "response_*.json"))
-    files += glob.glob(os.path.join(responses_dir, "response_*.json.done"))
-    if not files:
-        return 0
-
-    updated = 0
-    conn = get_connection()
-    cur = conn.cursor()
-
-    for fpath in files:
-        basename = os.path.basename(fpath)
-        already = basename in _processed_response_files
-        print(f"[DEBUG] Found file: {basename}, processed={already}")
-        if already:
-            continue
-
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as exc:
-            print(f"[downtime_approval] Bad response file {os.path.basename(fpath)}: {exc}")
-            continue
-
-        dt_id = data.get("dt_id")
-        raw_decision = str(data.get("decision", "")).strip().lower()
-
-        # Normalize: Power Automate may return "✅ Approve" or "approved"
-        if "approve" in raw_decision:
-            decision = STATUS_APPROVED
-        elif "reject" in raw_decision:
-            decision = STATUS_REJECTED
-        else:
-            print(f"[downtime_approval] Skipping invalid response: {data}")
-            continue
-
-        if not dt_id:
-            print(f"[downtime_approval] Skipping response without dt_id: {data}")
-            continue
-
-        # Filter by designer so each machine only processes its own DTs
-        file_designer = str(data.get("designer", "")).strip().lower()
-        if file_designer and designer_name and file_designer != designer_name.strip().lower():
-            continue  # Not ours — leave the file for the right machine
-
-        responded_by = str(data.get("responded_by", "")).strip()
-        responded_at = str(data.get("responded_at", "")).strip()
-
-        cur.execute(
-            "UPDATE downtimes SET status = ?, responded_by = ?, responded_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (decision, responded_by, responded_at, int(dt_id)),
-        )
-        print(f"[DEBUG] UPDATE rowcount={cur.rowcount} for dt_id={dt_id}")
-        if cur.rowcount > 0:
-            updated += 1
-            print(f"[downtime_approval] Teams response: {decision} for DT #{dt_id} "
-                  f"(by {responded_by or '?'})")
-            # Track locally — never rename/delete from the shared folder
-            # so other machines can still read the same file.
-            _processed_response_files.add(basename)
-            _save_processed_responses(_processed_response_files)
-
-    conn.commit()
-    conn.close()
-    return updated
-
+# ── Maintenance hook ────────────────────────────────────────────────────────
+# The Teams adaptive-card flow was retired. Approval is now manual inside each
+# user's app after they paste the DT into the supervisor's Teams chat. This
+# function stays as a tiny periodic hook so the existing UI timer can keep
+# calling it without changes — but all it does now is retry a failed export
+# and run the cleanup of legacy response files.
 
 def poll_and_process_responses(designer_name: str) -> int:
-    """Read the consolidated approval file and process supervisor responses
-    for this designer.  Returns the number of rows updated.
+    """Periodic maintenance hook (no longer polls anything).
 
-    Also checks for Teams Adaptive Card responses (response_*.json files)
-    and retries any previously failed export automatically.
+    Retries the last failed export, runs legacy-file cleanup. Returns 0 since
+    no DB rows are updated by polling anymore.
     """
     global _pending_retry_designer
     if not _OPENPYXL_OK:
         return 0
 
-    # ── Check Teams Adaptive Card responses first ─────────────────────────
-    teams_updated = _poll_teams_responses(designer_name)
-
-    # ── Retry failed export from a previous cycle ─────────────────────────
     if _pending_retry_designer:
         print("[downtime_approval] Retrying previously failed export...")
         export_pending_downtimes(_pending_retry_designer)
 
-    path = get_approval_path()
-    if not path or not os.path.exists(path):
-        # Still return teams_updated even if no consolidated file
-        if teams_updated > 0:
-            export_pending_downtimes(designer_name)
-        return teams_updated
-
-    _force_onedrive_refresh(path)
-
-    # ── mtime skip: only read full workbook if file changed since last poll.
-    # Force full read every _POLL_FORCE_EVERY cycles as a safety net in case
-    # Power Automate updates via Excel Online don't bump the filesystem
-    # mtime on OneDrive sync. ──────────────────────────────────────────────
-    global _last_polled_consolidated_mtime, _poll_skip_count
-    try:
-        current_mtime = os.path.getmtime(path)
-    except OSError:
-        current_mtime = 0.0
-
-    if (current_mtime == _last_polled_consolidated_mtime
-            and _poll_skip_count < _POLL_FORCE_EVERY):
-        _poll_skip_count += 1
-        # IMPORTANT: even when we skip the consolidated read, we must still
-        # re-export the designer file + history if Teams responses just
-        # updated the DB, otherwise the shared Excel files stay showing
-        # 'pending' while the local DB already has approved/rejected.
-        if teams_updated > 0:
-            export_pending_downtimes(designer_name)
-            export_approval_history()
-        return teams_updated
-
-    _poll_skip_count = 0
-    _last_polled_consolidated_mtime = current_mtime
-
-    wb = _read_workbook(path)
-    if wb is None:
-        return 0
-
-    processed = 0
-    try:
-        ws = wb.active
-        excel_rows = list(ws.iter_rows(min_row=2, values_only=True))
-        wb.close()
-    except Exception as exc:
-        print(f"[downtime_approval] Could not read consolidated file: {exc}")
-        return 0
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    for row in excel_rows:
-        if not row or row[0] is None:
-            continue
-        row_designer = str(row[0] or "").strip().lower()
-        if row_designer != designer_name.strip().lower():
-            continue
-        try:
-            row_id = int(row[1])
-        except (TypeError, ValueError):
-            continue
-        status = str(row[7] or "").strip().lower()
-        if status in (STATUS_APPROVED, STATUS_REJECTED):
-            cur.execute(
-                "UPDATE downtimes SET status = ? WHERE id = ? AND status = 'pending'",
-                (status, row_id),
-            )
-            if cur.rowcount > 0:
-                processed += 1
-
-    conn.commit()
-    conn.close()
-
-    total = processed + teams_updated
-
-    # Re-export to update the designer file (removes processed rows from pending)
-    if total > 0:
-        export_pending_downtimes(designer_name)
-        export_approval_history()
-
-    # Periodic maintenance: clean old response files
     _cleanup_old_responses()
-
-    return total
+    return 0
 
 
 # ── Approval history Excel ──────────────────────────────────────────────────
@@ -1004,17 +781,14 @@ def export_approval_history() -> bool:
     return _save_workbook(wb, path)
 
 
-# ── Cleanup old response files ──────────────────────────────────────────────
+# ── Cleanup of legacy Power Automate response files ────────────────────────
 
-def _cleanup_old_responses(max_age_days: int = 30, json_max_age_days: int = 60):
-    """Delete stale response files from the shared folder.
+def _cleanup_old_responses(max_age_days: int = 7):
+    """Delete leftover response_*.json files from the retired Power Automate
+    flow. They serve no purpose now that approvals are made manually in-app.
 
-    Two tiers:
-      * `.json.done` files older than max_age_days (default 30).
-      * `response_*.json` files older than json_max_age_days (default 60) —
-        by then every designer has long since polled and absorbed them into
-        the local DB, so they serve no purpose and the folder would grow
-        unbounded otherwise (Power Automate keeps appending new ones).
+    Runs each poll cycle until the shared folder is empty, then becomes a
+    no-op.
     """
     downtime_dir = _get_downtime_dir()
     if not downtime_dir:
@@ -1025,37 +799,20 @@ def _cleanup_old_responses(max_age_days: int = 30, json_max_age_days: int = 60):
         return
 
     now = time.time()
-    cutoff_done = now - (max_age_days * 86400)
-    cutoff_json = now - (json_max_age_days * 86400)
-
-    removed_done = 0
-    removed_json = 0
+    cutoff = now - (max_age_days * 86400)
+    removed = 0
     for fname in os.listdir(responses_dir):
+        if not (fname.startswith("response_") or fname.endswith(".json.done")):
+            continue
         fpath = os.path.join(responses_dir, fname)
         try:
             mtime = os.path.getmtime(fpath)
+            if mtime < cutoff:
+                os.remove(fpath)
+                removed += 1
         except OSError:
             continue
-        try:
-            if fname.endswith(".json.done") and mtime < cutoff_done:
-                os.remove(fpath)
-                removed_done += 1
-            elif fname.startswith("response_") and fname.endswith(".json") and mtime < cutoff_json:
-                os.remove(fpath)
-                removed_json += 1
-                # Drop from local processed set too so it doesn't bloat
-                if fname in _processed_response_files:
-                    _processed_response_files.discard(fname)
-        except OSError as exc:
-            log_event("downtime_approval", f"cleanup old response file failed for {fname}: {exc}", level="WARN")
-
-    if removed_done or removed_json:
+    if removed:
         log_event("downtime_approval",
-                  f"cleanup: removed {removed_done} .json.done, {removed_json} response_*.json",
+                  f"cleanup: removed {removed} legacy response_*.json file(s)",
                   level="INFO")
-        if removed_json:
-            # Persist the trimmed processed set
-            try:
-                _save_processed_responses(_processed_response_files)
-            except Exception as exc:
-                log_event("downtime_approval", f"persist trimmed processed set failed: {exc}", level="WARN")

@@ -24,7 +24,6 @@ from tabs.utils import (
     DAILY_BASE_MINUTES,
     load_units_eq_data,
     calculate_equivalent_units,
-    calculate_downtime_equivalent_units,
 )
 
 PRODUCTION_TARGET_PCT = 95.0
@@ -151,10 +150,10 @@ def get_daily_metrics(fecha: str) -> dict:
             )
 
     downtime_pct = (total_downtime_min / DAILY_BASE_MINUTES) * 100 if total_downtime_min > 0 else 0.0
-    downtime_ue = calculate_downtime_equivalent_units(total_downtime_min)
+    downtime_ue = 0.0  # downtime no longer contributes to equivalent units
 
     production_pct = cases_pct + downtime_pct
-    equivalent_units = cases_ue + downtime_ue
+    equivalent_units = cases_ue
     met_target = production_pct >= PRODUCTION_TARGET_PCT or equivalent_units >= UE_TARGET
 
     return {

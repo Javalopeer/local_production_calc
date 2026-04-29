@@ -55,23 +55,6 @@ def calculate_case_value(std_time: float) -> float:
     return (std_time / DAILY_BASE_MINUTES) * 100
 
 
-def calculate_downtime_equivalent_units(
-    downtime_minutes: float,
-    target_daily_units: float = DAILY_TARGET_EQ_UNITS,
-) -> float:
-    """Convert downtime minutes to equivalent units.
-
-    Formula: (downtime_minutes / DAILY_BASE_MINUTES) * target_daily_units
-    """
-    try:
-        minutes = float(downtime_minutes or 0.0)
-    except (TypeError, ValueError):
-        minutes = 0.0
-    if minutes <= 0:
-        return 0.0
-    return (minutes / DAILY_BASE_MINUTES) * float(target_daily_units)
-
-
 # ── Units Equivalent data (module-level cache) ────────────────────────────────
 
 _units_eq_cache: Dict[str, Dict[str, float]] | None = None

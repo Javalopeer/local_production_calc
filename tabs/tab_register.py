@@ -20,7 +20,6 @@ from .utils import (
     load_units_eq_data,
     get_units_per_case as _ue_lookup,
     calculate_equivalent_units,
-    calculate_downtime_equivalent_units,
     DAILY_BASE_MINUTES,
 )
 from datetime import datetime
@@ -44,8 +43,9 @@ from .theme_table_utils import (
 
 
 class RegisterTab(QWidget):
-    case_saved = Signal()   # regular case saved/updated
-    ot_saved   = Signal()   # overtime case saved/updated
+    case_saved = Signal()       # regular case saved/updated
+    ot_saved   = Signal()       # overtime case saved/updated
+    downtime_changed = Signal() # any downtime mutation (add/edit/delete/status)
 
     def __init__(self):
         super().__init__()
@@ -263,7 +263,11 @@ class RegisterTab(QWidget):
         comments_card.setMaximumHeight(100)
         right_layout.addWidget(comments_card)
 
-        self.downtime_manager = DowntimeManager(on_update_callback=self.load_daily_production)
+        def _on_downtime_changed():
+            self.load_daily_production()
+            # Notify other tabs (Dashboard, History) so they re-query.
+            self.downtime_changed.emit()
+        self.downtime_manager = DowntimeManager(on_update_callback=_on_downtime_changed)
         self.downtime_manager.setMinimumHeight(260)
         self.downtime_manager.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.downtime_card = card("Downtime", self.downtime_manager)
@@ -292,15 +296,27 @@ class RegisterTab(QWidget):
                 font-size: 10px;
             }
         """)
+        # Make the table fill the card width like the Downtime table does:
+        # Doctor stretches to consume any leftover horizontal space; the rest
+        # stay at fixed widths so they don't clip the headers.
+        _hdr = self.reg_day_table.horizontalHeader()
+        _hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        _hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        _hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        _hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        _hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        _hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        _hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+        _hdr.setStretchLastSection(False)
         self.reg_day_table.setColumnWidth(0, 92)   # Case ID
-        self.reg_day_table.setColumnWidth(1, 132)  # Doctor
+        self.reg_day_table.setColumnWidth(1, 132)  # Doctor (stretches; this is the min)
         self.reg_day_table.setColumnWidth(2, 86)   # Type
-        self.reg_day_table.setColumnWidth(3, 48)   # Time
-        self.reg_day_table.setColumnWidth(4, 50)   # Eff %
-        self.reg_day_table.setColumnWidth(5, 58)   # Value %
-        self.reg_day_table.setColumnWidth(6, 44)   # UE
+        self.reg_day_table.setColumnWidth(3, 56)   # Time
+        self.reg_day_table.setColumnWidth(4, 60)   # Eff %
+        self.reg_day_table.setColumnWidth(5, 70)   # Value %
+        self.reg_day_table.setColumnWidth(6, 56)   # UE
         self.reg_day_table.setMinimumHeight(150)
-        self.reg_day_table.horizontalHeader().setStretchLastSection(False)
+        self.reg_day_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._reg_table_card = card("Today's Cases", self.reg_day_table)
         self._reg_table_card.setMinimumHeight(190)
         right_layout.addWidget(self._reg_table_card)
@@ -366,15 +382,25 @@ class RegisterTab(QWidget):
                 background-color: #333; border: 1px solid #555; padding: 4px;
             }
         """)
-        self.ot_reg_table.setColumnWidth(0, 92)   # Case ID
-        self.ot_reg_table.setColumnWidth(1, 132)  # Doctor
-        self.ot_reg_table.setColumnWidth(2, 86)   # Type
-        self.ot_reg_table.setColumnWidth(3, 48)   # Time
-        self.ot_reg_table.setColumnWidth(4, 50)   # Eff %
-        self.ot_reg_table.setColumnWidth(5, 58)   # Value %
-        self.ot_reg_table.setColumnWidth(6, 44)   # UE
+        # Match the regular table: Doctor stretches, others fixed.
+        _ot_hdr = self.ot_reg_table.horizontalHeader()
+        _ot_hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        _ot_hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        _ot_hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        _ot_hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        _ot_hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        _ot_hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        _ot_hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+        _ot_hdr.setStretchLastSection(False)
+        self.ot_reg_table.setColumnWidth(0, 92)
+        self.ot_reg_table.setColumnWidth(1, 132)
+        self.ot_reg_table.setColumnWidth(2, 86)
+        self.ot_reg_table.setColumnWidth(3, 56)
+        self.ot_reg_table.setColumnWidth(4, 60)
+        self.ot_reg_table.setColumnWidth(5, 70)
+        self.ot_reg_table.setColumnWidth(6, 56)
         self.ot_reg_table.setMinimumHeight(150)
-        self.ot_reg_table.horizontalHeader().setStretchLastSection(False)
+        self.ot_reg_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         _ot_table_card = card("Today's OT Cases", self.ot_reg_table)
         _ot_table_card.setMinimumHeight(190)
         ot_view_layout.addWidget(_ot_table_card)
@@ -839,31 +865,36 @@ class RegisterTab(QWidget):
             self._load_ot_day_cases()
 
     def load_daily_production(self):
-        conn = get_connection()
-        cursor = conn.cursor()
         # Use selected date from picker instead of today
         selected_date = self.case_date.date().toString("yyyy-MM-dd")
-        
-        # Get total case values for selected date (only count_production = 1)
-        cursor.execute("""
-            SELECT SUM(case_value)
-            FROM cases
-            WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
-        """, (selected_date,))
-        
-        result = cursor.fetchone()
-        total_cases = result[0] if result[0] else 0.0
-        
-        # Get cases by region+type for equivalent units calculation (only count_production = 1)
-        cursor.execute("""
-            SELECT region, tipo_caso, COUNT(*), SUM(case_value)
-            FROM cases
-            WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
-            GROUP BY region, tipo_caso
-        """, (selected_date,))
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
 
-        region_cases = cursor.fetchall()
-        conn.close()
+            # Get total case values for selected date (only count_production = 1)
+            cursor.execute("""
+                SELECT SUM(case_value)
+                FROM cases
+                WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
+            """, (selected_date,))
+
+            result = cursor.fetchone()
+            total_cases = result[0] if result[0] else 0.0
+
+            # Get cases by region+type for equivalent units calculation
+            cursor.execute("""
+                SELECT region, tipo_caso, COUNT(*), SUM(case_value)
+                FROM cases
+                WHERE fecha = ? AND (count_production = 1 OR count_production IS NULL)
+                GROUP BY region, tipo_caso
+            """, (selected_date,))
+
+            region_cases = cursor.fetchall()
+            conn.close()
+        except Exception as exc:
+            # DB locked or unavailable — keep prior labels rather than blanking the UI
+            print(f"[RegisterTab] load_daily_production query failed: {exc}")
+            return
 
         # Calculate equivalent units supporting both legacy and per-type UE models
         total_equivalent_units = 0.0
@@ -889,16 +920,8 @@ class RegisterTab(QWidget):
             display_label += f" (Cases: {total_cases:.2f}% + Downtime: {downtime_value:.2f}%)"
         
         self.daily_production_label.setText(display_label)
-        downtime_equivalent_units = calculate_downtime_equivalent_units(total_downtime)
-        total_equivalent_units += downtime_equivalent_units
 
-        eq_label = f"Equivalent Units: {total_equivalent_units:.2f}"
-        if downtime_equivalent_units > 0:
-            eq_label += (
-                f" (Cases: {total_equivalent_units - downtime_equivalent_units:.2f}"
-                f" + Downtime: {downtime_equivalent_units:.2f})"
-            )
-        self.equivalent_units_label.setText(eq_label)
+        self.equivalent_units_label.setText(f"Equivalent Units: {total_equivalent_units:.2f}")
         
         # Update progress bar with animation - NO CAP, allow any value
         self.progress_bar.setMaximum(max(100, int(total_production) + 10))
@@ -914,14 +937,25 @@ class RegisterTab(QWidget):
         else:
             bar_color = "#3FB950"   # green
 
+        # Adapt track + text colors to active theme so the bar doesn't show
+        # a dark slab on a light background.
+        try:
+            from PySide6.QtGui import QPalette
+            pal = QApplication.instance().palette()
+            is_light = pal.color(QPalette.ColorRole.Window).lightness() > 128
+        except Exception:
+            is_light = False
+        track_bg = "#E1E4E8" if is_light else "#21262D"
+        text_fg = "#1F2328" if is_light else "#E6EDF3"
+
         self.progress_bar.setStyleSheet(f"""
             QProgressBar {{
-                background-color: #21262D;
+                background-color: {track_bg};
                 border: none;
                 border-radius: 6px;
                 text-align: center;
                 min-height: 24px;
-                color: #E6EDF3;
+                color: {text_fg};
                 font-weight: 700;
                 font-size: 11px;
             }}
@@ -1375,6 +1409,15 @@ class RegisterTab(QWidget):
         if not show_import_confirmation(self, data):
             return
 
+        # Extra confirmation when importing into OT mode. The case will be
+        # stamped with the current time, so we check that against the regular
+        # schedule (05:40 – 15:14). The user gets a tailored message depending
+        # on whether the current time lands inside or outside regular hours,
+        # since either case is worth a sanity check before recording as OT.
+        if self._mode == "overtime":
+            if not self._confirm_ot_import_time():
+                return
+
         imported_case_id, imported_region, imported_type = apply_imported_case_data(
             data,
             case_id_widget=self.case_id,
@@ -1397,6 +1440,47 @@ class RegisterTab(QWidget):
             get_import_reminder_message(),
             duration_ms=4200,
         )
+
+    # Regular working schedule used to flag suspicious OT imports.
+    _REGULAR_START = QTime(5, 40)
+    _REGULAR_END   = QTime(15, 14)
+
+    def _confirm_ot_import_time(self) -> bool:
+        """Show a confirmation popup before importing a case under OT mode.
+
+        Returns True if the user confirmed, False to abort the import.
+
+        Two messages depending on whether the current time falls inside the
+        regular schedule (05:40 - 15:14): inside is the riskier case (OT
+        being logged during regular hours), outside is the normal case but
+        we still ask just to be safe per user request.
+        """
+        now = QTime.currentTime()
+        in_regular = self._REGULAR_START <= now <= self._REGULAR_END
+        now_str = now.toString("HH:mm")
+
+        if in_regular:
+            title = "Importar como OT en horario regular"
+            text = (
+                f"Hora actual: {now_str}\n\n"
+                "Este caso se importará como OT pero la hora actual está\n"
+                "dentro del horario regular (05:40 a 15:14).\n\n"
+                "¿Seguro desea proseguir?"
+            )
+        else:
+            title = "Confirmar importación OT"
+            text = (
+                f"Hora actual: {now_str}\n\n"
+                "El caso se importará como OT (fuera de horario regular).\n\n"
+                "¿Seguro desea proseguir?"
+            )
+
+        reply = QMessageBox.question(
+            self, title, text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def _on_load_db(self):
         """Open a file dialog, pick an old cases.db, merge it into the current DB."""

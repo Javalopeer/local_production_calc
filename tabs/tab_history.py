@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor, QFont, QBrush
 from db.database import get_connection
 from .utils import (
     load_units_eq_data, calculate_equivalent_units,
-    calculate_downtime_equivalent_units, DAILY_BASE_MINUTES,
+    DAILY_BASE_MINUTES,
 )
 from .theme_table_utils import (
     apply_table_theme, CLR_FG_LIGHT, CLR_FG_DARK,
@@ -369,27 +369,32 @@ class HistoryTab(QWidget):
         self.filter_type.addItems(types)
 
     def load_all_cases(self):
-        conn = get_connection()
-        cursor = conn.cursor()
-        # Load regular and OT cases together, marking source
-        cursor.execute("""
-            SELECT * FROM (
-                SELECT id, case_id, doctor, region, tipo_caso,
-                       fecha, tiempo_real, std_time, efficiency, estado, case_value,
-                       COALESCE(count_production, 1) as count_production,
-                       'reg' as source, comments
-                FROM cases
-                UNION ALL
-                SELECT id, case_id, doctor, region, tipo_caso,
-                       fecha, tiempo_real, std_time, efficiency, estado, case_value,
-                       COALESCE(count_production, 1) as count_production,
-                       'ot' as source, comments
-                FROM ot_cases
-            )
-            ORDER BY id DESC
-        """)
-        self.all_cases = cursor.fetchall()
-        conn.close()
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            # Load regular and OT cases together, marking source
+            cursor.execute("""
+                SELECT * FROM (
+                    SELECT id, case_id, doctor, region, tipo_caso,
+                           fecha, tiempo_real, std_time, efficiency, estado, case_value,
+                           COALESCE(count_production, 1) as count_production,
+                           'reg' as source, comments
+                    FROM cases
+                    UNION ALL
+                    SELECT id, case_id, doctor, region, tipo_caso,
+                           fecha, tiempo_real, std_time, efficiency, estado, case_value,
+                           COALESCE(count_production, 1) as count_production,
+                           'ot' as source, comments
+                    FROM ot_cases
+                )
+                ORDER BY id DESC
+            """)
+            self.all_cases = cursor.fetchall()
+            conn.close()
+        except Exception as exc:
+            # Keep prior snapshot if DB momentarily locked
+            print(f"[HistoryTab] load_all_cases failed: {exc}")
+            return
         self.load_regions_and_types()
         self.filter_cases()
 
@@ -514,19 +519,15 @@ class HistoryTab(QWidget):
         conn.close()
         total_downtime_mins = dt_row[0] if dt_row and dt_row[0] else 0.0
         downtime_value = (total_downtime_mins / DAILY_BASE_MINUTES) * 100 if total_downtime_mins > 0 else 0
-        downtime_ue = calculate_downtime_equivalent_units(total_downtime_mins)
 
         combined_value = total_value + downtime_value
-        combined_ue = total_ue + downtime_ue
 
         if total_downtime_mins > 0:
             self.stats_label.setText(
                 f"Total: {total_cases} | Time: {total_time:.0f}m | "
                 f"Production: {combined_value:.2f}% (Cases: {total_value:.2f}% + Downtime: {downtime_value:.2f}%)"
             )
-            self.stats_label2.setText(
-                f"Equivalent Units: {combined_ue:.2f} (Cases: {total_ue:.2f} + Downtime: {downtime_ue:.2f})"
-            )
+            self.stats_label2.setText(f"Equivalent Units: {total_ue:.2f}")
             self.stats_label2.setVisible(True)
         else:
             self.stats_label.setText(

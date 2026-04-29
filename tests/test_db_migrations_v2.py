@@ -93,7 +93,9 @@ def test_migration_v1_to_v2_preserves_rows(monkeypatch):
             "SELECT razon, status, detalle, downtime_case_id FROM downtimes LIMIT 1"
         ).fetchone()
         assert row[0] == "CMS Down"
-        assert row[1] == "pending"
+        # v4 backlog cleanup auto-approves any DT left in 'pending' from the
+        # retired Power Automate flow, so the legacy row ends up as 'approved'.
+        assert row[1] == "approved"
         assert row[2] == "legacy-detail"
         assert row[3] in ("", None)
     finally:

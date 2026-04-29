@@ -5,7 +5,6 @@ Startup safety backups.
 Creates timestamped copies of critical local data before normal app activity:
   - cases.db
   - local config.json
-  - local processed_responses.json
   - shared _shared_config.json (if export folder exists)
 """
 
@@ -75,11 +74,6 @@ def run_startup_backups() -> dict:
     cfg_dst = os.path.join(cfg_dir, f"config_{now}.json")
     if _safe_copy(local_cfg, cfg_dst):
         counters["config"] += 1
-
-    local_processed = get_local_app_dir("processed_responses.json")
-    local_dst = os.path.join(local_dir, f"processed_responses_{now}.json")
-    if _safe_copy(local_processed, local_dst):
-        counters["local"] += 1
 
     try:
         cfg = load_config()

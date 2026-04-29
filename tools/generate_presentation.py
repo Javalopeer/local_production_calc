@@ -332,8 +332,8 @@ def create_presentation():
          "Tipo de downtime, duración, motivo — todo clasificado para análisis"),
         ("Impacto automático en producción",
          "Los downtimes aprobados se restan del tiempo base, ajustando el % de producción"),
-        ("Cálculo de UE por downtime",
-         "Los downtimes generan unidades equivalentes proporcionales al tiempo"),
+        ("Impacto solo en % de producción",
+         "Los downtimes suman al porcentaje de producción regular, no a unidades equivalentes"),
         ("Sistema de aprobación por supervisor",
          "Los downtimes requieren aprobación — Excel compartido en OneDrive"),
     ])

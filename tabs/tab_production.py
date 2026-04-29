@@ -11,7 +11,6 @@ from .utils import (
     load_units_eq_data,
     get_units_per_case as _ue_lookup,
     calculate_equivalent_units,
-    calculate_downtime_equivalent_units,
     DAILY_BASE_MINUTES,
 )
 from .theme_table_utils import (
@@ -383,27 +382,32 @@ class ProductionTab(QWidget):
         self.load_data()
 
     def load_data(self):
-        conn = get_connection()
-        cursor = conn.cursor()
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
 
-        if self.current_mode == "reg":
-            cursor.execute("""
-                SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin,
-                       tiempo_real, efficiency, estado, case_value, count_production, comments
-                FROM cases
-                ORDER BY id DESC
-            """)
-        else:  # OT mode
-            cursor.execute("""
-                SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin,
-                       tiempo_real, efficiency, estado, case_value, count_production, comments
-                FROM ot_cases
-                ORDER BY id DESC
-            """)
+            if self.current_mode == "reg":
+                cursor.execute("""
+                    SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin,
+                           tiempo_real, efficiency, estado, case_value, count_production, comments
+                    FROM cases
+                    ORDER BY id DESC
+                """)
+            else:  # OT mode
+                cursor.execute("""
+                    SELECT id, case_id, doctor, region, tipo_caso, fecha, hora_inicio, hora_fin,
+                           tiempo_real, efficiency, estado, case_value, count_production, comments
+                    FROM ot_cases
+                    ORDER BY id DESC
+                """)
 
-        self.all_cases = cursor.fetchall()
-        conn.close()
-        
+            self.all_cases = cursor.fetchall()
+            conn.close()
+        except Exception as exc:
+            # DB momentarily locked — keep last successful snapshot, do not wipe the table
+            print(f"[ProductionTab] load_data failed: {exc}")
+            return
+
         self.load_regions_and_types()
         self.filter_data()
 
@@ -503,11 +507,10 @@ class ProductionTab(QWidget):
             finally:
                 conn_dt.close()
 
-        # Count rows needed (date header rows + type-breakdown row + cases)
+        # Count rows needed (date header row + type-breakdown row + cases)
         total_rows = 0
         for f, cases in grouped.items():
-            dt = _dt_map.get(f, 0) or 0
-            total_rows += (3 if dt > 0 else 2) + len(cases)
+            total_rows += 2 + len(cases)
 
         # Reset any previous row spans/content before drawing current page.
         self.table.clearSpans()
@@ -526,13 +529,11 @@ class ProductionTab(QWidget):
             daily_units_eq = sum(self.calculate_units_eq(case[3], case[11], case[4]) for case in prod_cases)
             daily_time_sum = sum((case[8] or 0) for case in prod_cases)
 
-            # Add downtime credit
+            # Add downtime credit (production % only — UE no longer includes downtime)
             dt_mins = _dt_map.get(fecha, 0) or 0
             dt_value = (dt_mins / DAILY_BASE_MINUTES) * 100 if dt_mins > 0 else 0
-            dt_ue = calculate_downtime_equivalent_units(dt_mins)
 
             total_value_day = daily_value + dt_value
-            total_ue_day = daily_units_eq + dt_ue
 
             # Theme colors for header rows
             if current_is_light:
@@ -544,12 +545,12 @@ class ProductionTab(QWidget):
             header_font = QFont()
             header_font.setBold(True)
 
-            # ── Row 1: Date, cases, value, time ──
+            # ── Row 1: Date, cases, value, units, time ──
             if dt_mins > 0:
                 line1 = (
                     f"    {fecha}     {daily_cases} cases     "
                     f"Value: {total_value_day:.2f}% (Cases: {daily_value:.2f}% + DT: {dt_value:.2f}%)     "
-                    f"Time: {daily_time_sum:.0f}m    "
+                    f"Units: {daily_units_eq:.2f}     Time: {daily_time_sum:.0f}m    "
                 )
             else:
                 line1 = (
@@ -571,34 +572,6 @@ class ProductionTab(QWidget):
                 self.table.setItem(row_idx, col, ei)
             self.table.setSpan(row_idx, 0, 1, 10)
             row_idx += 1
-
-            # ── Row 2 (only when downtime): Units breakdown ──
-            if dt_mins > 0:
-                line2 = (
-                    f"    Units: {total_ue_day:.2f} (Cases: {daily_units_eq:.2f} + DT: {dt_ue:.2f})    "
-                )
-                units_item = QTableWidgetItem(line2)
-                if current_is_light:
-                    u_bg = QColor(mix_hex(light_colors["surface_bg"], light_colors["selection_bg"], 0.50))
-                    u_fg = QColor(light_colors["text_primary"])
-                else:
-                    u_bg = QColor(65, 65, 78)
-                    u_fg = QColor(200, 210, 225)
-                units_item.setBackground(u_bg)
-                units_item.setForeground(u_fg)
-                units_font = QFont()
-                units_font.setBold(True)
-                units_font.setPointSize(9)
-                units_item.setFont(units_font)
-                units_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(row_idx, 0, units_item)
-                self.table.setRowHeight(row_idx, 24)
-                for col in range(1, 10):
-                    ei = QTableWidgetItem("")
-                    ei.setBackground(u_bg)
-                    self.table.setItem(row_idx, col, ei)
-                self.table.setSpan(row_idx, 0, 1, 10)
-                row_idx += 1
 
             # ── Type-breakdown sub-row ─────────────────────────────────
             type_counts = Counter(case[4] or "Unknown" for case in prod_cases)

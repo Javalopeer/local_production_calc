@@ -6,8 +6,25 @@ from PySide6.QtWidgets import (
     QPushButton, QMessageBox, QLabel, QLineEdit, QDialog,
     QVBoxLayout, QHBoxLayout, QDialogButtonBox
 )
-from PySide6.QtCore import Qt, Signal, QThread, QTimer, QEvent
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QEvent, qInstallMessageHandler, QtMsgType
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut, QIcon
+
+
+def _qt_message_filter(mode, context, message):
+    """Drop Qt's harmless `QFont::setPointSize: Point size <= 0` chatter.
+
+    Our stylesheets express font sizes in pixels (`font-size: 11px`), so the
+    derived QFont has pointSize == -1. Some internal Qt paths still call
+    `setPointSize(font.pointSize())` on those fonts and Qt emits a warning
+    every time. The widgets render fine — it's pure noise. Pass everything
+    else through to stderr so real warnings stay visible.
+    """
+    if message and "QFont::setPointSize: Point size <= 0" in message:
+        return
+    sys.stderr.write(message + "\n")
+
+
+qInstallMessageHandler(_qt_message_filter)
 from db.database import init_db, migrate_legacy_db, discover_and_merge_background_dbs
 from sync.app_logger import log_event
 from tabs.utils import load_units_eq_data
@@ -35,7 +52,7 @@ except Exception as _perf_err:
     print(f"[main] Performance module unavailable: {_perf_err}")
     _PERF_OK = False
 
-_JUSTIFICATION_ENABLED = True
+_JUSTIFICATION_ENABLED = False
 
 
 def _resource_path(relative: str) -> str:
@@ -219,6 +236,11 @@ class MainWindow(QMainWindow):
         self.register_tab.case_saved.connect(self.production_tab.load_data)
         self.register_tab.case_saved.connect(self.history_tab.load_all_cases)
         self.register_tab.case_saved.connect(self.dashboard_tab.refresh)
+
+        # Downtime mutations (add/edit/delete/status) — refresh views that
+        # aggregate downtime data so they don't show stale counts.
+        self.register_tab.downtime_changed.connect(self.dashboard_tab.refresh)
+        self.register_tab.downtime_changed.connect(self.history_tab.load_all_cases)
 
         # Connect production tab edit/delete to register tab
         self.production_tab.case_updated.connect(self.on_production_case_updated)
