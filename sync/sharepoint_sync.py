@@ -512,6 +512,742 @@ def _build_daily_summary(wb, target_date: str, designer: str,
     _autowidth(ws)
 
 
+def _build_case_detail(wb, target_date: str, designer: str,
+                       cases, ot_cases, downtimes):
+    """Add a 'Case Detail' sheet with full per-case columns.
+
+    Used by the Team-tab modal and the team-wide download to show
+    doctor, std/actual time, comments, etc. without exposing them in
+    the summary view.
+    """
+    ws = wb.create_sheet("Case Detail")
+    ws.sheet_view.showGridLines = False
+
+    ws.merge_cells("A1:L1")
+    t = ws["A1"]
+    t.value = f"Case Detail — {designer} — {target_date}"
+    t.font  = Font(bold=True, size=13, color=_HEADER_FG)
+    t.fill  = _header_fill(_TITLE_GREY)
+    t.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 26
+
+    headers = [
+        "Source", "Case ID", "Region", "Type", "Doctor",
+        "Start", "End", "Standard (min)", "Actual (min)",
+        "Value (%)", "Status", "Comments",
+    ]
+    for ci, h in enumerate(headers, 1):
+        _hdr(ws.cell(3, ci), h)
+    ws.freeze_panes = "A4"
+
+    def _write(row_i, source, c, bg):
+        # cases tuple: 0 case_id, 1 region, 2 type, 3 doctor,
+        # 4 hora_inicio, 5 hora_fin, 6 std_time, 7 tiempo_real,
+        # 8 efficiency, 9 estado, 10 case_value, 11 count_production, 12 comments
+        _cell(ws.cell(row_i, 1),  source,             bg=bg, align="center")
+        _cell(ws.cell(row_i, 2),  c[0] or "",         bg=bg)
+        _cell(ws.cell(row_i, 3),  c[1] or "",         bg=bg)
+        _cell(ws.cell(row_i, 4),  c[2] or "",         bg=bg)
+        _cell(ws.cell(row_i, 5),  c[3] or "",         bg=bg)
+        _cell(ws.cell(row_i, 6),  c[4] or "",         bg=bg, align="center")
+        _cell(ws.cell(row_i, 7),  c[5] or "",         bg=bg, align="center")
+        _cell(ws.cell(row_i, 8),  f"{(c[6] or 0):.2f}",  bg=bg, align="right")
+        _cell(ws.cell(row_i, 9),  f"{(c[7] or 0):.2f}",  bg=bg, align="right")
+        _cell(ws.cell(row_i, 10), f"{(c[10] or 0):.3f}%", bg=bg, align="right")
+        _cell(ws.cell(row_i, 11), c[9] or "",         bg=bg, align="center")
+        _cell(ws.cell(row_i, 12), c[12] or "",        bg=bg)
+
+    row = 4
+    for i, c in enumerate(cases):
+        bg = _GREY_ROW if i % 2 == 0 else "FFFFFF"
+        _write(row, "Reg", c, bg)
+        row += 1
+    for i, c in enumerate(ot_cases):
+        bg = "F3E5F5" if i % 2 == 0 else "FFFFFF"
+        _write(row, "OT", c, bg)
+        row += 1
+
+    if not cases and not ot_cases:
+        ws.merge_cells(f"A{row}:L{row}")
+        ws.cell(row, 1).value = "No cases for this date."
+        row += 1
+
+    # Downtime block at the bottom
+    row += 1
+    ws.merge_cells(f"A{row}:L{row}")
+    dt = ws.cell(row, 1)
+    dt.value = "Downtime"
+    dt.font  = Font(bold=True, size=11, color=_HEADER_FG)
+    dt.fill  = _header_fill("E65100")
+    dt.alignment = Alignment(horizontal="left")
+    row += 1
+    for ci, h in enumerate(["Start", "End", "Duration (min)", "Reason"], 1):
+        _hdr(ws.cell(row, ci), h, bg="FBE9E7", color="000000")
+    for i, d in enumerate(downtimes):
+        row += 1
+        bg = _GREY_ROW if i % 2 == 0 else "FFFFFF"
+        _cell(ws.cell(row, 1), d[0], bg=bg, align="center")
+        _cell(ws.cell(row, 2), d[1], bg=bg, align="center")
+        _cell(ws.cell(row, 3), d[2], bg=bg, align="center")
+        _cell(ws.cell(row, 4), d[3], bg=bg)
+
+    _autowidth(ws)
+
+
+def _hide_blank_columns_in_sheet(ws, header_row: int, data_start: int,
+                                 data_end: int) -> None:
+    """Set column_dimensions[..].hidden = True for columns whose every data
+    cell (rows data_start..data_end) is empty / dash / zero-string."""
+    if data_end < data_start:
+        return
+    BLANK = {"", "—", "-", "0", "0.00", "0.000%"}
+    max_col = ws.max_column or 0
+    for col in range(1, max_col + 1):
+        empty = True
+        for r in range(data_start, data_end + 1):
+            v = ws.cell(r, col).value
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s and s not in BLANK:
+                empty = False
+                break
+        if empty:
+            letter = get_column_letter(col)
+            ws.column_dimensions[letter].hidden = True
+
+
+def _designer_day_file(productions_dir: str, designer_name: str,
+                       target_date: str) -> str:
+    """Return the absolute path of <Designer>'s daily file for target_date."""
+    safe_name = designer_name.replace(" ", "_").replace("/", "-")
+    d = date.fromisoformat(target_date)
+    week_num = d.isocalendar()[1]
+    month_str = d.strftime("%Y-%m")
+    week_str = f"Week-{week_num:02d}"
+    return os.path.join(
+        productions_dir, month_str, week_str, target_date,
+        f"{safe_name}_Production_{target_date}.xlsx",
+    )
+
+
+def read_designer_day_detail(productions_dir: str, designer_name: str,
+                             target_date: str) -> dict:
+    """Parse the 'Case Detail' sheet from <Designer>'s daily file.
+
+    Returns a dict with keys: cases (list of REG dicts), ot_cases (list of OT
+    dicts), downtimes (list of dicts), found (bool), path (str).
+    Each case dict: source, case_id, region, type, doctor, start, end,
+    std, actual, value, status, comments.
+    """
+    path = _designer_day_file(productions_dir, designer_name, target_date)
+    out = {
+        "cases": [], "ot_cases": [], "downtimes": [],
+        "found": False, "path": path,
+    }
+    if not _OPENPYXL_OK or not os.path.exists(path):
+        return out
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        if "Case Detail" in wb.sheetnames:
+            _parse_case_detail_sheet(wb["Case Detail"], out)
+        elif "Daily Summary" in wb.sheetnames:
+            # Fallback for files written before Case Detail existed.
+            # Doctor / std / actual / status / comments will be blank.
+            _parse_daily_summary_legacy(wb["Daily Summary"], out)
+        wb.close()
+        out["found"] = bool(
+            out["cases"] or out["ot_cases"] or out["downtimes"]
+        )
+    except Exception as exc:
+        log_event("sharepoint_sync",
+                  f"read designer detail {path}: {exc}", level="WARN")
+    return out
+
+
+def _parse_case_detail_sheet(ws, out: dict) -> None:
+    in_downtime = False
+    for row in ws.iter_rows(min_row=4, values_only=True):
+        if not row:
+            continue
+        first = row[0]
+        if first == "Downtime":
+            in_downtime = True
+            continue
+        if first == "Start":
+            in_downtime = True
+            continue
+        if first in ("Reg", "OT"):
+            rec = {
+                "source":   first,
+                "case_id":  row[1] if len(row) > 1 else "",
+                "region":   row[2] if len(row) > 2 else "",
+                "type":     row[3] if len(row) > 3 else "",
+                "doctor":   row[4] if len(row) > 4 else "",
+                "start":    row[5] if len(row) > 5 else "",
+                "end":      row[6] if len(row) > 6 else "",
+                "std":      row[7] if len(row) > 7 else "",
+                "actual":   row[8] if len(row) > 8 else "",
+                "value":    row[9] if len(row) > 9 else "",
+                "status":   row[10] if len(row) > 10 else "",
+                "comments": row[11] if len(row) > 11 else "",
+            }
+            if first == "Reg":
+                out["cases"].append(rec)
+            else:
+                out["ot_cases"].append(rec)
+        elif in_downtime and first not in (None, ""):
+            out["downtimes"].append({
+                "start":    row[0] if len(row) > 0 else "",
+                "end":      row[1] if len(row) > 1 else "",
+                "duration": row[2] if len(row) > 2 else "",
+                "reason":   row[3] if len(row) > 3 else "",
+            })
+
+
+def _parse_daily_summary_legacy(ws, out: dict) -> None:
+    """Parse the legacy 'Daily Summary' sheet for files written before the
+    Case Detail sheet existed.  We pick up Case ID / Region / Type / Start /
+    End / Value%.  Doctor, std, actual, status, comments stay blank.
+    """
+    section = None  # one of None, "reg", "ot", "downtime"
+    skip_header = False
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        if not row:
+            continue
+        first = row[0]
+        if first in ("Regular Cases", "Overtime Cases", "Downtime"):
+            section = {"Regular Cases": "reg", "Overtime Cases": "ot",
+                       "Downtime": "downtime"}[first]
+            skip_header = True
+            continue
+        if skip_header:
+            skip_header = False
+            continue
+        if first in (None, "") or section is None:
+            continue
+        # Stop tags
+        if isinstance(first, str) and first.startswith("Generated:"):
+            break
+        if section in ("reg", "ot"):
+            # Skip "No regular cases for this date." style rows
+            if isinstance(first, str) and first.lower().startswith("no "):
+                continue
+            value_str = ""
+            if len(row) > 5 and row[5] not in (None, "—"):
+                v = row[5]
+                value_str = str(v) if isinstance(v, str) else f"{float(v):.3f}%"
+            rec = {
+                "source":   "Reg" if section == "reg" else "OT",
+                "case_id":  row[0] if len(row) > 0 else "",
+                "region":   row[1] if len(row) > 1 else "",
+                "type":     row[2] if len(row) > 2 else "",
+                "doctor":   "",
+                "start":    row[3] if len(row) > 3 else "",
+                "end":      row[4] if len(row) > 4 else "",
+                "std":      "",
+                "actual":   "",
+                "value":    value_str,
+                "status":   "",
+                "comments": "",
+            }
+            if section == "reg":
+                out["cases"].append(rec)
+            else:
+                out["ot_cases"].append(rec)
+        elif section == "downtime":
+            if isinstance(first, str) and first.lower().startswith("no "):
+                continue
+            out["downtimes"].append({
+                "start":    row[0] if len(row) > 0 else "",
+                "end":      row[1] if len(row) > 1 else "",
+                "duration": row[2] if len(row) > 2 else "",
+                "reason":   row[3] if len(row) > 3 else "",
+            })
+
+
+def export_team_full_for_date(productions_dir: str, target_date: str,
+                              out_path: str) -> tuple[bool, str]:
+    """Aggregate every designer's Case Detail for target_date into a single
+    workbook saved at out_path. Used by the Team-tab Download button.
+    """
+    if not _OPENPYXL_OK:
+        return False, f"openpyxl load error: {_OPENPYXL_ERROR}"
+    if not os.path.isdir(productions_dir):
+        return False, f"Folder not found: {productions_dir}"
+
+    # Discover designers via per-designer summary folders.
+    designers: list[str] = []
+    try:
+        for entry in os.listdir(productions_dir):
+            full = os.path.join(productions_dir, entry)
+            if not os.path.isdir(full):
+                continue
+            if entry.startswith(("Dashboards", "_")):
+                continue
+            # Skip month folders like "2026-04"
+            if len(entry) == 7 and entry[4] == "-":
+                continue
+            if os.path.isfile(os.path.join(full, "_Summary.xlsx")):
+                designers.append(entry.replace("_", " "))
+    except Exception as exc:
+        return False, f"Could not enumerate designers: {exc}"
+    designers.sort()
+    if not designers:
+        return False, "No designers found in Productions folder."
+
+    # ── Read each designer's per-day detail + summary row ───────────────────
+    per_designer = []   # list of dicts: name, sheet_name, detail, summary
+    for designer_name in designers:
+        detail = read_designer_day_detail(productions_dir, designer_name, target_date)
+        has_data = detail["found"] and (
+            detail["cases"] or detail["ot_cases"] or detail["downtimes"]
+        )
+        if not has_data:
+            continue
+        summary = _read_summary_row(productions_dir, designer_name, target_date)
+        per_designer.append({
+            "name":       designer_name,
+            "sheet_name": _safe_sheet_name(designer_name),
+            "detail":     detail,
+            "summary":    summary,
+        })
+
+    if not per_designer:
+        return False, "No designers had data for this date."
+
+    wb = openpyxl.Workbook()
+
+    # Build Dashboard sheet first (acts as the navigation hub).
+    ws_dash = wb.active
+    ws_dash.title = "Dashboard"
+    _build_team_dashboard_sheet(ws_dash, target_date, per_designer)
+
+    # One sheet per designer with their own cases + downtime block.
+    for entry in per_designer:
+        ws = wb.create_sheet(entry["sheet_name"])
+        _build_designer_sheet(ws, target_date, entry)
+
+    try:
+        _save_atomic(wb, out_path)
+    except PermissionError:
+        return False, (
+            "Could not save the file because it is open in Excel.\n\n"
+            f"Close it (or pick a different name) and try again:\n{out_path}"
+        )
+    except Exception as exc:
+        return False, f"Could not save file:\n{exc}"
+
+    msg = (f"Saved: {out_path}\n\n"
+           f"Designers included: {len(per_designer)}")
+    return True, msg
+
+
+def _read_summary_row(productions_dir: str, designer_name: str,
+                      target_date: str) -> dict:
+    """Pull production%, UE, etc. for target_date from <Designer>/_Summary.xlsx."""
+    out = {
+        "production_pct": None, "cases_pct": None, "downtime_pct": None,
+        "reg_cases": 0, "ot_cases": 0, "ue_total": 0.0, "ue_cases": 0.0,
+    }
+    safe_name = designer_name.replace(" ", "_").replace("/", "-")
+    summary_path = os.path.join(productions_dir, safe_name, "_Summary.xlsx")
+    if not os.path.exists(summary_path):
+        return out
+    try:
+        wb = openpyxl.load_workbook(summary_path, read_only=True, data_only=True)
+        ws = wb.active
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row or row[0] != target_date:
+                continue
+
+            def _f(idx):
+                try:
+                    v = row[idx]
+                    if isinstance(v, str) and v.endswith("%"):
+                        return float(v.rstrip("%"))
+                    return float(v) if v is not None else 0.0
+                except (IndexError, TypeError, ValueError):
+                    return 0.0
+
+            def _i(idx):
+                try:
+                    return int(row[idx]) if row[idx] is not None else 0
+                except (IndexError, TypeError, ValueError):
+                    return 0
+
+            out["cases_pct"]      = _f(2)
+            out["downtime_pct"]   = _f(3)
+            out["production_pct"] = _f(4)
+            out["reg_cases"]      = _i(5)
+            out["ot_cases"]       = _i(6)
+            out["ue_total"]       = _f(7)
+            out["ue_cases"]       = _f(8)
+            break
+        wb.close()
+    except Exception as exc:
+        log_event("sharepoint_sync",
+                  f"summary row {summary_path}: {exc}", level="WARN")
+    return out
+
+
+# Modern palette for the team export
+_TEAM_NAVY    = "0B2545"
+_TEAM_BLUE    = "1F6FEB"
+_TEAM_INDIGO  = "364FC7"
+_TEAM_LIGHT   = "EEF2FF"
+_TEAM_BG_ZEBRA = "F8FAFC"
+_TEAM_BORDER  = "E5E7EB"
+_TEAM_CHIP_OK   = "D1FAE5"
+_TEAM_CHIP_OK_FG = "065F46"
+_TEAM_CHIP_WARN = "FEF3C7"
+_TEAM_CHIP_WARN_FG = "92400E"
+_TEAM_CHIP_BAD  = "FEE2E2"
+_TEAM_CHIP_BAD_FG = "991B1B"
+
+
+def _team_thin_border():
+    side = Side(style="thin", color=_TEAM_BORDER)
+    return Border(left=side, right=side, top=side, bottom=side)
+
+
+def _team_chip_for_pct(pct: float) -> tuple[str, str, str]:
+    """Return (label, bg, fg) for a production-percent chip."""
+    if pct >= 100:
+        return ("On Track", _TEAM_CHIP_OK, _TEAM_CHIP_OK_FG)
+    if pct >= 95:
+        return ("Near Target", _TEAM_CHIP_WARN, _TEAM_CHIP_WARN_FG)
+    if pct >= 85:
+        return ("At Risk", _TEAM_CHIP_WARN, _TEAM_CHIP_WARN_FG)
+    return ("Behind", _TEAM_CHIP_BAD, _TEAM_CHIP_BAD_FG)
+
+
+def _build_team_dashboard_sheet(ws, target_date: str, per_designer: list[dict]) -> None:
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 100
+
+    # Hero banner
+    ws.merge_cells("A1:H1")
+    hero = ws.cell(1, 1)
+    hero.value = "Team Performance Report"
+    hero.font = Font(bold=True, size=20, color="FFFFFF")
+    hero.fill = PatternFill("solid", fgColor=_TEAM_NAVY)
+    hero.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 44
+
+    ws.merge_cells("A2:H2")
+    sub = ws.cell(2, 1)
+    sub.value = (f"Date {target_date}    ·    "
+                 f"{len(per_designer)} designers    ·    "
+                 f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    sub.font = Font(size=11, color="FFFFFF")
+    sub.fill = PatternFill("solid", fgColor=_TEAM_INDIGO)
+    sub.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[2].height = 22
+
+    # KPI cards
+    total_cases = sum(len(e["detail"]["cases"]) for e in per_designer)
+    total_ot    = sum(len(e["detail"]["ot_cases"]) for e in per_designer)
+    total_ue    = sum(e["summary"]["ue_total"] for e in per_designer)
+    avg_pct     = (sum(e["summary"]["production_pct"] or 0 for e in per_designer)
+                   / len(per_designer)) if per_designer else 0.0
+
+    cards = [
+        ("DESIGNERS",         f"{len(per_designer)}",  _TEAM_BLUE),
+        ("REGULAR CASES",     f"{total_cases}",        _TEAM_INDIGO),
+        ("OT CASES",          f"{total_ot}",           "6A1B9A"),
+        ("AVG PRODUCTION %",  f"{avg_pct:.1f}%",       "0F766E"),
+        ("TOTAL UE",          f"{total_ue:.1f}",       "C2410C"),
+    ]
+    for i, (label, val, color) in enumerate(cards):
+        col = 1 + i + (i // 2 if False else 0)  # stay simple
+    # render two columns wide each
+    start_col = 1
+    for i, (label, val, color) in enumerate(cards):
+        c1 = start_col + i * 2 - i  # span: 1..2, 3..4, 5..6, 7..8, 9..10
+    # Simpler: explicitly merge per card
+    card_row_top = 4
+    card_row_bot = 6
+    ws.row_dimensions[card_row_top].height = 16
+    ws.row_dimensions[card_row_bot].height = 28
+    for i, (label, val, color) in enumerate(cards):
+        c_start = 1 + i * 2
+        c_end = c_start + 1
+        ws.merge_cells(start_row=card_row_top, start_column=c_start,
+                       end_row=card_row_top, end_column=c_end)
+        ws.merge_cells(start_row=card_row_bot, start_column=c_start,
+                       end_row=card_row_bot, end_column=c_end)
+        lbl = ws.cell(card_row_top, c_start, label)
+        lbl.font = Font(bold=True, size=9, color="FFFFFF")
+        lbl.fill = PatternFill("solid", fgColor=color)
+        lbl.alignment = Alignment(horizontal="center", vertical="center")
+        v = ws.cell(card_row_bot, c_start, val)
+        v.font = Font(bold=True, size=18, color=color)
+        v.fill = PatternFill("solid", fgColor=_TEAM_LIGHT)
+        v.alignment = Alignment(horizontal="center", vertical="center")
+        v.border = _team_thin_border()
+
+    # Designers index table
+    table_start = 8
+    ws.row_dimensions[table_start].height = 26
+    headers = [
+        "Designer", "Production %", "UE", "Reg Cases", "OT Cases",
+        "Downtime", "Status", "Open Detail",
+    ]
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(table_start, ci, h)
+        cell.font = Font(bold=True, size=11, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=_TEAM_NAVY)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = _team_thin_border()
+
+    # Sort: highest production% first
+    sorted_entries = sorted(
+        per_designer,
+        key=lambda e: (e["summary"]["production_pct"] or 0),
+        reverse=True,
+    )
+
+    row = table_start + 1
+    for i, entry in enumerate(sorted_entries):
+        s = entry["summary"]
+        d = entry["detail"]
+        bg = _TEAM_BG_ZEBRA if i % 2 == 0 else "FFFFFF"
+        pct = s["production_pct"] or 0.0
+        chip_text, chip_bg, chip_fg = _team_chip_for_pct(pct)
+        dt_total = sum(
+            float(_safe_num(x.get("duration"))) for x in d["downtimes"]
+        )
+
+        def _put(col, val, *, align="left", bold=False, color=None, fill=bg):
+            c = ws.cell(row, col, val)
+            c.font = Font(bold=bold, size=11, color=color or "111827")
+            c.fill = PatternFill("solid", fgColor=fill)
+            c.alignment = Alignment(horizontal=align, vertical="center")
+            c.border = _team_thin_border()
+            return c
+
+        _put(1, entry["name"], align="left", bold=True)
+        _put(2, f"{pct:.1f}%", align="center", bold=True,
+             color=("065F46" if pct >= 95 else
+                    "92400E" if pct >= 85 else "991B1B"))
+        _put(3, f"{(s['ue_total'] or 0):.2f}", align="center")
+        _put(4, len(d["cases"]),    align="center")
+        _put(5, len(d["ot_cases"]), align="center")
+        _put(6, f"{dt_total:.0f} min" if dt_total else "—", align="center")
+        chip = _put(7, chip_text, align="center", bold=True, color=chip_fg, fill=chip_bg)
+        link_cell = _put(8, "View →", align="center", bold=True,
+                         color="FFFFFF", fill=_TEAM_BLUE)
+        link_cell.hyperlink = f"#'{entry['sheet_name']}'!A1"
+        link_cell.style = "Hyperlink"
+        link_cell.font = Font(bold=True, size=11, color="FFFFFF", underline="single")
+        ws.row_dimensions[row].height = 22
+        row += 1
+
+    # Auto-filter & freeze panes
+    last_col_letter = get_column_letter(len(headers))
+    ws.auto_filter.ref = f"A{table_start}:{last_col_letter}{row - 1}"
+    ws.freeze_panes = f"A{table_start + 1}"
+
+    # Column widths
+    widths = {1: 26, 2: 14, 3: 10, 4: 12, 5: 12, 6: 14, 7: 16, 8: 14}
+    for col, w in widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = w
+
+
+def _safe_num(v) -> float:
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _build_designer_sheet(ws, target_date: str, entry: dict) -> None:
+    ws.sheet_view.showGridLines = False
+    designer_name = entry["name"]
+    detail = entry["detail"]
+    summary = entry["summary"]
+
+    ws.merge_cells("A1:K1")
+    hero = ws.cell(1, 1)
+    hero.value = designer_name
+    hero.font = Font(bold=True, size=20, color="FFFFFF")
+    hero.fill = PatternFill("solid", fgColor=_TEAM_NAVY)
+    hero.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 44
+
+    ws.merge_cells("A2:K2")
+    sub = ws.cell(2, 1)
+    sub.value = f"Date {target_date}"
+    sub.font = Font(size=11, color="FFFFFF")
+    sub.fill = PatternFill("solid", fgColor=_TEAM_INDIGO)
+    sub.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[2].height = 22
+
+    # KPI strip
+    pct = summary["production_pct"] or 0.0
+    chip_text, chip_bg, chip_fg = _team_chip_for_pct(pct)
+    kpis = [
+        ("Production %", f"{pct:.1f}%",                _TEAM_BLUE),
+        ("UE",           f"{(summary['ue_total'] or 0):.2f}", _TEAM_INDIGO),
+        ("Reg Cases",    f"{len(detail['cases'])}",    "0F766E"),
+        ("OT Cases",     f"{len(detail['ot_cases'])}", "6A1B9A"),
+        ("Status",       chip_text,                    chip_bg),
+    ]
+    kpi_top, kpi_bot = 4, 5
+    ws.row_dimensions[kpi_top].height = 16
+    ws.row_dimensions[kpi_bot].height = 26
+    for i, (lbl, val, color) in enumerate(kpis):
+        c1, c2 = 1 + i * 2, 2 + i * 2
+        ws.merge_cells(start_row=kpi_top, start_column=c1,
+                       end_row=kpi_top, end_column=c2)
+        ws.merge_cells(start_row=kpi_bot, start_column=c1,
+                       end_row=kpi_bot, end_column=c2)
+        lc = ws.cell(kpi_top, c1, lbl)
+        lc.font = Font(bold=True, size=9, color="FFFFFF")
+        lc.fill = PatternFill("solid", fgColor=color)
+        lc.alignment = Alignment(horizontal="center", vertical="center")
+        is_chip = (lbl == "Status")
+        vc = ws.cell(kpi_bot, c1, val)
+        vc.font = Font(bold=True, size=14,
+                       color=(chip_fg if is_chip else color))
+        vc.fill = PatternFill("solid", fgColor=(color if is_chip else _TEAM_LIGHT))
+        vc.alignment = Alignment(horizontal="center", vertical="center")
+        vc.border = _team_thin_border()
+
+    # Cases section
+    sec_row = 7
+    ws.merge_cells(start_row=sec_row, start_column=1, end_row=sec_row, end_column=11)
+    s = ws.cell(sec_row, 1, "Cases")
+    s.font = Font(bold=True, size=12, color="FFFFFF")
+    s.fill = PatternFill("solid", fgColor=_TEAM_BLUE)
+    s.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[sec_row].height = 22
+
+    case_headers = [
+        "Source", "Case ID", "Region", "Type", "Doctor",
+        "Start", "End", "Std (min)", "Actual (min)", "Value (%)", "Status / Comments",
+    ]
+    head_row = sec_row + 1
+    ws.row_dimensions[head_row].height = 22
+    for ci, h in enumerate(case_headers, 1):
+        c = ws.cell(head_row, ci, h)
+        c.font = Font(bold=True, size=10, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor=_TEAM_NAVY)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = _team_thin_border()
+
+    row = head_row + 1
+    all_cases = [(c, "Reg") for c in detail["cases"]] \
+              + [(c, "OT")  for c in detail["ot_cases"]]
+    for i, (c, label) in enumerate(all_cases):
+        bg = _TEAM_BG_ZEBRA if i % 2 == 0 else "FFFFFF"
+        comments_status = " · ".join(
+            x for x in [c.get("status", ""), c.get("comments", "")] if x
+        )
+
+        def _w(col, val, *, align="left", bold=False, color="111827"):
+            cell = ws.cell(row, col, val)
+            cell.font = Font(bold=bold, size=10, color=color)
+            cell.fill = PatternFill("solid", fgColor=bg)
+            cell.alignment = Alignment(horizontal=align, vertical="center")
+            cell.border = _team_thin_border()
+
+        _w(1, label, align="center", bold=True,
+           color=("6A1B9A" if label == "OT" else "1F2937"))
+        _w(2, c.get("case_id", ""),  align="center")
+        _w(3, c.get("region", ""),   align="center")
+        _w(4, c.get("type", ""),     align="left")
+        _w(5, c.get("doctor", ""),   align="left")
+        _w(6, c.get("start", ""),    align="center")
+        _w(7, c.get("end", ""),      align="center")
+        _w(8, c.get("std", ""),      align="right")
+        _w(9, c.get("actual", ""),   align="right")
+        _w(10, c.get("value", ""),   align="right")
+        _w(11, comments_status,      align="left")
+        row += 1
+
+    if not all_cases:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=11)
+        c = ws.cell(row, 1, "No cases for this date.")
+        c.font = Font(italic=True, color="6B7280")
+        c.fill = PatternFill("solid", fgColor=_TEAM_BG_ZEBRA)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        row += 1
+
+    case_data_end = row - 1
+    if case_data_end >= head_row + 1:
+        ws.auto_filter.ref = (f"A{head_row}:"
+                              f"{get_column_letter(11)}{case_data_end}")
+    _hide_blank_columns_in_sheet(ws, header_row=head_row,
+                                 data_start=head_row + 1,
+                                 data_end=case_data_end)
+
+    # Downtime block
+    row += 1
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=11)
+    dh = ws.cell(row, 1, "Downtime")
+    dh.font = Font(bold=True, size=12, color="FFFFFF")
+    dh.fill = PatternFill("solid", fgColor="C2410C")
+    dh.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[row].height = 22
+    row += 1
+
+    dt_headers = ["Start", "End", "Duration (min)", "Reason"]
+    for ci, h in enumerate(dt_headers, 1):
+        c = ws.cell(row, ci, h)
+        c.font = Font(bold=True, size=10, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="9A3412")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = _team_thin_border()
+    row += 1
+
+    if detail["downtimes"]:
+        for i, d in enumerate(detail["downtimes"]):
+            bg = _TEAM_BG_ZEBRA if i % 2 == 0 else "FFFFFF"
+            for ci, val, align in [
+                (1, d.get("start", ""),    "center"),
+                (2, d.get("end", ""),      "center"),
+                (3, d.get("duration", ""), "center"),
+                (4, d.get("reason", ""),   "left"),
+            ]:
+                cell = ws.cell(row, ci, val)
+                cell.font = Font(size=10, color="111827")
+                cell.fill = PatternFill("solid", fgColor=bg)
+                cell.alignment = Alignment(horizontal=align, vertical="center")
+                cell.border = _team_thin_border()
+            row += 1
+    else:
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        c = ws.cell(row, 1, "No downtime recorded.")
+        c.font = Font(italic=True, color="6B7280")
+        c.fill = PatternFill("solid", fgColor=_TEAM_BG_ZEBRA)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        row += 1
+
+    # Back link
+    row += 1
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=11)
+    back = ws.cell(row, 1, "← Back to Dashboard")
+    back.hyperlink = "#'Dashboard'!A1"
+    back.font = Font(bold=True, size=11, color="FFFFFF", underline="single")
+    back.fill = PatternFill("solid", fgColor=_TEAM_BLUE)
+    back.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[row].height = 22
+
+    ws.freeze_panes = f"A{head_row + 1}"
+
+    # Column widths
+    widths = {1: 8, 2: 12, 3: 16, 4: 18, 5: 20, 6: 9, 7: 9,
+              8: 11, 9: 12, 10: 11, 11: 30}
+    for col, w in widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = w
+
+
 def _build_monthly_summary(wb, year: int, month: int, designer: str, monthly_rows):
     ws = wb.create_sheet("Monthly Summary")
     ws.sheet_view.showGridLines = False
@@ -677,6 +1413,100 @@ def _rebuild_dashboard(wb, today_str: str):
         _hdr(ws.cell(total_row, 7), "", bg=TOTALS_BG, color=_HEADER_FG)
 
     _autowidth(ws, extra=6)
+
+
+def _read_existing_dashboard_today(dashboard_path: str, today_str: str) -> dict:
+    """Read live _Dashboard.xlsx 'Dashboard' sheet rows for today_str.
+
+    Returns {designer: entry_tuple} so the caller can fill gaps when a
+    designer's _Summary.xlsx hasn't synced down via OneDrive yet.
+    Returns {} if the existing dashboard is missing, stale (different date),
+    or unreadable.
+    """
+    if not os.path.exists(dashboard_path):
+        return {}
+    result: dict = {}
+    try:
+        wb = openpyxl.load_workbook(dashboard_path, read_only=True, data_only=True)
+        if "Dashboard" not in wb.sheetnames:
+            wb.close()
+            return {}
+        ws = wb["Dashboard"]
+        title_val = ws.cell(1, 1).value or ""
+        if today_str not in str(title_val):
+            wb.close()
+            return {}
+
+        def _pct_v(v):
+            if v in (None, "—", ""):
+                return None
+            if isinstance(v, str):
+                try:
+                    return float(v.strip().rstrip("%"))
+                except ValueError:
+                    return None
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return None
+
+        def _flt_v(v):
+            if v in (None, "—", ""):
+                return None
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return None
+
+        def _int_v(v):
+            if v in (None, "—", ""):
+                return None
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                return None
+
+        N = len(CASE_TYPE_COLUMNS)
+        for row in ws.iter_rows(min_row=4, values_only=True):
+            if not row or not row[0]:
+                continue
+            designer_name = str(row[0]).strip()
+            if designer_name.upper().startswith("TEAM AVG"):
+                continue
+            cases_pct = _pct_v(row[1] if len(row) > 1 else None)
+            dt_pct    = _pct_v(row[2] if len(row) > 2 else None)
+            total_pct = _pct_v(row[3] if len(row) > 3 else None)
+            ue_cases  = _flt_v(row[4] if len(row) > 4 else None)
+            ue        = _flt_v(row[5] if len(row) > 5 else None)
+            reg_cases = _int_v(row[6] if len(row) > 6 else None)
+            reg_explicit = {ct: 0 for ct in CASE_TYPE_COLUMNS}
+            for i, ct in enumerate(CASE_TYPE_COLUMNS):
+                idx = 7 + i
+                if idx < len(row):
+                    reg_explicit[ct] = _int_v(row[idx]) or 0
+            reg_other_idx = 7 + N
+            reg_other = _int_v(row[reg_other_idx]) if reg_other_idx < len(row) else 0
+            reg_other = reg_other or 0
+            last_sync_idx = 8 + N
+            last_sync = row[last_sync_idx] if last_sync_idx < len(row) else None
+            if reg_cases in (None, 0) and last_sync in (None, "—", ""):
+                continue
+            entry = (
+                designer_name, today_str, "",
+                cases_pct or 0.0, dt_pct or 0.0, total_pct or 0.0,
+                reg_cases or 0, 0, ue or 0.0,
+                ue_cases or 0.0,
+                reg_explicit, reg_other,
+                {ct: 0 for ct in CASE_TYPE_COLUMNS}, 0,
+                last_sync if last_sync not in (None, "") else "—",
+            )
+            result[designer_name] = entry
+        wb.close()
+    except Exception as exc:
+        log_event("sharepoint_sync",
+                  f"read existing dashboard for merge skipped: {exc}",
+                  level="WARN")
+    return result
 
 
 def _rebuild_dashboard_file(productions_dir: str, today_str: str,
@@ -857,8 +1687,25 @@ def _rebuild_dashboard_file(productions_dir: str, today_str: str,
             log_event("sharepoint_sync", f"dashboard source summary parse skipped for {sf}: {exc}", level="WARN")
             continue
 
+    # ── OneDrive eventual-consistency safeguard ─────────────────────────────
+    # Each user rebuilds this dashboard from whatever _Summary.xlsx files
+    # OneDrive has cached locally on their machine.  When a teammate's
+    # summary hasn't synced down yet, the rebuild used to overwrite the
+    # live dashboard with blank rows for everyone except the local user,
+    # erasing the team's data on every save.
+    # Fix: read the existing live _Dashboard.xlsx (which holds the most
+    # recent team-wide snapshot for today) and use it to backfill any
+    # designer whose summary we couldn't read locally.  Local-summary data
+    # always wins; existing-dashboard data only fills the gaps.
+    existing_dash = _read_existing_dashboard_today(dashboard_path, today_str)
+    designers_set = {r[0] for r in all_rows}
+    for d_name, d_entry in existing_dash.items():
+        if d_name not in today_data:
+            today_data[d_name] = d_entry
+        designers_set.add(d_name)
+
     # Build snapshot: include all known designers (blank row if no data today)
-    all_designers = sorted({r[0] for r in all_rows})
+    all_designers = sorted(designers_set)
     _blank = lambda d: (d, today_str, "", 0.0, 0.0, 0.0,
                         0, 0, 0.0,
                         0.0,
@@ -1503,6 +2350,7 @@ def export_to_sharepoint(target_date: str | None = None) -> tuple[bool, str]:
                          cases, ot_cases, downtimes,
                          total_cases_pct, total_downtime_min,
                          ue_cases=ue_cases, ue_total=ue_total)
+    _build_case_detail(wb, target_date, designer, cases, ot_cases, downtimes)
     _build_monthly_summary(wb, year, month, designer, monthly_rows)
 
     # Save individual daily file
@@ -1626,6 +2474,7 @@ def export_all_missing_to_sharepoint(progress_cb=None) -> tuple[bool, str]:
                 total_cases_pct, total_downtime_min,
                 ue_cases=ue_cases, ue_total=ue_total,
             )
+            _build_case_detail(wb, target_date, designer, cases, ot_cases, downtimes)
             _build_monthly_summary(wb, year, month, designer, monthly_rows)
             _save_atomic(wb, out_path)
 

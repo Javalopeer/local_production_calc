@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDateEdit, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QFrame, QSizePolicy, QScrollArea, QGroupBox,
     QGridLayout, QBoxLayout, QStackedWidget, QButtonGroup,
+    QDialog, QFileDialog, QMessageBox, QTabWidget,
 )
 from PySide6.QtCore import QDate, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush
@@ -510,6 +511,163 @@ def _fill_row(table: QTableWidget, row: int, values: list[str]):
 
 
 # ---------------------------------------------------------------------------
+# Designer-day modal (used from the Team view)
+# ---------------------------------------------------------------------------
+
+class _DesignerDayDialog(QDialog):
+    """Modal showing one designer's full Case Detail for a date."""
+
+    def __init__(self, designer: str, target_date: str, detail: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"{designer} — {target_date}")
+        self.resize(980, 560)
+        self.setStyleSheet("""
+            QDialog { background-color: #161B22; }
+            QLabel  { color: #E6EDF3; }
+            QTableWidget {
+                background-color: #0D1117; gridline-color: #30363D;
+                color: #E6EDF3; border: 1px solid #30363D;
+            }
+            QHeaderView::section {
+                background-color: #1F2937; color: #E6EDF3;
+                padding: 6px; border: 0;
+            }
+            QTabWidget::pane { border: 1px solid #30363D; }
+            QTabBar::tab {
+                background: #161B22; color: #8B949E; padding: 6px 14px;
+                border: 1px solid #30363D; border-bottom: none;
+            }
+            QTabBar::tab:selected { background: #1F6FEB; color: white; }
+            QPushButton {
+                background-color: #21262D; color: #E6EDF3;
+                border: 1px solid #30363D; border-radius: 4px;
+                padding: 5px 14px;
+            }
+            QPushButton:hover { background-color: #30363D; }
+        """)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(10)
+
+        title = QLabel(f"{designer}  —  {target_date}")
+        title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        v.addWidget(title)
+
+        if not detail.get("found"):
+            warn = QLabel(
+                "No daily file found for this designer on this date.\n"
+                "Either they haven't synced today, or their OneDrive copy "
+                "hasn't reached this machine yet."
+            )
+            warn.setStyleSheet("color: #F0883E;")
+            warn.setWordWrap(True)
+            v.addWidget(warn)
+        else:
+            tabs = QTabWidget()
+
+            case_headers = [
+                "Case ID", "Region", "Type", "Doctor",
+                "Start", "End", "Std (min)", "Actual (min)",
+                "Value (%)", "Status", "Comments",
+            ]
+            cases_tbl = self._build_table(case_headers)
+            self._fill_cases(cases_tbl, detail["cases"], detail["ot_cases"])
+            tabs.addTab(cases_tbl, f"Cases ({len(detail['cases']) + len(detail['ot_cases'])})")
+
+            dt_headers = ["Start", "End", "Duration (min)", "Reason"]
+            dt_tbl = self._build_table(dt_headers)
+            self._fill_downtime(dt_tbl, detail["downtimes"])
+            tabs.addTab(dt_tbl, f"Downtime ({len(detail['downtimes'])})")
+
+            v.addWidget(tabs, 1)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        bottom.addWidget(btn_close)
+        v.addLayout(bottom)
+
+    @staticmethod
+    def _build_table(headers: list[str]) -> QTableWidget:
+        t = QTableWidget()
+        t.setColumnCount(len(headers))
+        t.setHorizontalHeaderLabels(headers)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        t.horizontalHeader().setStretchLastSection(True)
+        t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        t.setAlternatingRowColors(True)
+        t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        t.verticalHeader().setVisible(False)
+        return t
+
+    @staticmethod
+    def _fill_cases(tbl: QTableWidget, reg_cases: list[dict], ot_cases: list[dict]):
+        rows = [(c, "Reg") for c in reg_cases] + [(c, "OT") for c in ot_cases]
+        tbl.setRowCount(len(rows))
+        for i, (c, label) in enumerate(rows):
+            vals = [
+                c.get("case_id", ""),
+                c.get("region", ""),
+                c.get("type", ""),
+                c.get("doctor", ""),
+                c.get("start", ""),
+                c.get("end", ""),
+                c.get("std", ""),
+                c.get("actual", ""),
+                c.get("value", ""),
+                c.get("status", ""),
+                c.get("comments", ""),
+            ]
+            for col, val in enumerate(vals):
+                item = QTableWidgetItem(str(val) if val is not None else "")
+                if col != 10:  # comments left-aligned
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if col == 0 and label == "OT":
+                    # Tint OT rows' Case ID purple so they remain distinguishable
+                    item.setForeground(QBrush(QColor("#A371F7")))
+                tbl.setItem(i, col, item)
+        _DesignerDayDialog._hide_blank_columns(tbl)
+        tbl.resizeColumnsToContents()
+
+    @staticmethod
+    def _fill_downtime(tbl: QTableWidget, downtimes: list[dict]):
+        tbl.setRowCount(len(downtimes))
+        for i, d in enumerate(downtimes):
+            vals = [
+                d.get("start", ""),
+                d.get("end", ""),
+                d.get("duration", ""),
+                d.get("reason", ""),
+            ]
+            for col, val in enumerate(vals):
+                item = QTableWidgetItem(str(val) if val is not None else "")
+                if col != 3:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                tbl.setItem(i, col, item)
+        _DesignerDayDialog._hide_blank_columns(tbl)
+        tbl.resizeColumnsToContents()
+
+    @staticmethod
+    def _hide_blank_columns(tbl: QTableWidget):
+        """Hide any column whose every cell is empty / dash."""
+        rows = tbl.rowCount()
+        if rows == 0:
+            return
+        for col in range(tbl.columnCount()):
+            empty = True
+            for r in range(rows):
+                it = tbl.item(r, col)
+                txt = (it.text().strip() if it is not None else "")
+                if txt and txt not in ("—", "-", "0", "0.00", "0.000%"):
+                    empty = False
+                    break
+            if empty:
+                tbl.setColumnHidden(col, True)
+
+
+# ---------------------------------------------------------------------------
 # Dashboard Tab
 # ---------------------------------------------------------------------------
 
@@ -543,7 +701,7 @@ class DashboardTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # ── Top bar with view toggle (Personal | Equipo) ──────────────
+        # ── Top bar with view toggle (Personal | Team) ──────────────
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(20, 14, 20, 6)
         top_bar.setSpacing(8)
@@ -552,13 +710,13 @@ class DashboardTab(QWidget):
         top_bar.addWidget(self.title_label)
         top_bar.addStretch()
 
-        self.btn_view_team = QPushButton("Equipo")
+        self.btn_view_team = QPushButton("Team")
         self.btn_view_personal = QPushButton("Personal")
         for b in (self.btn_view_team, self.btn_view_personal):
             b.setCheckable(True)
             b.setMinimumWidth(82)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Default: Equipo
+        # Default: Team
         self.btn_view_team.setChecked(True)
         view_group = QButtonGroup(self)
         view_group.setExclusive(True)
@@ -836,21 +994,35 @@ class DashboardTab(QWidget):
         self.team_date_picker.setDisplayFormat("yyyy-MM-dd")
         self.team_date_picker.setMinimumWidth(120)
         self.team_date_picker.dateChanged.connect(lambda _d: self._refresh_team_view())
-        header_row.addWidget(QLabel("Fecha:"))
+        header_row.addWidget(QLabel("Date:"))
         header_row.addWidget(self.team_date_picker)
         header_row.addStretch()
-        self.team_freshness_label = QLabel("Cargando…")
+        self.team_freshness_label = QLabel("Loading…")
         self.team_freshness_label.setStyleSheet(
             "color: #8B949E; font-size: 11px;"
         )
         header_row.addWidget(self.team_freshness_label)
+
+        self.btn_team_download = QPushButton("Download full data")
+        self.btn_team_download.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_team_download.setToolTip(
+            "Save an Excel with every designer's case detail for the selected date."
+        )
+        self.btn_team_download.setStyleSheet(
+            "QPushButton { background-color: #1F6FEB; color: white; "
+            "border: none; border-radius: 4px; padding: 5px 14px; "
+            "font-weight: 600; font-size: 12px; } "
+            "QPushButton:hover { background-color: #388BFD; }"
+        )
+        self.btn_team_download.clicked.connect(self._download_team_full)
+        header_row.addWidget(self.btn_team_download)
         v.addLayout(header_row)
 
         # 4 KPI cards
         kpi_row = QHBoxLayout()
         kpi_row.setSpacing(12)
-        self.kpi_team_size   = _Card("Enrolados",        accent="#388BFD")
-        self.kpi_team_active = _Card("Activos hoy",      accent="#3FB950")
+        self.kpi_team_size   = _Card("Enrolled",         accent="#388BFD")
+        self.kpi_team_active = _Card("Active Today",     accent="#3FB950")
         self.kpi_team_avg    = _Card("Avg Production %", accent="#A371F7")
         self.kpi_team_ue     = _Card("Total UE",         accent="#F0883E")
         for c in (self.kpi_team_size, self.kpi_team_active, self.kpi_team_avg, self.kpi_team_ue):
@@ -862,7 +1034,13 @@ class DashboardTab(QWidget):
         self.tbl_team = _make_table(["Designer", "Production %", "UE", "Cases"])
         self.tbl_team.setMinimumHeight(360)
         self.tbl_team.setSortingEnabled(False)  # we sort manually by % desc
+        self.tbl_team.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tbl_team.cellDoubleClicked.connect(self._open_designer_detail)
         v.addWidget(self.tbl_team, 1)
+
+        hint = QLabel("Double-click a designer to see their cases.")
+        hint.setStyleSheet("color: #8B949E; font-size: 11px;")
+        v.addWidget(hint)
 
         # Polling timer
         self._team_poll_timer = QTimer(self)
@@ -870,7 +1048,7 @@ class DashboardTab(QWidget):
         self._team_poll_timer.timeout.connect(self._refresh_team_view)
         self._team_poll_timer.start()
 
-        # Freshness ticker (updates "hace X seg" every second)
+        # Freshness ticker (updates "X s ago" every second)
         self._team_last_load_ts: float | None = None
         self._team_last_load_ok: bool = False
         self._team_freshness_timer = QTimer(self)
@@ -896,7 +1074,7 @@ class DashboardTab(QWidget):
                     pass
 
     def _on_view_changed(self, view_id: int):
-        # 0 = Equipo, 1 = Personal
+        # 0 = Team, 1 = Personal
         self._view_stack.setCurrentIndex(view_id)
         self._apply_view_button_styles()
         if view_id == 0:
@@ -971,20 +1149,80 @@ class DashboardTab(QWidget):
     def _update_freshness_label(self):
         import time as _time
         if not self._team_last_load_ok or self._team_last_load_ts is None:
-            self.team_freshness_label.setText("Sin datos del equipo")
+            self.team_freshness_label.setText("No team data")
             self.team_freshness_label.setStyleSheet("color: #F85149; font-size: 11px;")
             return
         age = int(_time.time() - self._team_last_load_ts)
         if age < 60:
-            text = f"Última actualización: hace {age} seg"
+            text = f"Last update: {age}s ago"
         elif age < 3600:
-            text = f"Última actualización: hace {age // 60} min"
+            text = f"Last update: {age // 60} min ago"
         else:
-            text = f"Última actualización: hace {age // 3600} h"
+            text = f"Last update: {age // 3600}h ago"
         # Amber if older than 5 minutes (sync probably stalled)
         color = "#F0883E" if age > 300 else "#8B949E"
         self.team_freshness_label.setText(text)
         self.team_freshness_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+
+    # ------------------------------------------------------------------
+    # Designer-detail modal + team download
+    # ------------------------------------------------------------------
+
+    def _productions_dir(self) -> str | None:
+        from sync.app_config import load_config
+        cfg = load_config()
+        export_folder = (cfg.get("export_folder") or "").strip()
+        if not export_folder or not os.path.isdir(export_folder):
+            return None
+        productions_dir = os.path.join(export_folder, "Productions")
+        return productions_dir if os.path.isdir(productions_dir) else None
+
+    def _open_designer_detail(self, row: int, _col: int):
+        item = self.tbl_team.item(row, 0)
+        if item is None:
+            return
+        designer = item.text().strip()
+        target_date = self.team_date_picker.date().toString("yyyy-MM-dd")
+        productions_dir = self._productions_dir()
+        if not productions_dir:
+            QMessageBox.warning(self, "Shared folder not configured",
+                                "Set the export folder in the Sync tab first.")
+            return
+        try:
+            from sync.sharepoint_sync import read_designer_day_detail
+            detail = read_designer_day_detail(productions_dir, designer, target_date)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not read detail", str(exc))
+            return
+        dlg = _DesignerDayDialog(designer, target_date, detail, parent=self)
+        dlg.exec()
+
+    def _download_team_full(self):
+        target_date = self.team_date_picker.date().toString("yyyy-MM-dd")
+        productions_dir = self._productions_dir()
+        if not productions_dir:
+            QMessageBox.warning(self, "Shared folder not configured",
+                                "Set the export folder in the Sync tab first.")
+            return
+
+        default_name = f"Team_Full_Data_{target_date}.xlsx"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save full team data",
+            os.path.join(os.path.expanduser("~"), default_name),
+            "Excel files (*.xlsx)",
+        )
+        if not out_path:
+            return
+        try:
+            from sync.sharepoint_sync import export_team_full_for_date
+            ok, msg = export_team_full_for_date(productions_dir, target_date, out_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        if ok:
+            QMessageBox.information(self, "Export complete", msg)
+        else:
+            QMessageBox.warning(self, "Export failed", msg)
 
     def _load_team_summaries(self, target_date: str) -> dict:
         """Walk Productions/<Designer>/_Summary.xlsx and pull the row for `target_date`.
