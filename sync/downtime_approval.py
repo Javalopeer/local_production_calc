@@ -125,18 +125,6 @@ def _designer_file_path(designer_name: str) -> str | None:
     return os.path.join(designers_dir, f"_DT_{safe_name}.xlsx")
 
 
-def _force_onedrive_refresh(path: str) -> None:
-    """Hint OneDrive to check for updates."""
-    if not os.path.exists(path):
-        return
-    try:
-        parent = os.path.dirname(path)
-        os.listdir(parent)
-        os.stat(path)
-    except Exception as exc:
-        log_event("downtime_approval", f"onedrive refresh hint failed for {os.path.basename(path)}: {exc}", level="WARN")
-
-
 def _save_workbook(wb, path: str, retries: int = 6) -> bool:
     """Save a workbook with retries + random jitter for OneDrive locks."""
     import random
@@ -152,81 +140,6 @@ def _save_workbook(wb, path: str, retries: int = 6) -> bool:
             return False
     log_event("downtime_approval", f"file locked after {retries} attempts: {os.path.basename(path)}", level="WARN")
     return False
-
-
-def _save_consolidated_verified(wb, path: str, verify_delay: float = 5.0,
-                                retries: int = 2) -> bool:
-    """Save the consolidated approvals file, then verify its content didn't
-    get mutated by OneDrive or another writer. Re-saves up to `retries`
-    times. Always re-reads any fresh supervisor_edits (Power Automate status
-    changes) before the re-save so we never clobber them.
-    """
-    import hashlib
-
-    def _sha(p: str):
-        try:
-            with open(p, "rb") as fh:
-                return hashlib.sha256(fh.read()).hexdigest()
-        except Exception:
-            return None
-
-    if not _save_workbook(wb, path):
-        return False
-    original = _sha(path)
-    if original is None:
-        return True
-
-    for attempt in range(retries):
-        time.sleep(verify_delay)
-        current = _sha(path)
-        if current == original:
-            return True
-        log_event("downtime_approval",
-                  f"consolidated mutated after save (hash mismatch), re-saving attempt {attempt + 1}",
-                  level="WARN")
-        # Re-read supervisor edits (e.g. Power Automate Status changes) from
-        # the current file so the re-save preserves them.
-        try:
-            _wb_cur = openpyxl.load_workbook(path, read_only=True, data_only=True)
-            ws_cur = _wb_cur.active
-            edits = {}
-            for r in ws_cur.iter_rows(min_row=2, values_only=True):
-                if not r or r[0] is None:
-                    continue
-                row_designer = str(r[0] or "").strip()
-                if row_designer.startswith("("):
-                    continue
-                try:
-                    rid = int(r[1])
-                    st = str(r[7] or "").strip().lower()
-                except (TypeError, ValueError):
-                    continue
-                if st in (STATUS_APPROVED, STATUS_REJECTED):
-                    edits[(row_designer.lower(), rid)] = st
-            _wb_cur.close()
-            # Apply preserved edits into the in-memory workbook
-            if edits:
-                ws_mem = wb.active
-                for rr in ws_mem.iter_rows(min_row=2):
-                    if not rr or rr[0].value is None:
-                        continue
-                    try:
-                        rid = int(rr[1].value)
-                    except (TypeError, ValueError):
-                        continue
-                    key = (str(rr[0].value).strip().lower(), rid)
-                    if key in edits:
-                        rr[7].value = edits[key]
-        except Exception as exc:
-            log_event("downtime_approval",
-                      f"consolidated verify read-back failed: {exc}", level="WARN")
-
-        if not _save_workbook(wb, path):
-            return False
-        original = _sha(path)
-        if original is None:
-            return True
-    return True
 
 
 def _read_workbook(path: str, retries: int = 4):
@@ -259,9 +172,6 @@ def export_pending_downtimes(designer_name: str) -> bool:
     designer_path = _designer_file_path(designer_name)
     if not designer_path:
         return False
-
-    # ── Before exporting, absorb any approvals from the consolidated file ────
-    _absorb_from_consolidated(designer_name)
 
     # ── Fetch data from DB ───────────────────────────────────────────────────
     conn = get_connection()
@@ -354,53 +264,6 @@ def export_pending_downtimes(designer_name: str) -> bool:
 
     _pending_retry_designer = ""
     return True
-
-
-def _absorb_from_consolidated(designer_name: str) -> int:
-    """Read the consolidated file and apply any approvals/rejections
-    that the supervisor made for this designer. Returns count absorbed."""
-    consolidated_path = get_approval_path()
-    if not consolidated_path or not os.path.exists(consolidated_path):
-        return 0
-
-    _force_onedrive_refresh(consolidated_path)
-    wb = _read_workbook(consolidated_path)
-    if wb is None:
-        return 0
-
-    absorbed = 0
-    try:
-        ws = wb.active
-        for r in ws.iter_rows(min_row=2, values_only=True):
-            if not r or r[0] is None:
-                continue
-            row_designer = str(r[0] or "").strip()
-            if row_designer.startswith("("):
-                continue
-            if row_designer.lower() != designer_name.strip().lower():
-                continue
-            try:
-                row_id = int(r[1])
-                status = str(r[7] or "").strip().lower()
-            except (TypeError, ValueError):
-                continue
-            if status in (STATUS_APPROVED, STATUS_REJECTED):
-                conn = get_connection()
-                cur = conn.cursor()
-                cur.execute(
-                    "UPDATE downtimes SET status = ? WHERE id = ? AND status = 'pending'",
-                    (status, row_id),
-                )
-                if cur.rowcount > 0:
-                    absorbed += 1
-                    print(f"[downtime_approval] Absorbed {status} for ID {row_id}")
-                conn.commit()
-                conn.close()
-        wb.close()
-    except Exception as exc:
-        print(f"[downtime_approval] Error absorbing from consolidated: {exc}")
-
-    return absorbed
 
 
 # ── consolidated file rebuild ────────────────────────────────────────────────
@@ -537,9 +400,8 @@ def _rebuild_consolidated(force: bool = False) -> bool:
     # Designer before bulk-approving a time window.
     ws.auto_filter.ref = f"A1:J{row_idx - 1}"
 
-    # Add Excel Table so Power Automate can find and update rows by ID.
-    # Ref extended to J so Responded By / Responded At are inside the table
-    # (non-breaking: PA updates Status by column name, not by index).
+    # Excel Table so leads can filter/sort downtimes for review. Ref includes
+    # Responded By / Responded At columns so they're inside the table area.
     tab = XlTable(
         displayName="DowntimeApprovals",
         ref=f"A1:J{row_idx - 1}",
@@ -589,15 +451,15 @@ def _rebuild_consolidated(force: bool = False) -> bool:
     if hist_row > 2:
         ws_hist.auto_filter.ref = f"A1:J{hist_row - 1}"
 
-    # ── Save consolidated — if it fails, no problem, next cycle rebuilds ─────
-    if _save_consolidated_verified(wb, consolidated_path):
+    # ── Save consolidated — if it fails, retry on next cycle ────────────────
+    if _save_workbook(wb, consolidated_path):
         # Update mtime cache so next call skips rebuild if nothing changed
         if dt_files:
             _last_rebuild_max_mtime = max(os.path.getmtime(f) for f in dt_files if os.path.exists(f))
         print(f"[downtime_approval] Consolidated file rebuilt with {row_idx - 2} pending row(s).")
         return True
     else:
-        print("[downtime_approval] Could not update consolidated file (supervisor may have it open). Will retry next cycle.")
+        print("[downtime_approval] Could not update consolidated file (a lead may have it open). Will retry next cycle.")
         return False
 
 
@@ -638,181 +500,3 @@ def _set_column_widths(ws):
     ws.row_dimensions[1].height = 22
 
 
-# ── Maintenance hook ────────────────────────────────────────────────────────
-# The Teams adaptive-card flow was retired. Approval is now manual inside each
-# user's app after they paste the DT into the supervisor's Teams chat. This
-# function stays as a tiny periodic hook so the existing UI timer can keep
-# calling it without changes — but all it does now is retry a failed export
-# and run the cleanup of legacy response files.
-
-def poll_and_process_responses(designer_name: str) -> int:
-    """Periodic maintenance hook (no longer polls anything).
-
-    Retries the last failed export, runs legacy-file cleanup. Returns 0 since
-    no DB rows are updated by polling anymore.
-    """
-    global _pending_retry_designer
-    if not _OPENPYXL_OK:
-        return 0
-
-    if _pending_retry_designer:
-        print("[downtime_approval] Retrying previously failed export...")
-        export_pending_downtimes(_pending_retry_designer)
-
-    _cleanup_old_responses()
-    return 0
-
-
-# ── Approval history Excel ──────────────────────────────────────────────────
-
-APPROVAL_HISTORY_FILE = "_Approval_History.xlsx"
-
-
-def export_approval_history() -> bool:
-    """Export all approval responses from the DB to a shared Excel file.
-
-    Creates/overwrites Downtime/_Approval_History.xlsx with all downtimes
-    that have been approved or rejected, including who responded and when.
-    """
-    if not _OPENPYXL_OK:
-        return False
-
-    downtime_dir = _get_downtime_dir()
-    if not downtime_dir:
-        return False
-
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, fecha, hora_inicio, hora_fin, duracion, razon, status,
-               detalle, responded_by, responded_at
-        FROM downtimes
-        WHERE status IN ('approved', 'rejected')
-        ORDER BY fecha DESC, hora_inicio DESC
-    """)
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        return True
-
-    # Get designer name for the export
-    cfg = load_config()
-    designer = cfg.get("designer_name", "")
-
-    path = os.path.join(downtime_dir, APPROVAL_HISTORY_FILE)
-
-    # Read existing rows from other designers
-    existing_rows = []
-    if os.path.exists(path):
-        wb_old = _read_workbook(path)
-        if wb_old is not None:
-            try:
-                ws_old = wb_old.active
-                for r in ws_old.iter_rows(min_row=2, values_only=True):
-                    if r and r[0] is not None:
-                        row_designer = str(r[0] or "").strip().lower()
-                        if row_designer != designer.strip().lower():
-                            existing_rows.append(r)
-                wb_old.close()
-            except Exception as exc:
-                log_event("downtime_approval", f"failed reading existing approval history rows: {exc}", level="WARN")
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Approval History"
-    ws.sheet_view.showGridLines = False
-
-    headers = [
-        "Designer", "ID", "Date", "Start", "End", "Duration (min)",
-        "Reason", "Detail", "Status", "Responded By", "Responded At",
-    ]
-    hdr_fill = PatternFill("solid", fgColor="1565C0")
-    _write_header(ws, headers, hdr_fill)
-
-    _locked = Protection(locked=True)
-    row_idx = 2
-
-    # Write other designers' rows
-    for r in existing_rows:
-        for c, val in enumerate(r, 1):
-            cell = ws.cell(row_idx, c, val)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = _thin()
-            cell.protection = _locked
-        row_idx += 1
-
-    # Write this designer's rows
-    status_fills = {
-        STATUS_APPROVED: PatternFill("solid", fgColor="E8F5E9"),
-        STATUS_REJECTED: PatternFill("solid", fgColor="FFEBEE"),
-    }
-    for db_row in rows:
-        dt_id, fecha, h_ini, h_fin, dur, razon, status, detalle, resp_by, resp_at = db_row
-        vals = [designer, dt_id, fecha, h_ini, h_fin, dur, razon,
-                detalle or "", status, resp_by or "", resp_at or ""]
-        fill = status_fills.get(status, PatternFill("solid", fgColor="F8F8F8"))
-        for c, val in enumerate(vals, 1):
-            cell = ws.cell(row_idx, c, val)
-            cell.alignment = Alignment(
-                horizontal="left" if c in (1, 7, 8) else "center",
-                vertical="center",
-            )
-            cell.fill = fill
-            cell.border = _thin()
-            cell.protection = _locked
-        row_idx += 1
-
-    # Column widths
-    widths = {"A": 22, "B": 8, "C": 14, "D": 10, "E": 10, "F": 14,
-              "G": 30, "H": 30, "I": 12, "J": 22, "K": 20}
-    for col_letter, width in widths.items():
-        ws.column_dimensions[col_letter].width = width
-    ws.row_dimensions[1].height = 22
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:K{row_idx - 1}"
-
-    ws.protection.sheet = True
-    ws.protection.password = _SHEET_PASSWORD
-    ws.protection.autoFilter = False
-    ws.protection.sort = False
-    ws.protection.enable()
-
-    return _save_workbook(wb, path)
-
-
-# ── Cleanup of legacy Power Automate response files ────────────────────────
-
-def _cleanup_old_responses(max_age_days: int = 7):
-    """Delete leftover response_*.json files from the retired Power Automate
-    flow. They serve no purpose now that approvals are made manually in-app.
-
-    Runs each poll cycle until the shared folder is empty, then becomes a
-    no-op.
-    """
-    downtime_dir = _get_downtime_dir()
-    if not downtime_dir:
-        return
-
-    responses_dir = os.path.join(downtime_dir, "responses")
-    if not os.path.isdir(responses_dir):
-        return
-
-    now = time.time()
-    cutoff = now - (max_age_days * 86400)
-    removed = 0
-    for fname in os.listdir(responses_dir):
-        if not (fname.startswith("response_") or fname.endswith(".json.done")):
-            continue
-        fpath = os.path.join(responses_dir, fname)
-        try:
-            mtime = os.path.getmtime(fpath)
-            if mtime < cutoff:
-                os.remove(fpath)
-                removed += 1
-        except OSError:
-            continue
-    if removed:
-        log_event("downtime_approval",
-                  f"cleanup: removed {removed} legacy response_*.json file(s)",
-                  level="INFO")

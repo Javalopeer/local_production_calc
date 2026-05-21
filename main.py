@@ -770,8 +770,11 @@ class MainWindow(QMainWindow):
         # Stop child timers explicitly so they can't fire after Qt cleanup.
         try:
             dm = getattr(self.register_tab, "downtime_manager", None)
-            if dm is not None and hasattr(dm, "_stop_poll_timer"):
-                dm._stop_poll_timer()
+            if dm is not None:
+                if hasattr(dm, "_stop_refresh_timer"):
+                    dm._stop_refresh_timer()
+                if hasattr(dm, "_stop_retry_timer"):
+                    dm._stop_retry_timer()
         except Exception:
             pass
         event.accept()

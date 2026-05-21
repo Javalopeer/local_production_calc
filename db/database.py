@@ -432,13 +432,17 @@ def _ensure_base_tables(cursor) -> None:
             hora_fin TEXT,
             razon TEXT,
             duracion REAL,
-            status TEXT DEFAULT 'approved',
+            status TEXT DEFAULT 'pending',
             detalle TEXT DEFAULT '',
             responded_by TEXT DEFAULT '',
             responded_at TEXT DEFAULT '',
             downtime_case_id TEXT DEFAULT '',
             client_uid TEXT DEFAULT '',
             synced_to_excel INTEGER DEFAULT 0,
+            -- DEPRECATED: synced_to_teams was used by the retired Power
+            -- Automate / Teams webhook flow. Kept for backward-compat with
+            -- existing DBs; new code does not read or write it. Always 1
+            -- on new INSERTs to keep retry workers from acting on it.
             synced_to_teams INTEGER DEFAULT 0,
             sync_attempts INTEGER DEFAULT 0,
             last_sync_error TEXT DEFAULT ''
@@ -476,7 +480,7 @@ def _migration_v1(cursor) -> None:
     _ensure_column(cursor, "cases", "count_production", "count_production INTEGER DEFAULT 1")
     _ensure_column(cursor, "cases", "comments", "comments TEXT DEFAULT ''")
 
-    _ensure_column(cursor, "downtimes", "status", "status TEXT DEFAULT 'approved'")
+    _ensure_column(cursor, "downtimes", "status", "status TEXT DEFAULT 'pending'")
     _ensure_column(cursor, "downtimes", "detalle", "detalle TEXT DEFAULT ''")
     _ensure_column(cursor, "downtimes", "responded_by", "responded_by TEXT DEFAULT ''")
     _ensure_column(cursor, "downtimes", "responded_at", "responded_at TEXT DEFAULT ''")
@@ -494,7 +498,7 @@ def _migration_v2(cursor) -> None:
     """Schema hardening upgrade (non-destructive)."""
     # Defensive: some v1 DBs in the wild never got these columns added before
     # their version marker was bumped. Re-ensure before indexing.
-    _ensure_column(cursor, "downtimes", "status", "status TEXT DEFAULT 'approved'")
+    _ensure_column(cursor, "downtimes", "status", "status TEXT DEFAULT 'pending'")
     _ensure_column(cursor, "downtimes", "detalle", "detalle TEXT DEFAULT ''")
     _ensure_column(cursor, "downtimes", "responded_by", "responded_by TEXT DEFAULT ''")
     _ensure_column(cursor, "downtimes", "responded_at", "responded_at TEXT DEFAULT ''")

@@ -342,19 +342,19 @@ def create_presentation():
     # SLIDE 11: Approval System
     # ══════════════════════════════════════════════════════════════════════════
     _add_bullet_slide(prs, "Sistema de Aprobación de Downtimes",
-                      "Workflow automático multi-usuario", [
-        ("Excel compartido en OneDrive",
-         "Archivo _Downtime_Approvals.xlsx en carpeta Downtime/ — accesible por supervisores"),
-        ("Protección de hojas",
-         "Solo la columna Status es editable — el resto está protegido con contraseña"),
-        ("Polling automático cada 15 segundos",
-         "La app consulta periódicamente si el supervisor aprobó/rechazó downtimes"),
-        ("Botón manual 'Check Approvals'",
-         "El diseñador puede verificar manualmente el estado de sus solicitudes"),
-        ("Actualización automática de DB",
-         "Al detectar aprobación/rechazo, la base de datos local se actualiza inmediatamente"),
-        ("Multi-diseñador",
-         "Cada diseñador solo ve y modifica sus propios downtimes en el archivo compartido"),
+                      "Workflow manual con copia a Teams", [
+        ("Estado inicial: Pending",
+         "Cada DT nuevo arranca como Pending — sin auto-aprobaciones"),
+        ("Copy for Teams",
+         "Un click genera el bloque listo para pegar en el chat del supervisor"),
+        ("Aprobación manual in-app",
+         "Tras la reacción del supervisor en Teams, el diseñador marca ✓ Approved o ✗ Rejected en su propia app"),
+        ("Push to Power App",
+         "Los DTs aprobados se exportan al app HC Control vía un dialog de copy field-by-field"),
+        ("Excel compartido multi-diseñador",
+         "Cada diseñador escribe en su propio _DT_<name>.xlsx; un consolidado read-only agrega todos para los leads"),
+        ("Retry worker tolerante a fallos",
+         "Si OneDrive bloquea el archivo, un worker reintenta cada 60 s hasta sincronizar"),
     ])
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -436,21 +436,21 @@ def create_presentation():
     # SLIDE 16: Cambios Recientes
     # ══════════════════════════════════════════════════════════════════════════
     _add_bullet_slide(prs, "Cambios Recientes",
-                      "Actualizaciones Marzo 2026", [
+                      "Actualizaciones Marzo–Mayo 2026", [
         ("Separación de columnas UE en dashboard",
          "UE (Cases) y UE (w/ DT) para diferenciar producción pura vs con downtime"),
-        ("Sistema completo de aprobación de downtimes",
-         "Excel compartido, protección de hojas, polling automático, multi-diseñador"),
-        ("Performance tracking con popups",
-         "Felicitación al 95%, justificación requerida al no alcanzar, enforcement al siguiente día"),
-        ("Casos sobre estándar en justificaciones",
-         "Al justificar, se incluyen automáticamente los casos que excedieron el tiempo permitido"),
-        ("Auto-filtro en Excel compartidos",
-         "Filtrar por diseñador y fecha directamente en Excel — protección permite filtrar y ordenar"),
-        ("OneDrive force-refresh",
-         "Mecanismo para forzar la descarga de la última versión del archivo de aprobaciones"),
-        ("Legacy DB migration",
-         "Migración automática de bases de datos existentes al nuevo schema"),
+        ("Aprobación manual de downtimes",
+         "Power Automate retirado; Copy-to-Teams + marcado manual ✓/✗ en la app del diseñador"),
+        ("Push to Power App (HC Control)",
+         "Botón ⚡ en filas approved abre dialog con copy field-by-field para el form de HC Control"),
+        ("Edit en modal con validaciones",
+         "Reglas: end ≥ start, ventana 06:00–15:00, sin solape, reason obligatorio, Case ID para Multitreatment"),
+        ("Meta UE configurable por fecha",
+         "Tabla ue_target_history — schedule de cambios futuros sin re-compilar"),
+        ("Tema dark/light coherente",
+         "Charts, KPI cards y labels de Register actualizan paleta on the fly"),
+        ("Pick-mode visual para Delete/Edit",
+         "Hint label animado + cursor + hover tint del color del modo"),
         ("Build .exe optimizado",
          "Ejecutable de 60 MB con auto-installer — distribución sin dependencias"),
     ])

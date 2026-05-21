@@ -1709,10 +1709,29 @@ class RegisterTab(QWidget):
         summary = f"{case_id} | {region} | {tipo}"
         self._set_result_status(f"{action}: {summary}", result_color)
         self.load_daily_production()
+
+        # Full form reset — leaves a clean slate until the next Import / manual entry.
         self.case_id.clear()
         self.doctor.clear()
         self._comments_widget_for_mode(self._mode).clear()
         self.count_toggle.setChecked(True)  # Reset toggle to ON
+
+        # Reset region / type combos to their first item
+        for combo in (self.region, self.tipo):
+            combo.blockSignals(True)
+            if combo.count() > 0:
+                combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+        # Rebuild the type list to match the freshly-selected region
+        self.update_case_types()
+
+        # Date back to today, start time back to current time
+        self.case_date.blockSignals(True)
+        self.case_date.setDate(QDate.currentDate())
+        self.case_date.blockSignals(False)
+        self.start_time.blockSignals(True)
+        self.start_time.setTime(QTime.currentTime())
+        self.start_time.blockSignals(False)
 
         # Clear end time - set to midnight (00:00)
         self.end_time.blockSignals(True)

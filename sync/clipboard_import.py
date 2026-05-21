@@ -146,9 +146,28 @@ def parse_clipboard(standards: dict, clipboard_text: str = "") -> dict:
     # ── 3. Doctor ────────────────────────────────────────────────────────────
     # CMS layout: "Doctor   LAST-NAME, FIRST NAME"
     # The word "Doctor" appears as a standalone label followed by the value.
+    # Character classes use Unicode ranges so any alphabet survives the
+    # regex match: Latin-1 + Latin Extended (Spanish, French, German, Polish,
+    # Czech, Hungarian, etc.), Cyrillic (Russian, Ukrainian, Bulgarian),
+    # Greek, and CJK (Chinese, Japanese, Korean). Apostrophe included for
+    # names like "O'Brien".
+    _NAME_CHARS = (
+        r"A-Za-z"
+        r"À-ɏ"   # Latin-1 Supplement + Latin Extended-A/B
+        r"Ḁ-ỿ"   # Latin Extended Additional (Vietnamese)
+        r"Ͱ-Ͽ"   # Greek and Coptic
+        r"Ѐ-ӿ"   # Cyrillic (Russian, Ukrainian, etc.)
+        r"Ԁ-ԯ"   # Cyrillic Supplement
+        r"一-鿿"   # CJK Unified Ideographs (Chinese, Japanese kanji)
+        r"぀-ゟ"   # Hiragana
+        r"゠-ヿ"   # Katakana
+        r"가-힯"   # Hangul (Korean)
+    )
+    _NAME_SEP = r"\s,&.\-'"
     doctor = ""
     doc_match = re.search(
-        r'\bDoctor\b\s+([A-Z][A-Z\s,&.\-]{3,60}?)(?=\s{2,}|\n|POD|Country|Region|Scanner|CBCT|$)',
+        rf'\bDoctor\b\s+([{_NAME_CHARS}][{_NAME_CHARS}{_NAME_SEP}]{{2,60}}?)'
+        r'(?=\s{2,}|\n|POD|Country|Region|Scanner|CBCT|$)',
         flat, re.IGNORECASE
     )
     if doc_match:
