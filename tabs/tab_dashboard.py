@@ -28,7 +28,7 @@ from .utils import (
 )
 
 # ---------------------------------------------------------------------------
-# Palette
+# Palette (mutable — swapped in place by _apply_chart_palette on theme change)
 # ---------------------------------------------------------------------------
 _BG    = QColor("#1e1e1e")
 _AX    = QColor("#2b2b2b")
@@ -39,6 +39,28 @@ _BLUE  = QColor("#4aa3ff")
 _ORANGE = QColor("#f5a623")
 _GREEN  = QColor("#4CAF50")
 _RED    = QColor("#e05c5c")
+
+
+_DARK_CHART_COLORS = {
+    "bg": "#1e1e1e", "ax": "#2b2b2b", "grid": "#3c3c3c",
+    "text": "#e6e6e6", "muted": "#888888",
+}
+_LIGHT_CHART_COLORS = {
+    "bg": "#FFFFFF", "ax": "#F6F8FA", "grid": "#D0D7DE",
+    "text": "#1F2328", "muted": "#656D76",
+}
+
+
+def _apply_chart_palette(is_light: bool) -> None:
+    """Mutate the module-level chart QColor objects in place so subsequent
+    paintEvent calls pick up the new theme without rebuilding widgets."""
+    c = _LIGHT_CHART_COLORS if is_light else _DARK_CHART_COLORS
+    for color_obj, key in (
+        (_BG, "bg"), (_AX, "ax"), (_GRID, "grid"),
+        (_TEXT, "text"), (_MUTED, "muted"),
+    ):
+        nc = QColor(c[key])
+        color_obj.setRgb(nc.red(), nc.green(), nc.blue())
 
 SERIES_COLORS = [
     QColor("#4aa3ff"), QColor("#f5a623"), QColor("#4CAF50"), QColor("#e07b54"),
@@ -423,13 +445,13 @@ class _Card(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setMinimumWidth(110)
+        self._accent = accent
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 14, 14, 14)
         lay.setSpacing(8)
 
         self._title_lbl = QLabel(title)
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._title_lbl.setStyleSheet("color: #8B949E; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
 
         self._val_lbl = QLabel(value)
         self._val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -437,13 +459,22 @@ class _Card(QFrame):
         f.setPointSize(16)
         f.setBold(True)
         self._val_lbl.setFont(f)
-        self._val_lbl.setStyleSheet(f"color: {accent};")
+
+        self.apply_theme(is_light=False)
 
         lay.addWidget(self._title_lbl)
         lay.addWidget(self._val_lbl)
 
     def set_value(self, v: str):
         self._val_lbl.setText(v)
+
+    def apply_theme(self, is_light: bool):
+        title_color = "#57606A" if is_light else "#8B949E"
+        self._title_lbl.setStyleSheet(
+            f"color: {title_color}; font-size: 10px; font-weight: 700; "
+            "text-transform: uppercase; letter-spacing: 0.5px;"
+        )
+        self._val_lbl.setStyleSheet(f"color: {self._accent};")
 
 
 # ---------------------------------------------------------------------------
@@ -1800,7 +1831,7 @@ class DashboardTab(QWidget):
             ])
 
     # ------------------------------------------------------------------
-    # Theme hook (no-op — charts use dark palette regardless)
+    # Theme hook — swap chart palette, restyle cards, force repaint
     # ------------------------------------------------------------------
 
     def update_theme_labels(self, is_light: bool):
@@ -1808,3 +1839,20 @@ class DashboardTab(QWidget):
             self.title_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #111; letter-spacing: 0.5px;")
         else:
             self.title_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6EDF3; letter-spacing: 0.5px;")
+
+        # Mutate module-level chart colors so paintEvent picks them up next frame
+        _apply_chart_palette(is_light)
+
+        # Re-theme KPI cards (title color depends on theme)
+        for card in self.findChildren(_Card):
+            try:
+                card.apply_theme(is_light)
+            except Exception:
+                pass
+
+        # Force a repaint of every chart child so the new palette renders now
+        for child in self.findChildren(QWidget):
+            try:
+                child.update()
+            except Exception:
+                pass

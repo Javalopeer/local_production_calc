@@ -142,10 +142,8 @@ class RegisterTab(QWidget):
         result_kpi_layout.addWidget(self.result_label)
 
         self.daily_production_label = QLabel("Daily Production: 0.00%")
-        self.daily_production_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #388BFD;")
-
         self.equivalent_units_label = QLabel("Equivalent Units: 0.00")
-        self.equivalent_units_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #A371F7;")
+        self._apply_kpi_label_styles(is_light=False)
 
         self.region.addItems(self.standards.keys())
         self.region.currentTextChanged.connect(self.update_case_types)
@@ -551,6 +549,24 @@ class RegisterTab(QWidget):
         self._sync_regular_progress_visibility()
         self._capture_mode_state("regular")
 
+    def _apply_kpi_label_styles(self, is_light: bool):
+        """Restyle the two KPI labels (Daily Production / Equivalent Units)
+        with theme-aware foreground colors so light mode keeps decent contrast."""
+        if is_light:
+            prod_color = "#0550AE"   # darker blue for light bg
+            ue_color = "#6E40C9"     # darker purple for light bg
+        else:
+            prod_color = "#388BFD"
+            ue_color = "#A371F7"
+        if hasattr(self, "daily_production_label"):
+            self.daily_production_label.setStyleSheet(
+                f"font-size: 14px; font-weight: 700; color: {prod_color};"
+            )
+        if hasattr(self, "equivalent_units_label"):
+            self.equivalent_units_label.setStyleSheet(
+                f"font-size: 14px; font-weight: 700; color: {ue_color};"
+            )
+
     def update_theme_labels(self, is_light: bool):
         """Apply light/dark table styles while preserving per-cell badge colors."""
         from PySide6.QtGui import QColor
@@ -558,6 +574,7 @@ class RegisterTab(QWidget):
         # table + OT progress bar in `_load_ot_day_cases`) pick the right
         # palette regardless of any QApplication stylesheet quirk.
         self._light_mode_active = bool(is_light)
+        self._apply_kpi_label_styles(is_light)
         colors = get_light_theme_colors()
         fg_color = QColor(colors["text_primary"]) if is_light else CLR_FG_LIGHT
         light_css = (
@@ -973,13 +990,27 @@ class RegisterTab(QWidget):
         # Total production = cases + downtime (both count as production)
         total_production = total_cases + downtime_value
         
+        # Resolve effective targets for this date (UE target may vary by date)
+        try:
+            from sync.daily_performance import (
+                PRODUCTION_TARGET_PCT, get_ue_target_for_date,
+            )
+            prod_target = PRODUCTION_TARGET_PCT
+            ue_target = get_ue_target_for_date(selected_date)
+        except Exception:
+            prod_target = 95.0
+            ue_target = 14.0
+
         display_label = f"Daily Production: {total_production:.2f}%"
         if total_downtime > 0:
             display_label += f" (Cases: {total_cases:.2f}% + Downtime: {downtime_value:.2f}%)"
-        
+        display_label += f"  •  Target: {prod_target:.0f}%"
+
         self.daily_production_label.setText(display_label)
 
-        self.equivalent_units_label.setText(f"Equivalent Units: {total_equivalent_units:.2f}")
+        self.equivalent_units_label.setText(
+            f"Equivalent Units: {total_equivalent_units:.2f}  •  Target: {ue_target:.2f}"
+        )
         
         # Update progress bar with animation - NO CAP, allow any value
         self.progress_bar.setMaximum(max(100, int(total_production) + 10))

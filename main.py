@@ -355,7 +355,6 @@ class MainWindow(QMainWindow):
 
         # Connect a themeChanged signal to tabs so they update their local styles
         _safe_connect(self.themeChanged, self.register_tab,   "update_theme_labels",        "register.update_theme_labels")
-        _safe_connect(self.themeChanged, self.register_tab,   "update_progress_bar_style",  "register.update_progress_bar_style")
         _safe_connect(self.themeChanged, self.history_tab,    "update_theme_labels",        "history.update_theme_labels")
         _safe_connect(self.themeChanged, self.production_tab, "update_theme_labels",        "production.update_theme_labels")
         _safe_connect(self.themeChanged, self.standards_tab,  "update_theme_labels",        "standards.update_theme_labels")
@@ -464,6 +463,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log_event("main", f"statusbar palette button setup failed: {exc}", level="WARN")
 
+        # Daily UE target editor in status bar
+        try:
+            btn_ue_target = QPushButton()
+            btn_ue_target.setIcon(qta.icon('fa5s.bullseye', color='#A371F7'))
+            btn_ue_target.setToolTip("Configure daily UE target by date")
+            btn_ue_target.setFixedSize(28, 20)
+            btn_ue_target.setStyleSheet("padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; background: transparent;")
+            btn_ue_target.clicked.connect(self._open_ue_target_dialog)
+            self.statusBar().addPermanentWidget(btn_ue_target)
+        except Exception as exc:
+            log_event("main", f"statusbar ue target button setup failed: {exc}", level="WARN")
+
         # Theme toggle checkbox in status bar
         try:
             light_chk = QCheckBox("Light")
@@ -518,6 +529,21 @@ class MainWindow(QMainWindow):
         """Open the breaks configuration dialog."""
         dlg = BreaksDialog(self)
         dlg.exec()
+
+    def _open_ue_target_dialog(self):
+        """Open the editor for the daily UE target by date."""
+        try:
+            from tabs.ue_target_dialog import UETargetDialog
+        except ImportError as exc:
+            QMessageBox.warning(self, "Unavailable", f"Could not load UE target editor:\n{exc}")
+            return
+        dlg = UETargetDialog(self)
+        if dlg.exec():
+            # Refresh the daily production labels so the new target shows up immediately
+            try:
+                self.register_tab.load_daily_production()
+            except Exception as exc:
+                log_event("main", f"refresh after UE target change failed: {exc}", level="WARN")
 
     def _open_sync_dialog(self):
         """Open the Sync panel as a floating dialog."""

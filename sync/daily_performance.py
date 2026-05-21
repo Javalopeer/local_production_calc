@@ -3,9 +3,9 @@
 Daily Performance Check — end-of-day popups and justification export.
 
 Logic:
-  1. After each case save, check if production ≥ 95% OR UE ≥ 14.
+  1. After each case save, check if production ≥ 95% OR UE ≥ effective target.
      → If yes, show a congratulations popup with daily summary.
-  2. At 3:05 PM, if production < 95% AND UE < 14:
+  2. At 3:05 PM, if production < 95% AND UE < effective target:
      → Show an encouragement popup that requires a written justification.
      → The app cannot be closed until the justification is submitted.
   3. If the designer exits before 3:05 PM *without* meeting the target,
@@ -27,7 +27,7 @@ from tabs.utils import (
 )
 
 PRODUCTION_TARGET_PCT = 95.0
-UE_TARGET = 14.0
+UE_TARGET = 14.0  # default fallback; effective target is looked up by date in ue_target_history
 _EXCEL_RETRY_SLEEP_S = 1  # wait between Excel save retries (file lock)
 
 SHARED_JUSTIFICATION_FILE = "_Daily_Justifications.xlsx"
@@ -65,7 +65,7 @@ def _get_justification_path() -> str | None:
 # ── DB table for tracking ────────────────────────────────────────────────────
 
 def init_performance_table():
-    """Create the daily_performance table if it doesn't exist."""
+    """Create the daily_performance and ue_target_history tables if missing."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -79,6 +79,69 @@ def init_performance_table():
             popup_shown INTEGER DEFAULT 0
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ue_target_history (
+            start_date TEXT PRIMARY KEY,
+            value REAL NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+# ── UE target history ────────────────────────────────────────────────────────
+
+def get_ue_target_for_date(fecha: str) -> float:
+    """Return the UE target effective on the given ISO date.
+
+    Looks up the most recent period with start_date <= fecha. Falls back to
+    UE_TARGET when no period covers the date or the table is empty.
+    """
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT value FROM ue_target_history WHERE start_date <= ? "
+            "ORDER BY start_date DESC LIMIT 1",
+            (fecha,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0] is not None:
+            return float(row[0])
+    except Exception:
+        pass
+    return UE_TARGET
+
+
+def list_ue_target_periods() -> list[tuple[str, float]]:
+    """Return all configured periods ordered by start_date ascending."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT start_date, value FROM ue_target_history ORDER BY start_date ASC"
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [(r[0], float(r[1])) for r in rows]
+    except Exception:
+        return []
+
+
+def set_ue_target_periods(periods: list[tuple[str, float]]) -> None:
+    """Replace the full set of UE target periods.
+
+    `periods` is a list of (start_date_iso, value) tuples. Existing rows are
+    cleared and replaced atomically.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM ue_target_history")
+    cur.executemany(
+        "INSERT INTO ue_target_history (start_date, value) VALUES (?, ?)",
+        [(str(d), float(v)) for d, v in periods],
+    )
     conn.commit()
     conn.close()
 
@@ -154,7 +217,8 @@ def get_daily_metrics(fecha: str) -> dict:
 
     production_pct = cases_pct + downtime_pct
     equivalent_units = cases_ue
-    met_target = production_pct >= PRODUCTION_TARGET_PCT or equivalent_units >= UE_TARGET
+    ue_target = get_ue_target_for_date(fecha)
+    met_target = production_pct >= PRODUCTION_TARGET_PCT or equivalent_units >= ue_target
 
     return {
         "production_pct": production_pct,
@@ -165,6 +229,7 @@ def get_daily_metrics(fecha: str) -> dict:
         "downtime_ue": downtime_ue,
         "total_cases": total_cases,
         "total_downtime_min": total_downtime_min,
+        "ue_target": ue_target,
         "met_target": met_target,
         "case_breakdown": case_breakdown,
     }

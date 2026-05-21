@@ -318,14 +318,20 @@ class DowntimeManager(QWidget):
 
         input_layout.addWidget(QLabel("Start:"))
         self.downtime_start = QTimeEdit()
+        self.downtime_start.setDisplayFormat("HH:mm")
         self.downtime_start.setTime(QTime.currentTime())
         self.downtime_start.setMinimumWidth(90)
         input_layout.addWidget(self.downtime_start)
 
         input_layout.addWidget(QLabel("End:"))
         self.downtime_end = QTimeEdit()
+        self.downtime_end.setDisplayFormat("HH:mm")
         self.downtime_end.setTime(QTime.currentTime())
         self.downtime_end.setMinimumWidth(90)
+        # End cannot be earlier than Start (blocks typing + scroll below Start)
+        self.downtime_end.setMinimumTime(self.downtime_start.time())
+        self.downtime_start.timeChanged.connect(self._on_start_time_changed)
+        self.downtime_end.timeChanged.connect(self._on_end_time_changed)
         input_layout.addWidget(self.downtime_end)
 
         input_layout.addWidget(QLabel("Reason:"))
@@ -467,6 +473,11 @@ class DowntimeManager(QWidget):
         if duration < 0:
             duration += 24 * 60
 
+        err = self._validate_downtime(start_mins, end_mins, reason)
+        if err:
+            QMessageBox.warning(self, "Invalid downtime", err)
+            return
+
         detalle = self._get_downtime_detail(reason)
         if detalle is None:
             return  # Cancelado por el usuario
@@ -558,15 +569,84 @@ class DowntimeManager(QWidget):
         return None
 
     def _is_light_mode(self) -> bool:
-        app = QApplication.instance()
-        if not app:
-            return False
-        return "background-color: #F6F8FA" in (app.styleSheet() or "")
+        """Return last theme state pushed via update_theme_labels.
+
+        Substring matching on `app.styleSheet()` breaks when the user
+        customizes the light palette (the default `#F6F8FA` is replaced),
+        so we cache the flag instead.
+        """
+        return bool(getattr(self, "_light_mode_active", False))
 
     def update_theme_labels(self, is_light: bool):
-        """Hook called by parent when theme changes — reloads table so item
-        foregrounds are recomputed with the new theme."""
+        """Hook called by parent when theme changes — caches the flag and
+        reloads the table so item foregrounds get recomputed."""
+        self._light_mode_active = bool(is_light)
         self.load_downtimes()
+
+    # Regular shift window — used to reject downtimes outside working hours.
+    _SHIFT_START_MIN = 6 * 60    # 06:00
+    _SHIFT_END_MIN = 15 * 60     # 15:00
+    _MIN_DURATION_MIN = 1
+
+    def _validate_downtime(self, start_mins: int, end_mins: int,
+                            reason: str, exclude_id: int | None = None) -> str | None:
+        """Return an error message if the downtime is invalid, else None."""
+        if not reason or not reason.strip():
+            return "Reason is required."
+
+        if start_mins < self._SHIFT_START_MIN or end_mins > self._SHIFT_END_MIN:
+            return ("Downtime must be inside the regular shift "
+                    f"(06:00 – 15:00). Got "
+                    f"{start_mins // 60:02d}:{start_mins % 60:02d} – "
+                    f"{end_mins // 60:02d}:{end_mins % 60:02d}.")
+
+        duration = end_mins - start_mins
+        if duration < self._MIN_DURATION_MIN:
+            return f"Duration must be at least {self._MIN_DURATION_MIN} minute(s)."
+
+        # Overlap check against existing downtimes for the same date.
+        # Two intervals [a,b) and [c,d) overlap iff a < d AND c < b.
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, hora_inicio, hora_fin FROM downtimes "
+                "WHERE fecha = ? AND COALESCE(status,'') != 'rejected'",
+                (self.current_date,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as exc:
+            return f"Could not validate overlaps: {exc}"
+
+        for row_id, hi, hf in rows:
+            if exclude_id is not None and row_id == exclude_id:
+                continue
+            try:
+                hi_t = QTime.fromString(hi, "HH:mm")
+                hf_t = QTime.fromString(hf, "HH:mm")
+                s = hi_t.hour() * 60 + hi_t.minute()
+                e = hf_t.hour() * 60 + hf_t.minute()
+            except Exception:
+                continue
+            if start_mins < e and s < end_mins:
+                return (f"Overlaps with existing downtime "
+                        f"{hi}–{hf}. Adjust the time range.")
+        return None
+
+    def _on_start_time_changed(self, t: QTime):
+        """Keep End >= Start. Bump End forward if Start moves past it."""
+        self.downtime_end.setMinimumTime(t)
+        if self.downtime_end.time() < t:
+            self.downtime_end.setTime(t)
+
+    def _on_end_time_changed(self, t: QTime):
+        """Safety net — if End somehow drops below Start, snap it back."""
+        start = self.downtime_start.time()
+        if t < start:
+            self.downtime_end.blockSignals(True)
+            self.downtime_end.setTime(start)
+            self.downtime_end.blockSignals(False)
 
     def _normalize_status(self, status: str) -> str:
         s = (status or "").strip().lower()
@@ -970,10 +1050,15 @@ class DowntimeManager(QWidget):
         duration = end_mins - start_mins
         if duration < 0:
             duration += 24 * 60
-        
+
         # Editing a DT resets it to pending and clears the synced flag so the
         # retry worker re-uploads the modified data to the shared Excel.
         row_id = self.row_ids[self.current_edit_row]
+
+        err = self._validate_downtime(start_mins, end_mins, reason, exclude_id=row_id)
+        if err:
+            QMessageBox.warning(self, "Invalid downtime", err)
+            return
         conn = get_connection()
         cursor = conn.cursor()
 

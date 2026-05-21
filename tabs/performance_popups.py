@@ -25,7 +25,9 @@ def _summary_text(metrics: dict, fecha: str) -> str:
     if metrics["downtime_pct"] > 0:
         lines.append(f"   Cases:        {metrics['cases_pct']:.2f}%")
         lines.append(f"   Downtime:  {metrics['downtime_pct']:.2f}%")
-    lines.append(f"Equivalent Units:  {metrics['equivalent_units']:.2f}")
+    target = metrics.get("ue_target")
+    target_suffix = f"  (target: {target:.2f})" if target else ""
+    lines.append(f"Equivalent Units:  {metrics['equivalent_units']:.2f}{target_suffix}")
     if metrics["downtime_ue"] > 0:
         lines.append(f"   Cases:        {metrics['cases_ue']:.2f}")
         lines.append(f"   Downtime:  {metrics['downtime_ue']:.2f}")
@@ -36,7 +38,7 @@ def _summary_text(metrics: dict, fecha: str) -> str:
 
 
 class SuccessPopup(QDialog):
-    """Shown when the designer meets the daily target (≥95% or ≥14 UE)."""
+    """Shown when the designer meets the daily target (production ≥95% or UE ≥ effective target)."""
 
     def __init__(self, metrics: dict, fecha: str, parent=None):
         super().__init__(parent)
