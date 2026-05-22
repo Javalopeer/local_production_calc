@@ -567,6 +567,18 @@ class RegisterTab(QWidget):
                 f"font-size: 14px; font-weight: 700; color: {ue_color};"
             )
 
+    def update_font_sizes(self, _new_size: int = 0):
+        """Re-render tables so the QFont calls inside load_daily_production
+        and _load_ot_day_cases pick up the new global scale."""
+        try:
+            self.load_daily_production()
+        except Exception:
+            pass
+        try:
+            self._load_ot_day_cases()
+        except Exception:
+            pass
+
     def update_theme_labels(self, is_light: bool):
         """Apply light/dark table styles while preserving per-cell badge colors."""
         from PySide6.QtGui import QColor

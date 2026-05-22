@@ -20,6 +20,7 @@ from PySide6.QtCore import QDate, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush
 
 from db.database import get_connection
+from . import font_scale
 from .utils import (
     get_resource_path,
     load_units_eq_data,
@@ -83,7 +84,7 @@ def _paint_no_data(widget: QWidget):
     p.fillRect(widget.rect(), _BG)
     p.setPen(QPen(_MUTED))
     f = QFont()
-    f.setPointSize(9)
+    f.setPointSize(font_scale.scale_pt(9))
     p.setFont(f)
     p.drawText(widget.rect(), Qt.AlignmentFlag.AlignCenter, "No data")
     p.end()
@@ -97,7 +98,7 @@ def _draw_axes(painter: QPainter, rc: QRect):
 
 def _draw_h_grid(painter: QPainter, rc: QRect, max_val: float, lines: int = 4):
     f = QFont()
-    f.setPointSize(7)
+    f.setPointSize(font_scale.scale_pt(7))
     painter.setFont(f)
     for i in range(lines + 1):
         frac = i / lines
@@ -117,7 +118,7 @@ def _draw_h_grid(painter: QPainter, rc: QRect, max_val: float, lines: int = 4):
 
 def _draw_legend(painter: QPainter, series: list, rc: QRect):
     f = QFont()
-    f.setPointSize(7)
+    f.setPointSize(font_scale.scale_pt(7))
     painter.setFont(f)
     fm = QFontMetrics(f)
     x = rc.x()
@@ -209,7 +210,7 @@ class StackedBarChart(_ChartBase):
         _draw_h_grid(p, rc, max_val)
 
         f = QFont()
-        f.setPointSize(7)
+        f.setPointSize(font_scale.scale_pt(7))
         p.setFont(f)
         stride = _label_stride(n, max_labels=10)
         val_stride = _label_stride(n, max_labels=12)
@@ -333,7 +334,7 @@ class LineChart(_ChartBase):
 
         # X labels
         f = QFont()
-        f.setPointSize(7)
+        f.setPointSize(font_scale.scale_pt(7))
         p.setFont(f)
         p.setPen(QPen(_MUTED))
         stride = _label_stride(len(xs), max_labels=10)
@@ -411,7 +412,7 @@ class PieChart(_ChartBase):
 
         # Legend
         f = QFont()
-        f.setPointSize(7)
+        f.setPointSize(font_scale.scale_pt(7))
         p.setFont(f)
         lx = margin
         ly = h - self.LEGEND_H + 4
@@ -455,10 +456,8 @@ class _Card(QFrame):
 
         self._val_lbl = QLabel(value)
         self._val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        f = QFont()
-        f.setPointSize(16)
-        f.setBold(True)
-        self._val_lbl.setFont(f)
+        self._val_base_pt = 16
+        self._apply_val_font()
 
         self.apply_theme(is_light=False)
 
@@ -467,6 +466,15 @@ class _Card(QFrame):
 
     def set_value(self, v: str):
         self._val_lbl.setText(v)
+
+    def _apply_val_font(self):
+        f = QFont()
+        f.setPointSize(font_scale.scale_pt(self._val_base_pt))
+        f.setBold(True)
+        self._val_lbl.setFont(f)
+
+    def update_font_sizes(self):
+        self._apply_val_font()
 
     def apply_theme(self, is_light: bool):
         title_color = "#57606A" if is_light else "#8B949E"
@@ -925,6 +933,35 @@ class DashboardTab(QWidget):
             card_grid.setColumnStretch(c, 1)
         root.addLayout(card_grid)
 
+        # ── Period Summary (Today / Week / Month / Q / YTD + picker) ───
+        period_grp = QGroupBox("Period Summary")
+        pl = QVBoxLayout(period_grp)
+        pl.setContentsMargins(8, 10, 8, 10)
+        pl.setSpacing(6)
+
+        picker_row = QHBoxLayout()
+        picker_row.setContentsMargins(0, 0, 0, 0)
+        picker_row.setSpacing(6)
+        picker_row.addWidget(QLabel("Pick week:"))
+        self.cmb_week = QComboBox()
+        self.cmb_week.setMinimumWidth(260)
+        self._populate_week_combo()
+        self.cmb_week.currentIndexChanged.connect(self._on_pick_week)
+        picker_row.addWidget(self.cmb_week)
+        picker_row.addStretch()
+        pl.addLayout(picker_row)
+
+        self.tbl_period = _make_table([
+            "Period", "Range",
+            "UE no-DT", "UE w/DT",
+            "Avg/Day no-DT", "Avg/Day w/DT",
+            "Avg Eff %", "Cases",
+        ])
+        self.tbl_period.setMinimumHeight(220)
+        self.tbl_period.setMaximumHeight(280)
+        pl.addWidget(self.tbl_period)
+        root.addWidget(period_grp)
+
         # ── Charts row 1 ──────────────────────────────────────────────
         self._ch1 = QHBoxLayout()
         self._ch1.setSpacing(16)
@@ -1347,6 +1384,7 @@ class DashboardTab(QWidget):
         down_map = self._query_downtime(d_from, d_to)
 
         self._update_kpis(reg_rows, ot_rows, down_map)
+        self._update_period_summary()
         self._update_charts(reg_rows, ot_rows)
         self._update_daily_table(reg_rows, ot_rows, down_map)
         self._update_region_table(reg_rows, ot_rows)
@@ -1533,6 +1571,189 @@ class DashboardTab(QWidget):
             pass
         avg_eff = sum_eff / total_cases if total_cases else 0.0
         return total_cases, avg_eff, total_ue
+
+    def _query_period_metrics(self, d_from: str, d_to: str) -> dict:
+        """REG+OT combined metrics for a date range.
+
+        UE breakdown:
+        - cases_ue   : UE strictly from completed cases (no downtime credit).
+        - dt_min     : sum of approved downtime minutes in the range.
+        - ue_with_dt : cases_ue + (dt_min / DAILY_BASE_MINUTES) * DAILY_TARGET_EQ_UNITS
+                       — credits the user as if downtime minutes had produced
+                       at the daily target rate.
+        active_days = distinct fechas with any case OR any downtime.
+        """
+        from tabs.utils import DAILY_BASE_MINUTES, DAILY_TARGET_EQ_UNITS
+        units_eq = load_units_eq_data()
+        reg_cases = 0
+        ot_cases = 0
+        sum_eff = 0.0
+        eff_count = 0
+        cases_ue = 0.0
+        dt_min = 0.0
+        active_days: set = set()
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            for table, is_ot in (("cases", False), ("ot_cases", True)):
+                cur.execute(
+                    f"SELECT fecha, region, tipo_caso, COUNT(*), "
+                    f"SUM(CASE WHEN efficiency BETWEEN 0 AND 1000 THEN efficiency ELSE 0 END), "
+                    f"SUM(CASE WHEN efficiency BETWEEN 0 AND 1000 THEN 1 ELSE 0 END), "
+                    f"SUM(case_value) "
+                    f"FROM {table} WHERE fecha BETWEEN ? AND ? "
+                    f"GROUP BY fecha, region, tipo_caso",
+                    [d_from, d_to],
+                )
+                for fecha, reg, tipo_c, cnt, s_eff, c_eff, sum_cv in cur.fetchall():
+                    cnt = cnt or 0
+                    if is_ot:
+                        ot_cases += cnt
+                    else:
+                        reg_cases += cnt
+                    sum_eff += s_eff or 0.0
+                    eff_count += c_eff or 0
+                    cases_ue += calculate_equivalent_units(
+                        units_eq,
+                        reg or "",
+                        tipo_c or "",
+                        (sum_cv or 0.0),
+                        count=cnt,
+                    )
+                    if fecha and cnt > 0:
+                        active_days.add(fecha)
+
+            # Approved downtime in range (matches daily_performance.py filter)
+            cur.execute(
+                "SELECT fecha, SUM(duracion) FROM downtimes "
+                "WHERE fecha BETWEEN ? AND ? "
+                "AND (status = 'approved' OR status IS NULL) "
+                "GROUP BY fecha",
+                [d_from, d_to],
+            )
+            for fecha, total in cur.fetchall():
+                dur = float(total or 0)
+                dt_min += dur
+                if fecha and dur > 0:
+                    active_days.add(fecha)
+            conn.close()
+        except Exception as exc:
+            print(f"[Dashboard] period_metrics: {exc}")
+
+        ue_with_dt = cases_ue + (dt_min / DAILY_BASE_MINUTES) * DAILY_TARGET_EQ_UNITS
+        avg_eff = sum_eff / eff_count if eff_count else 0.0
+        return {
+            "reg_cases": reg_cases,
+            "ot_cases": ot_cases,
+            "total_cases": reg_cases + ot_cases,
+            "ue_no_dt": cases_ue,
+            "ue_with_dt": ue_with_dt,
+            "dt_min": dt_min,
+            "avg_eff": avg_eff,
+            "active_days": len(active_days),
+        }
+
+    @staticmethod
+    def _iso_week_range(year: int, week: int) -> tuple:
+        """Return (monday, sunday) date objects for ISO week `week` of `year`."""
+        from datetime import date as _date, timedelta as _td
+        jan4 = _date(year, 1, 4)
+        week1_mon = jan4 - _td(days=jan4.isoweekday() - 1)
+        mon = week1_mon + _td(weeks=week - 1)
+        sun = mon + _td(days=6)
+        return mon, sun
+
+    def _populate_week_combo(self):
+        """Fill week dropdown with ISO weeks of current and previous year.
+        Default selection = current ISO week."""
+        from datetime import date as _date
+        today = _date.today()
+        cur_year, cur_week, _ = today.isocalendar()
+
+        # Prior year: all 52/53 weeks. Current year: up to current week.
+        items: list[tuple] = []
+        for y in (cur_year - 1, cur_year):
+            # Max week of a year = isocalendar of Dec 28 (always in last ISO week)
+            max_w = _date(y, 12, 28).isocalendar()[1]
+            last_w = cur_week if y == cur_year else max_w
+            for w in range(1, last_w + 1):
+                mon, sun = self._iso_week_range(y, w)
+                label = f"Week {w} {y} ({mon.isoformat()} → {sun.isoformat()})"
+                items.append((label, y, w))
+
+        self.cmb_week.blockSignals(True)
+        self.cmb_week.clear()
+        default_idx = 0
+        for i, (label, y, w) in enumerate(items):
+            self.cmb_week.addItem(label, (y, w))
+            if y == cur_year and w == cur_week:
+                default_idx = i
+        self.cmb_week.setCurrentIndex(default_idx)
+        self.cmb_week.blockSignals(False)
+
+    def _on_pick_week(self, _idx: int):
+        """Refresh just the Period Summary so the Selected Week row updates."""
+        try:
+            self._update_period_summary()
+        except Exception as exc:
+            print(f"[Dashboard] week pick refresh failed: {exc}")
+
+    @staticmethod
+    def _period_ranges() -> list[tuple]:
+        """Return [(label, d_from, d_to)] for the standard period buckets.
+        Anchored on today's local date."""
+        from datetime import date as _date
+        today = _date.today()
+
+        # Week: Monday → today (ISO weekday Mon=0 in date.weekday())
+        week_from = today.fromordinal(today.toordinal() - today.weekday())
+
+        # Month: 1st → today
+        month_from = today.replace(day=1)
+
+        # Quarter: first day of current 3-month quarter → today
+        q_start_month = ((today.month - 1) // 3) * 3 + 1
+        q_from = today.replace(month=q_start_month, day=1)
+
+        # Year-to-date
+        ytd_from = today.replace(month=1, day=1)
+
+        iso = lambda d: d.isoformat()
+        return [
+            ("Today",        iso(today),      iso(today)),
+            ("This Week",    iso(week_from),  iso(today)),
+            ("This Month",   iso(month_from), iso(today)),
+            ("This Quarter", iso(q_from),     iso(today)),
+            ("YTD",          iso(ytd_from),   iso(today)),
+        ]
+
+    def _update_period_summary(self):
+        ranges = list(self._period_ranges())
+
+        # Append the dropdown-selected ISO week as the last row.
+        picked = self.cmb_week.currentData() if hasattr(self, "cmb_week") else None
+        if picked:
+            y, w = picked
+            mon, sun = self._iso_week_range(y, w)
+            ranges.append((f"Week {w} {y}", mon.isoformat(), sun.isoformat()))
+
+        self.tbl_period.setRowCount(len(ranges))
+        for row, (label, d_from, d_to) in enumerate(ranges):
+            m = self._query_period_metrics(d_from, d_to)
+            active = m["active_days"]
+            avg_no_dt = m["ue_no_dt"]   / active if active else 0.0
+            avg_w_dt  = m["ue_with_dt"] / active if active else 0.0
+            range_str = d_from if d_from == d_to else f"{d_from} → {d_to}"
+            _fill_row(self.tbl_period, row, [
+                label,
+                range_str,
+                f"{m['ue_no_dt']:.2f}",
+                f"{m['ue_with_dt']:.2f}",
+                f"{avg_no_dt:.2f}",
+                f"{avg_w_dt:.2f}",
+                f"{m['avg_eff']:.1f}%",
+                f"{m['total_cases']} ({m['reg_cases']}R/{m['ot_cases']}OT)",
+            ])
 
     def _query_top_doctor(self, d_from: str, d_to: str):
         """Return (doctor_name, count) for the doctor with most REG cases, or None."""
@@ -1833,6 +2054,20 @@ class DashboardTab(QWidget):
     # ------------------------------------------------------------------
     # Theme hook — swap chart palette, restyle cards, force repaint
     # ------------------------------------------------------------------
+
+    def update_font_sizes(self, _new_size: int = 0):
+        """Refresh widgets that build QFont objects with hard-coded point sizes
+        and force charts to repaint with the new global scale."""
+        for card in self.findChildren(_Card):
+            try:
+                card.update_font_sizes()
+            except Exception:
+                pass
+        for child in self.findChildren(QWidget):
+            try:
+                child.update()
+            except Exception:
+                pass
 
     def update_theme_labels(self, is_light: bool):
         if is_light:

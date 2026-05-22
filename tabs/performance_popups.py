@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
+from . import font_scale
 
 
 def _summary_text(metrics: dict, fecha: str) -> str:
@@ -55,12 +56,12 @@ class SuccessPopup(QDialog):
 
         # Congratulations header
         header = QLabel("🎉  Congratulations!")
-        header.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        header.setFont(QFont("Segoe UI", font_scale.scale_pt(18), QFont.Weight.Bold))
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
         msg = QLabel("You've reached your daily production target.\nGreat job — keep it up!")
-        msg.setFont(QFont("Segoe UI", 11))
+        msg.setFont(QFont("Segoe UI", font_scale.scale_pt(11)))
         msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
         msg.setWordWrap(True)
         layout.addWidget(msg)
@@ -132,7 +133,7 @@ class JustificationPopup(QDialog):
 
         # Encouragement header
         header = QLabel("💪  Great effort today!")
-        header.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        header.setFont(QFont("Segoe UI", font_scale.scale_pt(16), QFont.Weight.Bold))
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
 
@@ -140,7 +141,7 @@ class JustificationPopup(QDialog):
             "You didn't quite reach today's target — but that's okay!\n"
             "Stay consistent and you'll get there. Don't lose the rhythm."
         )
-        msg.setFont(QFont("Segoe UI", 11))
+        msg.setFont(QFont("Segoe UI", font_scale.scale_pt(11)))
         msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
         msg.setWordWrap(True)
         layout.addWidget(msg)
@@ -168,7 +169,7 @@ class JustificationPopup(QDialog):
 
         # Justification input
         input_label = QLabel("Please explain why the target was not met today:")
-        input_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        input_label.setFont(QFont("Segoe UI", font_scale.scale_pt(10), QFont.Weight.Bold))
         layout.addWidget(input_label)
 
         self._text_edit = QTextEdit()

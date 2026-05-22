@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
+from . import font_scale
 from .utils import (
     get_resource_path,
     get_writable_path,
@@ -638,6 +639,14 @@ class StandardsTab(QWidget):
         self.setLayout(main_layout)
         self.populate_tree()
 
+    def update_font_sizes(self, _new_size: int = 0):
+        """Re-render the tree so QFont() calls in populate_tree pick up the
+        new global scale."""
+        try:
+            self.populate_tree()
+        except Exception:
+            pass
+
     def update_theme_labels(self, is_light: bool):
         """Update tree widget colors when theme changes."""
         from PySide6.QtGui import QBrush, QColor
@@ -729,7 +738,7 @@ class StandardsTab(QWidget):
 
         for region, data in sorted(self.standards.items()):
             region_item = QTreeWidgetItem([region, "", ""])
-            region_item.setFont(0, QFont("Segoe UI", 11, QFont.Weight.Bold))
+            region_item.setFont(0, QFont("Segoe UI", font_scale.scale_pt(11), QFont.Weight.Bold))
             region_item.setExpanded(True)
 
             if "Aligners" in data:

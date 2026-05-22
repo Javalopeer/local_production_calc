@@ -879,6 +879,14 @@ class HistoryTab(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", f"Error: {str(e)}")
 
+    def update_font_sizes(self, _new_size: int = 0):
+        """Re-render the table so QFont calls inside load_all_cases pick up
+        the new global scale."""
+        try:
+            self.load_all_cases()
+        except Exception:
+            pass
+
     def update_theme_labels(self, is_light: bool):
         """Apply theme colors; in light mode use user-selected palette."""
         colors = get_light_theme_colors()

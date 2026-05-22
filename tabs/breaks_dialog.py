@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTime
 from PySide6.QtGui import QFont
+from . import font_scale
 from db.database import get_connection
 
 _DEFAULT = "default"
@@ -238,7 +239,7 @@ class BreaksDialog(QDialog):
 
         # Title
         title = QLabel("Configure Your Break Times")
-        title.setFont(QFont("", 11, QFont.Weight.Bold))
+        title.setFont(QFont("", font_scale.scale_pt(11), QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 

@@ -59,6 +59,7 @@ a = Analysis(
         'tabs.theme_table_utils',
         'tabs.utils',
         'tabs.widgets',
+        'tabs.font_scale',
         'db.database',
         'self_installer',
     ],

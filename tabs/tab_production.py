@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QBrush
+from . import font_scale
 from db.database import get_connection
 from datetime import datetime, timedelta
 from collections import Counter
@@ -590,7 +591,7 @@ class ProductionTab(QWidget):
             breakdown_item.setBackground(sub_bg)
             breakdown_item.setForeground(sub_fg)
             sub_font = QFont()
-            sub_font.setPointSize(8)
+            sub_font.setPointSize(font_scale.scale_pt(8))
             breakdown_item.setFont(sub_font)
             breakdown_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row_idx, 0, breakdown_item)
@@ -791,6 +792,14 @@ class ProductionTab(QWidget):
         """Called when any filter changes - reset to first page and filter"""
         self.current_page = 1
         self.filter_data()
+
+    def update_font_sizes(self, _new_size: int = 0):
+        """Re-render the table so QFont calls inside filter_data pick up the
+        new global scale."""
+        try:
+            self.filter_data()
+        except Exception:
+            pass
 
     def update_theme_labels(self, is_light: bool):
         """Adjust widgets when theme changes.

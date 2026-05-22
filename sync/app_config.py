@@ -91,6 +91,7 @@ _DEFAULTS = {
     "excel_sheet_password": "",
     "light_theme_colors": {},
     "auto_discover_dbs": True,
+    "font_size": 12,
 }
 
 

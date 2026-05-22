@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 from datetime import datetime, date
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QScrollArea, QCheckBox,
@@ -65,6 +66,7 @@ APP_VERSION = "1.1.4"
 DB_SCHEMA_VERSION = 2
 # =====================================
 
+from tabs import font_scale
 from tabs.tab_register import RegisterTab
 from tabs.tab_production import ProductionTab
 from tabs.tab_history import HistoryTab
@@ -317,12 +319,20 @@ class CenteredTabWidget(QTabWidget):
 
 class MainWindow(QMainWindow):
     themeChanged = Signal(bool)
+    fontSizeChanged = Signal(int)
     def __init__(self, dark_style="", light_style=""):
         super().__init__()
         self._dark_style = dark_style
         self._light_style = light_style
         self._light_style_base = light_style
-        self._font_size = 12
+        try:
+            _cfg = load_config()
+            _stored = int(_cfg.get("font_size", 12))
+        except Exception:
+            _stored = 12
+        self._font_size = max(9, min(20, _stored))
+        font_scale.set_current_px(self._font_size)
+        self._sb_widgets = {}  # status bar refs for font-aware re-styling
         self._is_light = False
         self.setWindowTitle(f"Production Performance Calculator v{APP_VERSION}")
         _ico = _resource_path(os.path.join("data", "app_icon.ico"))
@@ -359,6 +369,13 @@ class MainWindow(QMainWindow):
         _safe_connect(self.themeChanged, self.production_tab, "update_theme_labels",        "production.update_theme_labels")
         _safe_connect(self.themeChanged, self.standards_tab,  "update_theme_labels",        "standards.update_theme_labels")
         _safe_connect(self.themeChanged, self.dashboard_tab,  "update_theme_labels",        "dashboard.update_theme_labels")
+
+        # Font size — tabs refresh widgets that hold hard-coded point sizes
+        _safe_connect(self.fontSizeChanged, self.dashboard_tab,  "update_font_sizes", "dashboard.update_font_sizes")
+        _safe_connect(self.fontSizeChanged, self.production_tab, "update_font_sizes", "production.update_font_sizes")
+        _safe_connect(self.fontSizeChanged, self.history_tab,    "update_font_sizes", "history.update_font_sizes")
+        _safe_connect(self.fontSizeChanged, self.register_tab,   "update_font_sizes", "register.update_font_sizes")
+        _safe_connect(self.fontSizeChanged, self.standards_tab,  "update_font_sizes", "standards.update_font_sizes")
 
         
         # Connect register tab to production tab for dynamic updates
@@ -417,6 +434,16 @@ class MainWindow(QMainWindow):
         import_shortcut = QShortcut(QKeySequence("Ctrl+Shift+I"), self)
         import_shortcut.activated.connect(self._trigger_import_shortcut)
 
+        # Font-size shortcuts: Ctrl+= / Ctrl++ (zoom in), Ctrl+- (zoom out),
+        # Ctrl+0 (reset). Both `=` and `+` bound because `+` typically needs Shift.
+        for seq in ("Ctrl+=", "Ctrl++", "Ctrl+Shift+="):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.activated.connect(lambda: self._change_font_size(1))
+        sc_minus = QShortcut(QKeySequence("Ctrl+-"), self)
+        sc_minus.activated.connect(lambda: self._change_font_size(-1))
+        sc_zero = QShortcut(QKeySequence("Ctrl+0"), self)
+        sc_zero.activated.connect(self._reset_font_size)
+
         # Get screen height for maximum window height
         screen = QGuiApplication.primaryScreen()
         screen_height = screen.availableGeometry().height()
@@ -432,9 +459,8 @@ class MainWindow(QMainWindow):
             btn_load_db = QPushButton()
             btn_load_db.setIcon(qta.icon('fa5s.database', color='#A371F7'))
             btn_load_db.setToolTip("Import cases from an old cases.db file")
-            btn_load_db.setFixedSize(28, 20)
-            btn_load_db.setStyleSheet("padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; background: transparent;")
             btn_load_db.clicked.connect(self.register_tab._on_load_db)
+            self._sb_widgets["load_db"] = btn_load_db
             self.statusBar().addPermanentWidget(btn_load_db)
         except Exception as exc:
             log_event("main", f"statusbar load_db button setup failed: {exc}", level="WARN")
@@ -444,9 +470,8 @@ class MainWindow(QMainWindow):
             btn_breaks = QPushButton()
             btn_breaks.setIcon(qta.icon('fa5s.utensils', color='#FFA726'))
             btn_breaks.setToolTip("Configure break times")
-            btn_breaks.setFixedSize(28, 20)
-            btn_breaks.setStyleSheet("padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; background: transparent; color: #FFA726;")
             btn_breaks.clicked.connect(self._open_breaks_dialog)
+            self._sb_widgets["breaks"] = btn_breaks
             self.statusBar().addPermanentWidget(btn_breaks)
         except Exception as exc:
             log_event("main", f"statusbar breaks button setup failed: {exc}", level="WARN")
@@ -456,9 +481,8 @@ class MainWindow(QMainWindow):
             btn_palette = QPushButton()
             btn_palette.setIcon(qta.icon('fa5s.palette', color='#58A6FF'))
             btn_palette.setToolTip("Customize Light Mode Colors")
-            btn_palette.setFixedSize(28, 20)
-            btn_palette.setStyleSheet("padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; background: transparent;")
             btn_palette.clicked.connect(self._open_theme_config_dialog)
+            self._sb_widgets["palette"] = btn_palette
             self.statusBar().addPermanentWidget(btn_palette)
         except Exception as exc:
             log_event("main", f"statusbar palette button setup failed: {exc}", level="WARN")
@@ -468,9 +492,8 @@ class MainWindow(QMainWindow):
             btn_ue_target = QPushButton()
             btn_ue_target.setIcon(qta.icon('fa5s.bullseye', color='#A371F7'))
             btn_ue_target.setToolTip("Configure daily UE target by date")
-            btn_ue_target.setFixedSize(28, 20)
-            btn_ue_target.setStyleSheet("padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; background: transparent;")
             btn_ue_target.clicked.connect(self._open_ue_target_dialog)
+            self._sb_widgets["ue_target"] = btn_ue_target
             self.statusBar().addPermanentWidget(btn_ue_target)
         except Exception as exc:
             log_event("main", f"statusbar ue target button setup failed: {exc}", level="WARN")
@@ -498,32 +521,33 @@ class MainWindow(QMainWindow):
             # Font size buttons
             from PySide6.QtWidgets import QPushButton as _QPB
             btn_fup = _QPB("A+")
-            btn_fup.setFixedSize(30, 20)
-            btn_fup.setToolTip("Increase font size")
-            btn_fup.setStyleSheet("font-size: 10px; padding: 1px 4px; font-weight: 600; border: 1px solid #30363D; border-radius: 4px; background: transparent; color: #8B949E;")
+            btn_fup.setToolTip("Increase font size (Ctrl+=)")
             btn_fdn = _QPB("A-")
-            btn_fdn.setFixedSize(30, 20)
-            btn_fdn.setToolTip("Decrease font size")
-            btn_fdn.setStyleSheet("font-size: 10px; padding: 1px 4px; font-weight: 600; border: 1px solid #30363D; border-radius: 4px; background: transparent; color: #8B949E;")
+            btn_fdn.setToolTip("Decrease font size (Ctrl+-)")
             btn_fup.clicked.connect(lambda: self._change_font_size(1))
             btn_fdn.clicked.connect(lambda: self._change_font_size(-1))
+            self._sb_widgets["fup"] = btn_fup
+            self._sb_widgets["fdn"] = btn_fdn
             self.statusBar().addPermanentWidget(btn_fdn)
             self.statusBar().addPermanentWidget(btn_fup)
 
             # Sync button
             btn_sync = _QPB("⬆ Sync")
-            btn_sync.setFixedSize(54, 20)
             btn_sync.setToolTip("Export to SharePoint")
-            btn_sync.setStyleSheet("font-size: 10px; padding: 1px 4px; font-weight: 600; border: 1px solid #388BFD; border-radius: 4px; background: transparent; color: #388BFD;")
             btn_sync.clicked.connect(self._open_sync_dialog)
+            self._sb_widgets["sync"] = btn_sync
             self.statusBar().addPermanentWidget(btn_sync)
 
             # Sync status indicator (last sync time)
             self._sync_status_label = QLabel("")
-            self._sync_status_label.setStyleSheet("font-size: 10px; color: #8B949E; padding-right: 4px;")
+            self._sb_widgets["sync_status"] = self._sync_status_label
             self.statusBar().addWidget(self._sync_status_label)
         except Exception as exc:
             log_event("main", f"statusbar theme/sync controls setup failed: {exc}", level="WARN")
+
+        # Apply initial style — scales QSS to persisted font_size and sizes
+        # status-bar widgets correctly on first show.
+        self._apply_style()
 
     def _open_breaks_dialog(self):
         """Open the breaks configuration dialog."""
@@ -639,7 +663,7 @@ class MainWindow(QMainWindow):
         self._silent_sync()
         if self._sync_status_label:
             self._sync_status_label.setText("↻ EOD sync…")
-            self._sync_status_label.setStyleSheet("font-size: 10px; color: #aaa; padding-right: 4px;")
+            self._sync_status_label.setStyleSheet(self._sync_label_style("#aaa"))
 
     # ── Daily performance / justification logic ───────────────────────────────
 
@@ -826,7 +850,7 @@ class MainWindow(QMainWindow):
         self._sync_thread.start()
         if self._sync_status_label:
             self._sync_status_label.setText("↻ syncing…")
-            self._sync_status_label.setStyleSheet("font-size: 10px; color: #aaa; padding-right: 4px;")
+            self._sync_status_label.setStyleSheet(self._sync_label_style("#aaa"))
 
     def _on_silent_sync_done(self, ok: bool, msg: str):
         if not self._sync_status_label:
@@ -835,14 +859,14 @@ class MainWindow(QMainWindow):
         ts = datetime.now().strftime("%H:%M")
         if ok:
             self._sync_status_label.setText(f"⬆ {ts}")
-            self._sync_status_label.setStyleSheet("font-size: 10px; color: #66bb6a; padding-right: 4px;")
+            self._sync_status_label.setStyleSheet(self._sync_label_style("#66bb6a"))
             self._sync_status_label.setToolTip(f"Last sync: {ts}\n{msg}")
             self._sync_status_label.setCursor(Qt.CursorShape.ArrowCursor)
         else:
             self._sync_status_label.setText(f"\u26a0 sync error")
             self._sync_status_label.setStyleSheet(
-                "font-size: 10px; color: #ef9a9a; padding-right: 4px;"
-                "text-decoration: underline; cursor: pointer;")
+                self._sync_label_style("#ef9a9a", "text-decoration: underline; cursor: pointer;")
+            )
             self._sync_status_label.setToolTip(f"Click to see error detail\n\n{msg}")
             self._sync_status_label.setCursor(Qt.CursorShape.PointingHandCursor)
             # Store msg so mousePressEvent can show it
@@ -895,10 +919,69 @@ class MainWindow(QMainWindow):
         self.history_tab.load_all_cases()
 
     def _apply_style(self):
-        """Re-apply the current stylesheet with the active font size."""
+        """Re-apply the current stylesheet, scaling every `font-size: Npx`
+        proportionally to the active font size (base = 12px)."""
         base = self._light_style if self._is_light else self._dark_style
-        styled = base.replace("font-size: 12px", f"font-size: {self._font_size}px")
+        ratio = self._font_size / 12.0
+
+        def _scale(match):
+            v = int(match.group(1))
+            return f"font-size: {max(6, round(v * ratio))}px"
+
+        styled = re.sub(r"font-size:\s*(\d+)px", _scale, base)
         QApplication.instance().setStyleSheet(styled)
+        self._apply_status_bar_styles()
+
+    def _apply_status_bar_styles(self):
+        """Refresh inline stylesheets and sizes of status-bar widgets.
+        These widgets carry their own stylesheets that bypass the app QSS,
+        so we rebuild them whenever the global font size changes."""
+        ratio = self._font_size / 12.0
+        sb = max(8, round(10 * ratio))  # small label/button text
+        h = max(18, round(20 * ratio))   # button height
+        w_icon = max(24, round(28 * ratio))
+        w_af = max(26, round(30 * ratio))
+        w_sync = max(46, round(54 * ratio))
+
+        for key in ("load_db", "breaks", "palette", "ue_target"):
+            btn = self._sb_widgets.get(key)
+            if btn is None:
+                continue
+            extra = "color: #FFA726;" if key == "breaks" else ""
+            btn.setFixedSize(w_icon, h)
+            btn.setStyleSheet(
+                f"padding: 1px 3px; border-radius: 4px; border: 1px solid #30363D; "
+                f"background: transparent; {extra}"
+            )
+
+        for key in ("fup", "fdn"):
+            btn = self._sb_widgets.get(key)
+            if btn is None:
+                continue
+            btn.setFixedSize(w_af, h)
+            btn.setStyleSheet(
+                f"font-size: {sb}px; padding: 1px 4px; font-weight: 600; "
+                f"border: 1px solid #30363D; border-radius: 4px; "
+                f"background: transparent; color: #8B949E;"
+            )
+
+        btn_sync = self._sb_widgets.get("sync")
+        if btn_sync is not None:
+            btn_sync.setFixedSize(w_sync, h)
+            btn_sync.setStyleSheet(
+                f"font-size: {sb}px; padding: 1px 4px; font-weight: 600; "
+                f"border: 1px solid #388BFD; border-radius: 4px; "
+                f"background: transparent; color: #388BFD;"
+            )
+
+        lbl = self._sb_widgets.get("sync_status")
+        if lbl is not None:
+            existing = lbl.styleSheet() or ""
+            color = "#8B949E"
+            m = re.search(r"color:\s*([^;]+);", existing)
+            if m:
+                color = m.group(1).strip()
+            lbl.setStyleSheet(f"font-size: {sb}px; color: {color}; padding-right: 4px;")
 
     def _apply_light_palette(self, colors: dict):
         mapping = {
@@ -936,9 +1019,43 @@ class MainWindow(QMainWindow):
                 log_event("main", f"themeChanged emit after palette update failed: {exc}", level="WARN")
 
     def _change_font_size(self, delta: int):
-        """Increment or decrement font size within [9, 18] range and re-apply style."""
-        self._font_size = max(9, min(18, self._font_size + delta))
+        """Increment or decrement font size within [9, 20] range and re-apply style.
+        Persists to config and notifies tabs so widgets with hard-coded QFont
+        point sizes can refresh."""
+        new_size = max(9, min(20, self._font_size + delta))
+        if new_size == self._font_size:
+            return
+        self._font_size = new_size
+        font_scale.set_current_px(new_size)
         self._apply_style()
+        self._persist_font_size()
+        try:
+            self.fontSizeChanged.emit(new_size)
+        except Exception as exc:
+            log_event("main", f"fontSizeChanged emit failed: {exc}", level="WARN")
+
+    def _reset_font_size(self):
+        """Reset font size to default (12px)."""
+        self._change_font_size(12 - self._font_size)
+
+    def _persist_font_size(self):
+        try:
+            from sync.app_config import load_config, save_config
+            cfg = load_config()
+            cfg["font_size"] = int(self._font_size)
+            save_config(cfg)
+        except Exception as exc:
+            log_event("main", f"font_size persist failed: {exc}", level="WARN")
+
+    def _sb_label_px(self) -> int:
+        """Pixel font size for status-bar small labels, scaled to active size."""
+        return max(8, round(10 * (self._font_size / 12.0)))
+
+    def _sync_label_style(self, color: str, extra: str = "") -> str:
+        return (
+            f"font-size: {self._sb_label_px()}px; color: {color}; "
+            f"padding-right: 4px; {extra}"
+        )
 
     # ── Clipboard import shortcut ─────────────────────────────────────────────
 
