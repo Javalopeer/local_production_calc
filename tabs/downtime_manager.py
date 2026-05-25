@@ -515,9 +515,6 @@ class DowntimeManager(QWidget):
         self._light_mode_active = bool(is_light)
         self.load_downtimes()
 
-    # Regular shift window — used to reject downtimes outside working hours.
-    _SHIFT_START_MIN = 6 * 60    # 06:00
-    _SHIFT_END_MIN = 15 * 60     # 15:00
     _MIN_DURATION_MIN = 1
 
     def _validate_downtime(self, start_mins: int, end_mins: int,
@@ -525,12 +522,6 @@ class DowntimeManager(QWidget):
         """Return an error message if the downtime is invalid, else None."""
         if not reason or not reason.strip():
             return "Reason is required."
-
-        if start_mins < self._SHIFT_START_MIN or end_mins > self._SHIFT_END_MIN:
-            return ("Downtime must be inside the regular shift "
-                    f"(06:00 – 15:00). Got "
-                    f"{start_mins // 60:02d}:{start_mins % 60:02d} – "
-                    f"{end_mins // 60:02d}:{end_mins % 60:02d}.")
 
         duration = end_mins - start_mins
         if duration < self._MIN_DURATION_MIN:

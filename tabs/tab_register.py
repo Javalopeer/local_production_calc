@@ -1501,18 +1501,9 @@ class RegisterTab(QWidget):
         if not show_import_confirmation(self, data):
             return
 
-        # Extra confirmation popup. Fires when EITHER:
-        #   * we're in OT mode (regardless of clock time), OR
-        #   * the current time is outside regular hours 05:40 - 15:14
-        #     (regardless of mode — likely OT slipped into Regular by mistake).
-        # Tailored message based on mode + time so the user knows why they're
-        # being warned.
-        now = QTime.currentTime()
-        in_regular_hours = (
-            self._REGULAR_START <= now <= self._REGULAR_END
-        )
-        if self._mode == "overtime" or not in_regular_hours:
-            if not self._confirm_ot_import_time(now, in_regular_hours):
+        # Extra confirmation popup when user is in OT mode (intentional choice).
+        if self._mode == "overtime":
+            if not self._confirm_ot_import_time(QTime.currentTime(), True):
                 return
 
         imported_case_id, imported_region, imported_type = apply_imported_case_data(
@@ -1538,47 +1529,16 @@ class RegisterTab(QWidget):
             duration_ms=4200,
         )
 
-    # Regular working schedule used to flag suspicious imports.
-    _REGULAR_START = QTime(5, 40)
-    _REGULAR_END   = QTime(15, 14)
-
     def _confirm_ot_import_time(self, now: QTime, in_regular_hours: bool) -> bool:
-        """Confirmation popup for risky imports.
+        """Confirmation popup when importing in OT mode.
 
-        Returns True if the user confirmed, False to abort. Picks one of
-        three messages so the user understands which rule fired:
-          1. OT mode + within regular hours  → loudest warning
-          2. OT mode + outside regular hours → normal OT confirm
-          3. Regular mode + outside regular hours → "should this be OT?"
+        Returns True if the user confirmed, False to abort.
         """
-        is_ot = self._mode == "overtime"
-        now_str = now.toString("HH:mm")
-
-        if is_ot and in_regular_hours:
-            title = "Importar como OT en horario regular"
-            text = (
-                f"Hora actual: {now_str}\n\n"
-                "Este caso se importará como OT pero la hora actual está\n"
-                "dentro del horario regular (05:40 a 15:14).\n\n"
-                "¿Seguro desea proseguir?"
-            )
-        elif is_ot:
-            title = "Confirmar importación OT"
-            text = (
-                f"Hora actual: {now_str}\n\n"
-                "El caso se importará como OT (fuera de horario regular).\n\n"
-                "¿Seguro desea proseguir?"
-            )
-        else:
-            # Regular mode but outside the regular schedule — likely OT
-            title = "Importar como Regular fuera de horario"
-            text = (
-                f"Hora actual: {now_str}\n\n"
-                "Este caso se importará como Regular pero la hora actual\n"
-                "está fuera del horario regular (05:40 a 15:14).\n\n"
-                "¿Seguro desea proseguir?"
-            )
-
+        title = "Confirmar importación OT"
+        text = (
+            "El caso se importará como OT.\n\n"
+            "¿Seguro desea proseguir?"
+        )
         reply = QMessageBox.question(
             self, title, text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
