@@ -591,6 +591,25 @@ def _run_schema_migrations(conn) -> int:
         _set_db_version_from_cursor(cursor, 4)
         version = 4
 
+    # Defensive backstop: re-assert critical columns every startup. Catches
+    # DBs that inherited a version marker without ever running the migration
+    # that added the column (legacy merges, fresh DBs cloned from old shells,
+    # etc.). _ensure_column is idempotent.
+    _ensure_column(cursor, "downtimes", "status", "status TEXT DEFAULT 'pending'")
+    _ensure_column(cursor, "downtimes", "detalle", "detalle TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "responded_by", "responded_by TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "responded_at", "responded_at TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "downtime_case_id", "downtime_case_id TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "client_uid", "client_uid TEXT DEFAULT ''")
+    _ensure_column(cursor, "downtimes", "synced_to_excel", "synced_to_excel INTEGER DEFAULT 0")
+    _ensure_column(cursor, "downtimes", "synced_to_teams", "synced_to_teams INTEGER DEFAULT 0")
+    _ensure_column(cursor, "downtimes", "sync_attempts", "sync_attempts INTEGER DEFAULT 0")
+    _ensure_column(cursor, "downtimes", "last_sync_error", "last_sync_error TEXT DEFAULT ''")
+    _ensure_column(cursor, "cases", "count_production", "count_production INTEGER DEFAULT 1")
+    _ensure_column(cursor, "cases", "comments", "comments TEXT DEFAULT ''")
+    _ensure_column(cursor, "ot_cases", "count_production", "count_production INTEGER DEFAULT 1")
+    _ensure_column(cursor, "ot_cases", "comments", "comments TEXT DEFAULT ''")
+
     return version
 
 
