@@ -479,6 +479,10 @@ def _migration_v1(cursor) -> None:
 
     _ensure_column(cursor, "cases", "count_production", "count_production INTEGER DEFAULT 1")
     _ensure_column(cursor, "cases", "comments", "comments TEXT DEFAULT ''")
+    # New optional metadata captured from clipboard import — existing rows
+    # stay as NULL/'' and continue to work; only new saves populate them.
+    _ensure_column(cursor, "cases", "cr_count", "cr_count INTEGER")
+    _ensure_column(cursor, "cases", "product_tier", "product_tier TEXT DEFAULT ''")
 
     _ensure_column(cursor, "downtimes", "status", "status TEXT DEFAULT 'pending'")
     _ensure_column(cursor, "downtimes", "detalle", "detalle TEXT DEFAULT ''")
@@ -487,6 +491,8 @@ def _migration_v1(cursor) -> None:
 
     _ensure_column(cursor, "ot_cases", "count_production", "count_production INTEGER DEFAULT 1")
     _ensure_column(cursor, "ot_cases", "comments", "comments TEXT DEFAULT ''")
+    _ensure_column(cursor, "ot_cases", "cr_count", "cr_count INTEGER")
+    _ensure_column(cursor, "ot_cases", "product_tier", "product_tier TEXT DEFAULT ''")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_fecha ON cases(fecha)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_region_tipo ON cases(region, tipo_caso)")
@@ -607,8 +613,59 @@ def _run_schema_migrations(conn) -> int:
     _ensure_column(cursor, "downtimes", "last_sync_error", "last_sync_error TEXT DEFAULT ''")
     _ensure_column(cursor, "cases", "count_production", "count_production INTEGER DEFAULT 1")
     _ensure_column(cursor, "cases", "comments", "comments TEXT DEFAULT ''")
+    _ensure_column(cursor, "cases", "cr_count", "cr_count INTEGER")
+    _ensure_column(cursor, "cases", "product_tier", "product_tier TEXT DEFAULT ''")
     _ensure_column(cursor, "ot_cases", "count_production", "count_production INTEGER DEFAULT 1")
     _ensure_column(cursor, "ot_cases", "comments", "comments TEXT DEFAULT ''")
+    _ensure_column(cursor, "ot_cases", "cr_count", "cr_count INTEGER")
+    _ensure_column(cursor, "ot_cases", "product_tier", "product_tier TEXT DEFAULT ''")
+
+    # Standards snapshots — versioned per effective_date. Each row is a
+    # SINGLE region/type entry. Looking up the standard for a case dated
+    # F means: SELECT std_time, ue_value FROM standards_history WHERE
+    # region=? AND tipo=? AND effective_date <= F ORDER BY effective_date
+    # DESC LIMIT 1.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS standards_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            effective_date TEXT NOT NULL,
+            region TEXT NOT NULL,
+            tipo_caso TEXT NOT NULL,
+            std_time REAL,
+            ue_value REAL,
+            created_at TEXT DEFAULT ''
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_std_hist_lookup"
+        " ON standards_history(region, tipo_caso, effective_date)"
+    )
+
+    # Review queue — cases flagged for doctor review / software issues /
+    # follow-up. Lives outside `cases` so it can include arbitrary case ids
+    # (even those not yet saved) and survive case edits.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cases_review (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            doctor TEXT DEFAULT '',
+            region TEXT DEFAULT '',
+            tipo_caso TEXT DEFAULT '',
+            fecha TEXT DEFAULT '',
+            comment TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT '',
+            resolved_at TEXT DEFAULT ''
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cases_review_status ON cases_review(status)")
+    # Category classification (Software Issue / Doctor Inquiry / Other).
+    _ensure_column(cursor, "cases_review", "category", "category TEXT DEFAULT ''")
 
     return version
 
@@ -617,30 +674,84 @@ _WAL_INIT_DONE = False
 
 
 def _ensure_wal_mode(conn: sqlite3.Connection) -> None:
-    """Enable WAL mode + busy timeout once per process. Cheap to re-run."""
+    """Initialise the connection journal mode + busy timeout once per process.
+
+    Historically used WAL for write throughput, but the DB lives on a
+    OneDrive-synced folder where the persistent ``-wal`` / ``-shm``
+    auxiliary files caused continuous OneDrive sync traffic and the
+    occasional lock conflict when a second machine opened the same file.
+    For a single-user single-connection app DELETE mode is plenty fast
+    and produces only a transient ``-journal`` file that disappears
+    immediately after each commit.
+    """
     global _WAL_INIT_DONE
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=15000")
         _WAL_INIT_DONE = True
     except Exception as _e:
-        # OneDrive-hosted DBs can occasionally reject WAL — fall back silently
-        print(f"[db] WAL init skipped: {_e}")
+        print(f"[db] journal mode init skipped: {_e}")
 
 
-def get_connection():
-    """Open a SQLite connection with a generous timeout so OneDrive
-    file-locking does not freeze the UI thread.
+import threading
+import atexit
 
-    `timeout=30` lets SQLite retry for up to 30 s when the file is
-    momentarily locked by the SharePoint sync thread. WAL mode is enabled
-    on the first connection of the process for better concurrent reads.
+
+class _CachedConnection(sqlite3.Connection):
+    """sqlite3.Connection subclass with a no-op ``close()`` so existing
+    call sites that wrap each query in ``conn = get_connection() / ... /
+    conn.close()`` keep the cached handle alive.
+
+    Real close happens via ``real_close()`` at interpreter exit.
     """
-    conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
+    def close(self):  # type: ignore[override]
+        return  # keep cached connection alive across call sites
+
+    def real_close(self):
+        super().close()
+
+
+_CONN_TLS = threading.local()  # one cached connection per thread
+
+
+def _new_raw_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        DB_PATH, timeout=5.0, check_same_thread=False,
+        factory=_CachedConnection,
+    )
     if not _WAL_INIT_DONE:
         _ensure_wal_mode(conn)
     return conn
+
+
+def get_connection():
+    """Return a thread-local cached SQLite connection (autocommit, WAL).
+
+    Opening a sqlite connection on an OneDrive-hosted DB costs 50–150 ms;
+    reusing one collapses subsequent calls to ~0. close() is intentionally
+    a no-op on the cached connection — see _CachedConnection above.
+    """
+    conn = getattr(_CONN_TLS, "conn", None)
+    if conn is None:
+        conn = _new_raw_connection()
+        _CONN_TLS.conn = conn
+    return conn
+
+
+def _close_thread_connection():
+    conn = getattr(_CONN_TLS, "conn", None)
+    if conn is not None:
+        try:
+            conn.real_close()
+        except Exception:
+            pass
+        _CONN_TLS.conn = None
+
+
+@atexit.register
+def _cleanup_at_exit():
+    _close_thread_connection()
 
 def get_db_version():
     """Get the current database schema version"""

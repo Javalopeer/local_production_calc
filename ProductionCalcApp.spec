@@ -4,12 +4,33 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 # Include qtawesome fonts (icon rendering won't work without them)
 qtawesome_datas = collect_data_files('qtawesome')
 
+# Curated data bundle — we explicitly enumerate the files that need to ship
+# instead of including the whole data/ folder. Reason: data/cases.db is the
+# dev DB with test cases that would otherwise get merged into a user's
+# OneDrive cases.db at first launch via migrate_legacy_db. Same caution
+# applies to data/backups/ which holds historical standards snapshots.
+import os as _os
+_app_data_files = []
+_data_root = "data"
+# Always-needed runtime files.
+for _name in ("app_icon.ico", "standards.json", "units_eq.json"):
+    _src = _os.path.join(_data_root, _name)
+    if _os.path.exists(_src):
+        _app_data_files.append((_src, _data_root))
+# Icons folder (SVG assets used by TablerIcon + qfluentwidgets).
+_icons_dir = _os.path.join(_data_root, "icons")
+if _os.path.isdir(_icons_dir):
+    for _fn in _os.listdir(_icons_dir):
+        _src = _os.path.join(_icons_dir, _fn)
+        if _os.path.isfile(_src):
+            _app_data_files.append((_src, _os.path.join(_data_root, "icons")))
+
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[
-        ('data', 'data'),
+        *_app_data_files,
         *qtawesome_datas,
     ],
     hiddenimports=[
@@ -44,6 +65,7 @@ a = Analysis(
         'sync.safety_backup',
         'sync.clipboard_import',
         'sync.case_scraper',
+        'tabs._embedded_icons',
         'tabs.tab_register',
         'tabs.tab_production',
         'tabs.tab_history',

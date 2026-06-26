@@ -74,6 +74,22 @@ _POD_REGION_MAP: list[tuple[str, str]] = [
     ("dachee",           "Dachee"),
 ]
 
+# NA / Canada territory POD values that must match *exactly* — the POD
+# field value must equal one of these (after .strip().lower()) for the
+# parser to consider it a Regions NA & Canada case. This avoids false
+# positives like "ICON Warford (Midwest 2)" picking up "west".
+_POD_EXACT_NA: set[str] = {
+    "southcentral", "south central",
+    "northeast", "north east",
+    "southwest", "south west",
+    "mid atlantic", "mid-atlantic", "mid attlantic",
+    "greatlakes", "great lakes",
+    "mountain",
+    "southeast", "south east",
+    "west",
+    "canada", "canada east", "canada west", "canada central",
+}
+
 # Country / Region field values visible on the CMS page → standards.json keys
 _COUNTRY_REGION_MAP: list[tuple[str, str]] = [
     ("united states",   "Regions NA & Canada"),
@@ -127,7 +143,7 @@ def parse_clipboard(standards: dict, clipboard_text: str = "") -> dict:
     if cr_match:
         cr_count = int(cr_match.group(1))
         if cr_count >= 1:
-            tipo = "CR"
+            tipo = f"CR #{cr_count}"
         else:
             # CR = 0: label decides Primary vs Secondary
             if label == "P":
@@ -142,6 +158,51 @@ def parse_clipboard(standards: dict, clipboard_text: str = "") -> dict:
             tipo = "Primary"
         elif re.match(r'^S\d*$', label):
             tipo = "Secondary"
+
+    # Pre-compute the base label kind so the BiteSync / Stage RX product
+    # variants can be combined below.
+    flat_lower = flat.lower()
+    if "p" == label.upper():
+        _base_kind = "Primary"
+    elif re.match(r'^S\d*$', label):
+        _base_kind = "Secondary"
+    elif cr_match and int(cr_match.group(1)) >= 1:
+        _base_kind = "CR"
+    else:
+        _base_kind = "Primary"
+
+    # ── BiteSync detection ───────────────────────────────────────────────
+    # Only the literal product name counts. "New (T2)" and "T2 Received"
+    # are regular scan-rework / T2 markers, NOT BiteSync indicators.
+    _BITESYNC_MARKERS = (
+        "bite sync", "bitesync",
+        "spark bite sync", "spark bitesync",
+    )
+    is_bite_sync = any(m in flat_lower for m in _BITESYNC_MARKERS)
+
+    # ── Stage RX detection ───────────────────────────────────────────────
+    _STAGERX_MARKERS = (
+        "stage rx", "stagerx", "stage-rx",
+    )
+    is_stage_rx = any(m in flat_lower for m in _STAGERX_MARKERS)
+
+    if is_bite_sync:
+        tipo = f"Bite Sync {_base_kind}"
+    elif is_stage_rx:
+        tipo = f"Stage RX {_base_kind}"
+
+    # ── Override: detect "new scans" / rollback notes anywhere in text.
+    # Cases where the doctor requested new impressions get classified as
+    # "New Impressions" regardless of the CR/label heuristic above.
+    _NEW_IMPRESSIONS_KEYWORDS = (
+        "rollback complete",
+        "scans available email",
+        "new scans",
+        "new impressions",
+        "replicate t2",
+    )
+    if any(kw in flat_lower for kw in _NEW_IMPRESSIONS_KEYWORDS):
+        tipo = "New Impressions"
 
     # ── 3. Doctor ────────────────────────────────────────────────────────────
     # CMS layout: "Doctor   LAST-NAME, FIRST NAME"
@@ -185,13 +246,19 @@ def parse_clipboard(standards: dict, clipboard_text: str = "") -> dict:
     pod_value = pod_match.group(1).strip() if pod_match else ""
 
     if pod_value:
-        # Try POD → region mapping
-        pv_lower = pod_value.lower()
-        for keyword, mapped in _POD_REGION_MAP:
-            if keyword in pv_lower:
-                if mapped in known_regions:
-                    region = mapped
-                    break
+        pv_lower = pod_value.lower().strip()
+        # 1) Exact-match check for NA / Canada territories. The POD value
+        # must equal one of the territory names by itself (no combos).
+        if pv_lower in _POD_EXACT_NA and "Regions NA & Canada" in known_regions:
+            region = "Regions NA & Canada"
+        # 2) Substring → region mapping (word-boundary protected so short
+        # keywords like "icon" don't match inside other words).
+        if not region:
+            for keyword, mapped in _POD_REGION_MAP:
+                if re.search(rf'\b{re.escape(keyword)}\b', pv_lower):
+                    if mapped in known_regions:
+                        region = mapped
+                        break
         # Try direct match of POD value against known regions
         if not region:
             for r in sorted(known_regions, key=len, reverse=True):
@@ -217,11 +284,37 @@ def parse_clipboard(standards: dict, clipboard_text: str = "") -> dict:
                         region = mapped
                         break
 
+    # ── 5. Product Tier / Country — line-anchored ───────────────────────────
+    # The CMS lays out label/value pairs as either:
+    #   - "Label\tValue" (single line, tab-separated)
+    #   - "Label" on one line and "Value" on the next line
+    # Use the original line list (not the flattened single-line text) so the
+    # label boundary stays predictable.
+    def _extract_field(label_regex: str) -> str:
+        pat = re.compile(rf'^\s*{label_regex}\s*(?:[:\t]|\s{{2,}})\s*(.+?)\s*$',
+                          re.IGNORECASE)
+        for i, ln in enumerate(lines):
+            m = pat.match(ln)
+            if m:
+                return m.group(1).strip().rstrip(',').strip()
+            # Label on its own line — value on the next line.
+            if re.match(rf'^\s*{label_regex}\s*$', ln, re.IGNORECASE):
+                if i + 1 < len(lines):
+                    nxt = lines[i + 1].strip()
+                    if nxt:
+                        return nxt.rstrip(',').strip()
+        return ""
+
+    product_tier = _extract_field(r"Product\s+Tier")
+    country = _extract_field(r"Country")
+
     return {
-        'case_id': case_id,
-        'region':  region,
-        'tipo':    tipo,
-        'doctor':  doctor,
+        'case_id':      case_id,
+        'region':       region,
+        'tipo':         tipo,
+        'doctor':       doctor,
+        'product_tier': product_tier,
+        'country':      country,
     }
 
 

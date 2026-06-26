@@ -3,6 +3,7 @@
 All charts are drawn with QPainter — no matplotlib / Pillow required.
 """
 from __future__ import annotations
+from .theme_palette import apply_fluent_modal_palette
 
 import json
 import math
@@ -10,7 +11,7 @@ import os
 from collections import defaultdict
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QDateEdit, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QFrame, QSizePolicy, QScrollArea, QGroupBox,
     QGridLayout, QBoxLayout, QStackedWidget, QButtonGroup,
@@ -31,11 +32,11 @@ from .utils import (
 # ---------------------------------------------------------------------------
 # Palette (mutable — swapped in place by _apply_chart_palette on theme change)
 # ---------------------------------------------------------------------------
-_BG    = QColor("#1e1e1e")
-_AX    = QColor("#2b2b2b")
-_GRID  = QColor("#3c3c3c")
-_TEXT  = QColor("#e6e6e6")
-_MUTED = QColor("#888888")
+_BG    = QColor("#0D1117")
+_AX    = QColor("#0D1117")
+_GRID  = QColor("#21262D")
+_TEXT  = QColor("#C9D1D9")
+_MUTED = QColor("#8B949E")
 _BLUE  = QColor("#4aa3ff")
 _ORANGE = QColor("#f5a623")
 _GREEN  = QColor("#4CAF50")
@@ -43,8 +44,8 @@ _RED    = QColor("#e05c5c")
 
 
 _DARK_CHART_COLORS = {
-    "bg": "#1e1e1e", "ax": "#2b2b2b", "grid": "#3c3c3c",
-    "text": "#e6e6e6", "muted": "#888888",
+    "bg": "#0D1117", "ax": "#0D1117", "grid": "#21262D",
+    "text": "#C9D1D9", "muted": "#8B949E",
 }
 _LIGHT_CHART_COLORS = {
     "bg": "#FFFFFF", "ax": "#F6F8FA", "grid": "#D0D7DE",
@@ -326,12 +327,6 @@ class LineChart(_ChartBase):
         for i in range(len(xs) - 1):
             p.drawLine(xs[i], ys[i], xs[i + 1], ys[i + 1])
 
-        # Dots
-        p.setBrush(QBrush(_ORANGE))
-        p.setPen(Qt.PenStyle.NoPen)
-        for x, y in zip(xs, ys):
-            p.drawEllipse(x - 4, y - 4, 8, 8)
-
         # X labels
         f = QFont()
         f.setPointSize(font_scale.scale_pt(7))
@@ -441,6 +436,201 @@ class PieChart(_ChartBase):
 # KPI card
 # ---------------------------------------------------------------------------
 
+class _DonutChart(QWidget):
+    """Lightweight donut chart with center total + legend below.
+
+    Slices = list of (label, value, color). Renders a hollow circle with
+    proportional arc widths, the label "% of {total}" at the centre, and
+    a colour-coded legend underneath."""
+
+    def __init__(self, title: str, total_label: str = "", parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._total_label = total_label
+        self._slices: list = []
+        self.setMinimumHeight(220)
+        from PySide6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_data(self, slices: list, total_label: str = ""):
+        self._slices = list(slices or [])
+        if total_label:
+            self._total_label = total_label
+        self.update()
+
+    def apply_palette(self, is_light: bool):
+        """Trigger a repaint so palette-resolved text colours refresh."""
+        self.update()
+
+    def paintEvent(self, _e):
+        from PySide6.QtGui import QPainter, QPen
+        from PySide6.QtCore import QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Donut area sits in the top portion; legend below. Reserve
+        # extra bottom padding so the legend never touches the card edge.
+        rect = self.rect()
+        legend_lines = max(2, len(self._slices))
+        legend_reserve = 22 + legend_lines * 18 + 24  # extra bottom padding
+        donut_h = max(110, rect.height() - legend_reserve)
+        side = min(rect.width() - 60, donut_h)
+        donut_rect = QRectF(
+            rect.center().x() - side / 2,
+            12,
+            side,
+            side,
+        )
+        thickness = max(14, int(side * 0.15))
+        inner_rect = donut_rect.adjusted(thickness, thickness, -thickness, -thickness)
+
+        total = sum(max(0.0, float(s[1])) for s in self._slices) or 0.0
+        if total <= 0:
+            # Empty state placeholder
+            pen = QPen(QColor("#21262D")); pen.setWidth(thickness)
+            p.setPen(pen)
+            p.drawArc(donut_rect, 0, 360 * 16)
+        else:
+            start_angle = 90 * 16  # start at top
+            for _lbl, val, color in self._slices:
+                if val is None or val <= 0:
+                    continue
+                span = int(-(float(val) / total) * 360 * 16)
+                pen = QPen(QColor(color)); pen.setWidth(thickness)
+                pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+                p.setPen(pen)
+                p.drawArc(donut_rect, start_angle, span)
+                start_angle += span
+
+        # Center label — use palette text so it reads in both themes.
+        try:
+            from qfluentwidgets.common.style_sheet import isDarkTheme
+            from .theme_palette import palette as _dp
+            _donut_pal = _dp(not isDarkTheme())
+        except Exception:
+            _donut_pal = {"text": "#E6EDF3", "text_2": "#C9D1D9"}
+        p.setPen(QColor(_donut_pal["text"]))
+        font = p.font(); font.setBold(True); font.setPointSize(10)
+        p.setFont(font)
+        if self._total_label:
+            p.drawText(donut_rect, Qt.AlignmentFlag.AlignCenter, self._total_label)
+
+        # Legend below the donut.
+        legend_top = donut_rect.bottom() + 14
+        line_h = 18
+        for i, (lbl, val, color) in enumerate(self._slices):
+            y = legend_top + i * line_h
+            if y > rect.height() - 4:
+                break
+            # Color swatch.
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(QRectF(20, y, 10, 10), 2, 2)
+            # Text: "REG  54%  (48.00)"
+            pct = (float(val) / total * 100.0) if total > 0 else 0.0
+            p.setPen(QColor(_donut_pal["text_2"]))
+            font = p.font(); font.setBold(False); font.setPointSize(9)
+            p.setFont(font)
+            p.drawText(
+                QRectF(36, y - 2, rect.width() - 40, line_h),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                f"{lbl}",
+            )
+            p.setPen(QColor(_donut_pal["text"]))
+            p.drawText(
+                QRectF(20, y - 2, rect.width() - 24, line_h),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                f"{pct:.0f}%   ({float(val):.2f})",
+            )
+        p.end()
+
+
+class _DonutCard(QFrame):
+    """Card frame wrapping a _DonutChart with a header."""
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("donutCard")
+        self.setStyleSheet(
+            "#donutCard { background: #0D1117;"
+            "  border: 1px solid #21262D; border-radius: 12px; }"
+            "QLabel { background: transparent; color: #C9D1D9; }"
+        )
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(6)
+        hdr = QLabel(title)
+        hdr.setStyleSheet(
+            "color: #C9D1D9; font-size: 12px; font-weight: 700;"
+        )
+        self._sub = QLabel("")
+        self._sub.setStyleSheet("color: #8B949E; font-size: 10px;")
+        v.addWidget(hdr)
+        v.addWidget(self._sub)
+        self.chart = _DonutChart(title, parent=self)
+        v.addWidget(self.chart, 1)
+
+    def set_data(self, slices: list, subtitle: str = ""):
+        if subtitle:
+            self._sub.setText(subtitle)
+        total = sum(max(0.0, float(s[1])) for s in slices) if slices else 0.0
+        self.chart.set_data(slices, total_label=f"{total:.2f}")
+
+
+class _PersonalKpiTile(QFrame):
+    """Big KPI tile matching the Personal dashboard target: icon (tinted
+    square) + UPPERCASE label + huge value + subtle subtitle."""
+
+    def __init__(self, label: str, subtitle: str, icon_svg: str,
+                 accent: str = "#58A6FF", parent=None):
+        super().__init__(parent)
+        self.setObjectName("personalKpi")
+        self.setStyleSheet(
+            "#personalKpi { background: #0D1117; border: 1px solid #21262D;"
+            "  border-radius: 12px; }"
+            "QLabel { background: transparent; border: none; }"
+        )
+        self._accent = accent
+        self.setFixedHeight(62)
+
+        h = QHBoxLayout(self)
+        h.setContentsMargins(14, 8, 14, 8)
+        h.setSpacing(0)
+
+        col = QVBoxLayout(); col.setSpacing(0)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._title_lbl = QLabel(label.upper())
+        self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._title_lbl.setStyleSheet(
+            "color: #8B949E; font-size: 11px; font-weight: 700;"
+            " letter-spacing: 0.5px;"
+        )
+        col.addWidget(self._title_lbl)
+        self._val_lbl = QLabel("—")
+        self._val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._val_lbl.setStyleSheet(
+            f"color: {accent}; font-size: 17px; font-weight: 800;"
+        )
+        col.addWidget(self._val_lbl)
+        sub = QLabel(subtitle)
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub.setStyleSheet(
+            "color: #6E7681; font-size: 10px;"
+        )
+        col.addWidget(sub)
+        h.addLayout(col, 1)
+
+    def set_value(self, v: str):
+        self._val_lbl.setText(str(v))
+
+    def apply_theme(self, is_light: bool):
+        # Kept for API compatibility with _Card; the dark style is fixed.
+        pass
+
+    def update_font_sizes(self):
+        pass
+
+
 class _Card(QFrame):
     def __init__(self, title: str, value: str = "—", accent: str = "#4aa3ff", parent=None):
         super().__init__(parent)
@@ -480,7 +670,7 @@ class _Card(QFrame):
         title_color = "#57606A" if is_light else "#8B949E"
         self._title_lbl.setStyleSheet(
             f"color: {title_color}; font-size: 10px; font-weight: 700; "
-            "text-transform: uppercase; letter-spacing: 0.5px;"
+            "letter-spacing: 0.5px;"
         )
         self._val_lbl.setStyleSheet(f"color: {self._accent};")
 
@@ -494,39 +684,96 @@ _ADVICE_COLOR = {"warning": "#f5a623", "info": "#4aa3ff", "good": "#4CAF50", "ti
 
 
 class _AdviceItem(QFrame):
+    """Insights row card — dark slate with colored icon badge on left
+    and a muted chevron on the right (placeholder for future expand)."""
+
     def __init__(self, kind: str, text: str, parent=None):
         super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
         color = _ADVICE_COLOR.get(kind, "#4aa3ff")
+        self.setObjectName("adviceItem")
         self.setStyleSheet(
-            f"QFrame {{ border-left: 3px solid {color}; border-radius: 4px; }}"
+            "#adviceItem { background: #161B22;"
+            "  border: 1px solid #21262D; border-radius: 8px; }"
+            "QLabel { background: transparent; border: none; }"
         )
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(12)
 
-        icon_lbl = QLabel(_ADVICE_ICON.get(kind, "•"))
-        icon_lbl.setStyleSheet(f"color: {color}; font-size: 14px; border: none;")
-        icon_lbl.setFixedWidth(18)
+        # Colored badge — solid background tinted to kind colour.
+        badge = QLabel(_ADVICE_ICON.get(kind, "•"))
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setFixedSize(22, 22)
+        badge.setStyleSheet(
+            f"background: {color}; color: #FFFFFF;"
+            "  border-radius: 11px; font-size: 11px; font-weight: 700;"
+        )
 
-        msg_lbl = QLabel(text)
-        msg_lbl.setWordWrap(True)
-        msg_lbl.setStyleSheet("font-size: 11px; border: none;")
+        msg = QLabel(text)
+        msg.setWordWrap(True)
+        msg.setStyleSheet("color: #C9D1D9; font-size: 11px;")
 
-        lay.addWidget(icon_lbl)
-        lay.addWidget(msg_lbl)
+        lay.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(msg, 1)
 
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
-def _chart_group(title: str, widget: QWidget) -> QGroupBox:
-    box = QGroupBox(title)
-    lay = QVBoxLayout(box)
-    lay.setContentsMargins(6, 10, 6, 8)
-    lay.addWidget(widget)
-    return box
+class _ChartCard(QFrame):
+    """Fluent dark card wrapping a chart, matching _DonutCard look:
+    bold title + muted subtitle on top, chart below. setTitle() accepts
+    either 'Title' or 'Title (subtitle)' — anything inside parens or
+    after a ' — ' is shown as the smaller subtitle line."""
+
+    def __init__(self, title: str, widget: QWidget, parent=None):
+        super().__init__(parent)
+        self.setObjectName("chartCard")
+        self.setStyleSheet(
+            "#chartCard { background: #0D1117;"
+            "  border: 1px solid #21262D; border-radius: 12px; }"
+            "QLabel { background: transparent; }"
+        )
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(2)
+        self._title_lbl = QLabel()
+        self._title_lbl.setStyleSheet(
+            "color: #C9D1D9; font-size: 12px; font-weight: 700;"
+        )
+        self._sub_lbl = QLabel()
+        self._sub_lbl.setStyleSheet(
+            "color: #8B949E; font-size: 10px;"
+        )
+        v.addWidget(self._title_lbl)
+        v.addWidget(self._sub_lbl)
+        v.addSpacing(4)
+        try:
+            widget.setStyleSheet(
+                (widget.styleSheet() or "") + " background: transparent;"
+            )
+        except Exception:
+            pass
+        v.addWidget(widget, 1)
+        self.setTitle(title)
+
+    def setTitle(self, text: str):  # noqa: N802  (keep QGroupBox parity)
+        head, sub = text, ""
+        if "(" in text and text.rstrip().endswith(")"):
+            i = text.find("(")
+            head = text[:i].rstrip()
+            sub = text[i + 1:-1].strip()
+        elif " — " in text:
+            head, sub = text.split(" — ", 1)
+        self._title_lbl.setText(head)
+        self._sub_lbl.setText(sub)
+        self._sub_lbl.setVisible(bool(sub))
+
+
+def _chart_group(title: str, widget: QWidget):
+    """Backward-compatible alias returning a _ChartCard."""
+    return _ChartCard(title, widget)
 
 
 def _make_table(headers: list[str]) -> QTableWidget:
@@ -553,45 +800,194 @@ def _fill_row(table: QTableWidget, row: int, values: list[str]):
 # Designer-day modal (used from the Team view)
 # ---------------------------------------------------------------------------
 
-class _DesignerDayDialog(QDialog):
-    """Modal showing one designer's full Case Detail for a date."""
+try:
+    from qfluentwidgets import MessageBoxBase as _MBB
+except Exception:
+    _MBB = QDialog  # fallback
+
+
+class _DesignerDayDialog(_MBB):
+    """Modal showing one designer's full Case Detail for a date.
+
+    Uses MessageBoxBase so it matches the rest of the app's modals:
+    backdrop mask + rounded dark card + standard button row. Falls back
+    to a plain QDialog if qfluentwidgets isn't available."""
 
     def __init__(self, designer: str, target_date: str, detail: dict, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"{designer} — {target_date}")
-        self.resize(980, 560)
-        self.setStyleSheet("""
-            QDialog { background-color: #161B22; }
-            QLabel  { color: #E6EDF3; }
+        super().__init__(parent.window() if parent is not None else None)
+
+        is_fluent = _MBB is not QDialog
+        if is_fluent:
+            try:
+                self.setMaskColor(QColor(0, 0, 0, 170))
+            except Exception:
+                pass
+            self.widget.setObjectName("dsgnCard")
+            apply_fluent_modal_palette(self, "dsgnCard")
+            host_layout = self.viewLayout
+            host_layout.setContentsMargins(22, 18, 22, 12)
+            host_layout.setSpacing(12)
+        else:
+            self.setWindowTitle(f"{designer} — {target_date}")
+            self.resize(980, 560)
+            host_layout = QVBoxLayout(self)
+            host_layout.setContentsMargins(20, 18, 20, 14)
+            host_layout.setSpacing(12)
+
+        # Common QSS — tables, tabs, labels.
+        self.setStyleSheet(self.styleSheet() + """
+            QLabel { color: #E6EDF3; background: transparent; }
             QTableWidget {
-                background-color: #0D1117; gridline-color: #30363D;
-                color: #E6EDF3; border: 1px solid #30363D;
+                background-color: #0D1117; gridline-color: transparent;
+                color: #E6EDF3; border: 1px solid #21262D;
+                border-radius: 10px; outline: none;
             }
+            QTableWidget::item { padding: 6px 8px; border: none; }
+            QTableWidget::item:selected {
+                background-color: rgba(56,139,253,0.14); color: #E6EDF3;
+            }
+            QHeaderView { background: transparent; border: none; }
             QHeaderView::section {
-                background-color: #1F2937; color: #E6EDF3;
-                padding: 6px; border: 0;
+                background-color: #161B22; color: #8B949E;
+                padding: 8px 8px; border: none;
+                border-bottom: 1px solid #21262D;
+                font-weight: 700; font-size: 10px;
+                letter-spacing: 0.5px;
             }
-            QTabWidget::pane { border: 1px solid #30363D; }
+            QTabWidget::pane {
+                border: 1px solid #21262D; border-radius: 8px;
+                background: transparent; top: -1px;
+            }
+            QTabBar { qproperty-drawBase: 0; }
             QTabBar::tab {
-                background: #161B22; color: #8B949E; padding: 6px 14px;
-                border: 1px solid #30363D; border-bottom: none;
+                background: transparent; color: #8B949E;
+                padding: 8px 18px; border: 1px solid transparent;
+                border-bottom: none; font-weight: 700; font-size: 11px;
+                min-width: 90px;
             }
-            QTabBar::tab:selected { background: #1F6FEB; color: white; }
-            QPushButton {
-                background-color: #21262D; color: #E6EDF3;
-                border: 1px solid #30363D; border-radius: 4px;
-                padding: 5px 14px;
+            QTabBar::tab:hover { color: #E6EDF3; }
+            QTabBar::tab:selected {
+                background: #161B22; color: #58A6FF;
+                border: 1px solid #21262D; border-bottom: 1px solid #161B22;
+                border-top-left-radius: 8px; border-top-right-radius: 8px;
             }
-            QPushButton:hover { background-color: #30363D; }
         """)
 
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(10)
+        # Header: avatar + title + subtitle.
+        hdr_row = QHBoxLayout(); hdr_row.setSpacing(12)
+        # Avatar initials (First initial + Last initial).
+        full = (designer or "").strip()
+        first_i = last_i = ""
+        if "," in full:
+            last, _, first = full.partition(",")
+            first_i = first.strip()[:1].upper()
+            last_i = last.strip()[:1].upper()
+        else:
+            parts = full.split()
+            if len(parts) >= 2:
+                first_i = parts[0][:1].upper()
+                last_i = parts[-1][:1].upper()
+            elif parts:
+                first_i = parts[0][:1].upper()
+        initials = (first_i + last_i) or "?"
 
-        title = QLabel(f"{designer}  —  {target_date}")
-        title.setStyleSheet("font-size: 15px; font-weight: 700;")
-        v.addWidget(title)
+        avatar = QLabel(initials)
+        avatar.setFixedSize(46, 46)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(
+            "QLabel { background: rgba(56,139,253,0.14); color: #58A6FF;"
+            "  font-size: 14px; font-weight: 800; border-radius: 23px;"
+            "  border: 1px solid #1F6FEB; }"
+        )
+        hdr_row.addWidget(avatar, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        title_block = QVBoxLayout(); title_block.setSpacing(2)
+        title = QLabel(designer)
+        title.setStyleSheet(
+            "color: #E6EDF3; font-size: 17px; font-weight: 800;"
+            " background: transparent;"
+        )
+        title_block.addWidget(title)
+        sub_row = QHBoxLayout(); sub_row.setSpacing(6)
+        try:
+            from .tabler_icons import TablerIcon as _TI_dd
+            _ic = QLabel()
+            _ic.setFixedSize(12, 12)
+            _ic.setPixmap(
+                _TI_dd("tabler_calendar.svg").icon(color=QColor("#8B949E")).pixmap(12, 12)
+            )
+            sub_row.addWidget(_ic, 0, Qt.AlignmentFlag.AlignVCenter)
+        except Exception:
+            pass
+        sub = QLabel(target_date)
+        sub.setStyleSheet(
+            "color: #8B949E; font-size: 11px; background: transparent;"
+        )
+        sub_row.addWidget(sub)
+        sub_row.addStretch(1)
+        title_block.addLayout(sub_row)
+        hdr_row.addLayout(title_block, 1)
+        host_layout.addLayout(hdr_row)
+
+        # KPI tiles row.
+        if detail.get("found"):
+            reg_cases = detail.get("cases") or []
+            ot_cases = detail.get("ot_cases") or []
+            all_cases = reg_cases + ot_cases
+            total_cases = len(all_cases)
+            dt_total = sum((d.get("duracion") or d.get("duration") or 0)
+                           for d in (detail.get("downtimes") or []))
+            def _as_float(v):
+                try:
+                    if v is None or v == "":
+                        return 0.0
+                    return float(str(v).replace("%", "").strip())
+                except (TypeError, ValueError):
+                    return 0.0
+            values = [
+                _as_float(c.get("case_value") or c.get("value"))
+                for c in all_cases
+            ]
+            best_value = max(values) if values else 0.0
+
+            # Sum of Equivalent Units across every case (Reg + OT).
+            try:
+                from .utils import (
+                    load_units_eq_data, calculate_equivalent_units,
+                )
+                _ue = load_units_eq_data() or {}
+                total_ue = 0.0
+                for c in all_cases:
+                    region = c.get("region") or ""
+                    tipo = c.get("type") or ""
+                    val = _as_float(c.get("case_value") or c.get("value"))
+                    try:
+                        total_ue += calculate_equivalent_units(
+                            _ue, region, tipo, val, count=1,
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                total_ue = 0.0
+
+            kpi_row = QHBoxLayout(); kpi_row.setSpacing(10)
+            kpi_row.addWidget(self._kpi_tile(
+                "Total Cases", str(total_cases), "cases",
+                "tabler_clipboard_text.svg", "#A371F7",
+            ), 1)
+            kpi_row.addWidget(self._kpi_tile(
+                "Total Downtime", f"{int(dt_total)}", "min",
+                "tabler_clock_off.svg", "#F85149",
+            ), 1)
+            kpi_row.addWidget(self._kpi_tile(
+                "Sum UND.EQ", f"{total_ue:.2f}", "units",
+                "tabler_congruent_to.svg", "#E89720",
+            ), 1)
+            kpi_row.addWidget(self._kpi_tile(
+                "Best Value", f"{best_value:.2f}%", "highest",
+                "tabler_trending_up.svg", "#3FB950",
+            ), 1)
+            host_layout.addLayout(kpi_row)
 
         if not detail.get("found"):
             warn = QLabel(
@@ -601,14 +997,13 @@ class _DesignerDayDialog(QDialog):
             )
             warn.setStyleSheet("color: #F0883E;")
             warn.setWordWrap(True)
-            v.addWidget(warn)
+            host_layout.addWidget(warn)
         else:
             tabs = QTabWidget()
-
             case_headers = [
-                "Case ID", "Region", "Type", "Doctor",
+                "Case ID", "Region", "Type", "Tier", "CR #", "Doctor",
                 "Start", "End", "Std (min)", "Actual (min)",
-                "Value (%)", "Status", "Comments",
+                "Value (%)", "UE", "Status", "Comments",
             ]
             cases_tbl = self._build_table(case_headers)
             self._fill_cases(cases_tbl, detail["cases"], detail["ot_cases"])
@@ -618,23 +1013,130 @@ class _DesignerDayDialog(QDialog):
             dt_tbl = self._build_table(dt_headers)
             self._fill_downtime(dt_tbl, detail["downtimes"])
             tabs.addTab(dt_tbl, f"Downtime ({len(detail['downtimes'])})")
+            host_layout.addWidget(tabs, 1)
 
-            v.addWidget(tabs, 1)
+        # Footer buttons.
+        if is_fluent:
+            self.widget.setMinimumWidth(960)
+            self.widget.setMinimumHeight(540)
+            self.cancelButton.hide()
+            self.yesButton.setText("Close")
+            self.yesButton.setFixedWidth(120)
+            self.yesButton.setStyleSheet(
+                "QPushButton { background: #1e63e4; border: 1px solid #1e63e4;"
+                "  color: white; border-radius: 6px; padding: 8px 22px;"
+                "  font-weight: 700; font-size: 12px; }"
+                "QPushButton:hover { background: #2a73f3; }"
+            )
+        else:
+            bottom = QHBoxLayout()
+            bottom.addStretch()
+            btn_close = QPushButton("Close")
+            btn_close.clicked.connect(self.accept)
+            bottom.addWidget(btn_close)
+            host_layout.addLayout(bottom)
 
-        bottom = QHBoxLayout()
-        bottom.addStretch()
-        btn_close = QPushButton("Close")
-        btn_close.clicked.connect(self.accept)
-        bottom.addWidget(btn_close)
-        v.addLayout(bottom)
+    @staticmethod
+    def _units_eq_cache():
+        """Load + cache units_eq once per dialog session."""
+        cached = getattr(_DesignerDayDialog, "_ue_cached", None)
+        if cached is not None:
+            return cached
+        try:
+            from .utils import load_units_eq_data
+            _DesignerDayDialog._ue_cached = load_units_eq_data() or {}
+        except Exception:
+            _DesignerDayDialog._ue_cached = {}
+        return _DesignerDayDialog._ue_cached
+
+    @staticmethod
+    def _region_chip(region: str):
+        """Coloured chip badge for the Region column."""
+        from PySide6.QtWidgets import QWidget as _QW, QHBoxLayout as _QH, QLabel as _QL
+        palette = [
+            "#1F6FEB", "#A371F7", "#3FB950", "#D29922", "#F0883E",
+            "#00B5D8", "#E84393", "#7C4DFF", "#9CCC65", "#FF6B61",
+        ]
+        idx = sum(ord(c) for c in (region or "")) % len(palette)
+        color = palette[idx]
+        rgb = QColor(color)
+        wrap = _QW()
+        wrap.setStyleSheet("background: transparent;")
+        h = _QH(wrap)
+        h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
+        h.addStretch(1)
+        chip = _QL(region)
+        chip.setStyleSheet(
+            f"QLabel {{ background: rgba({rgb.red()},{rgb.green()},{rgb.blue()},0.14);"
+            f"  color: {color}; border: 1px solid {color};"
+            f"  border-radius: 4px; padding: 2px 10px;"
+            f"  font-size: 10px; font-weight: 700; }}"
+        )
+        h.addWidget(chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        h.addStretch(1)
+        return wrap
+
+    @staticmethod
+    def _kpi_tile(title: str, value: str, suffix: str,
+                  icon_svg: str, accent: str):
+        """Compact KPI card with a fixed height so the 4 tiles always
+        line up — label centered horizontally above, value + suffix
+        baseline-aligned below."""
+        from PySide6.QtWidgets import (
+            QFrame as _QF, QVBoxLayout as _QV, QLabel as _QL,
+            QHBoxLayout as _QH, QSizePolicy as _SP,
+        )
+        card = _QF()
+        card.setObjectName("kpiTile")
+        card.setFixedHeight(68)
+        card.setSizePolicy(_SP.Policy.Expanding, _SP.Policy.Fixed)
+        card.setStyleSheet(
+            "#kpiTile { background: #0D1117; border: 1px solid #21262D;"
+            "  border-radius: 10px; }"
+            "QLabel { background: transparent; border: none; }"
+        )
+        col = _QV(card)
+        col.setContentsMargins(14, 10, 14, 10)
+        col.setSpacing(4)
+        col.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        t = _QL(title.upper())
+        t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t.setStyleSheet(
+            "color: #8B949E; font-size: 9px; font-weight: 700;"
+            " letter-spacing: 0.5px;"
+        )
+        col.addWidget(t)
+
+        # Value row centered. Suffix sits to the right of the value with
+        # baseline alignment so '4.70% average' looks balanced.
+        row_v = _QH(); row_v.setSpacing(4)
+        row_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row_v.addStretch(1)
+        v = _QL(value)
+        v.setStyleSheet(
+            f"color: {accent}; font-size: 18px; font-weight: 800;"
+        )
+        row_v.addWidget(v, 0, Qt.AlignmentFlag.AlignVCenter)
+        if suffix:
+            sx = _QL(suffix)
+            sx.setStyleSheet("color: #6E7681; font-size: 10px;")
+            row_v.addWidget(sx, 0, Qt.AlignmentFlag.AlignVCenter)
+        row_v.addStretch(1)
+        col.addLayout(row_v)
+        return card
 
     @staticmethod
     def _build_table(headers: list[str]) -> QTableWidget:
         t = QTableWidget()
         t.setColumnCount(len(headers))
         t.setHorizontalHeaderLabels(headers)
-        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        t.horizontalHeader().setStretchLastSection(True)
+        # All columns stretch evenly — no single one hoarding the width.
+        for c in range(t.columnCount()):
+            t.horizontalHeader().setSectionResizeMode(
+                c, QHeaderView.ResizeMode.Stretch,
+            )
+        t.horizontalHeader().setStretchLastSection(False)
         t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         t.setAlternatingRowColors(True)
         t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -646,29 +1148,68 @@ class _DesignerDayDialog(QDialog):
         rows = [(c, "Reg") for c in reg_cases] + [(c, "OT") for c in ot_cases]
         tbl.setRowCount(len(rows))
         for i, (c, label) in enumerate(rows):
+            # cr_count + product_tier may be missing on older synced
+            # files — fallback to empty so the columns hide cleanly via
+            # _hide_blank_columns.
+            _cr = c.get("cr_count")
+            cr_label = f"#{_cr}" if _cr not in (None, "", 0, "0") else ""
+
+            # Per-case Equivalent Units (computed lazily once units_eq
+            # is loaded).
+            ue_str = ""
+            try:
+                _ue_map = _DesignerDayDialog._units_eq_cache()
+                from .utils import calculate_equivalent_units as _ce
+                _v = c.get("value")
+                try:
+                    _v = float(str(_v).replace("%", "").strip())
+                except (TypeError, ValueError, AttributeError):
+                    _v = 0.0
+                _ue_val = _ce(
+                    _ue_map,
+                    c.get("region") or "",
+                    c.get("type") or "",
+                    _v, count=1,
+                )
+                ue_str = f"{_ue_val:.2f}" if _ue_val else ""
+            except Exception:
+                ue_str = ""
+
             vals = [
                 c.get("case_id", ""),
                 c.get("region", ""),
                 c.get("type", ""),
+                c.get("product_tier", "") or c.get("tier", ""),
+                cr_label,
                 c.get("doctor", ""),
                 c.get("start", ""),
                 c.get("end", ""),
                 c.get("std", ""),
                 c.get("actual", ""),
                 c.get("value", ""),
+                ue_str,
                 c.get("status", ""),
                 c.get("comments", ""),
             ]
+            # Columns now: 0=Case ID, 1=Region, 2=Type, 3=Tier, 4=CR #,
+            # 5=Doctor, 6=Start, 7=End, 8=Std, 9=Actual, 10=Value, 11=UE,
+            # 12=Status, 13=Comments.
+            comments_col = 13
             for col, val in enumerate(vals):
                 item = QTableWidgetItem(str(val) if val is not None else "")
-                if col != 10:  # comments left-aligned
+                if col != comments_col:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col == 0 and label == "OT":
-                    # Tint OT rows' Case ID purple so they remain distinguishable
                     item.setForeground(QBrush(QColor("#A371F7")))
+                # Region col → coloured chip widget.
+                if col == 1 and val:
+                    item.setText("")
+                    item.setData(Qt.ItemDataRole.UserRole, str(val))
+                    tbl.setItem(i, col, item)
+                    tbl.setCellWidget(i, col, _DesignerDayDialog._region_chip(str(val)))
+                    continue
                 tbl.setItem(i, col, item)
         _DesignerDayDialog._hide_blank_columns(tbl)
-        tbl.resizeColumnsToContents()
 
     @staticmethod
     def _fill_downtime(tbl: QTableWidget, downtimes: list[dict]):
@@ -686,11 +1227,12 @@ class _DesignerDayDialog(QDialog):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 tbl.setItem(i, col, item)
         _DesignerDayDialog._hide_blank_columns(tbl)
-        tbl.resizeColumnsToContents()
 
     @staticmethod
     def _hide_blank_columns(tbl: QTableWidget):
-        """Hide any column whose every cell is empty / dash."""
+        """Hide any column whose every cell is empty / dash. Also checks
+        the cellWidget + UserRole so columns rendered as custom widgets
+        (e.g. Region chip) don't get hidden by mistake."""
         rows = tbl.rowCount()
         if rows == 0:
             return
@@ -699,6 +1241,13 @@ class _DesignerDayDialog(QDialog):
             for r in range(rows):
                 it = tbl.item(r, col)
                 txt = (it.text().strip() if it is not None else "")
+                if not txt and it is not None:
+                    ud = it.data(Qt.ItemDataRole.UserRole)
+                    if ud:
+                        txt = str(ud).strip()
+                if not txt and tbl.cellWidget(r, col) is not None:
+                    # Column uses a custom widget — keep visible.
+                    txt = "_"
                 if txt and txt not in ("—", "-", "0", "0.00", "0.000%"):
                     empty = False
                     break
@@ -744,9 +1293,24 @@ class DashboardTab(QWidget):
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(20, 14, 20, 6)
         top_bar.setSpacing(8)
+
+        # Title block: title + subtitle stacked, no vertical stretches
+        # so the bar stays compact.
+        title_block = QVBoxLayout()
+        title_block.setSpacing(2)
+        title_block.setContentsMargins(0, 0, 0, 0)
         self.title_label = QLabel("Dashboard")
-        self.title_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #E6EDF3; letter-spacing: 0.5px;")
-        top_bar.addWidget(self.title_label)
+        self.title_label.setStyleSheet(
+            "color: #E6EDF3; font-size: 18px; font-weight: 800;"
+            " letter-spacing: 0.3px;"
+        )
+        title_block.addWidget(self.title_label)
+        subtitle = QLabel("Overview of production performance")
+        subtitle.setStyleSheet(
+            "color: #8B949E; font-size: 11px; background: transparent;"
+        )
+        title_block.addWidget(subtitle)
+        top_bar.addLayout(title_block)
         top_bar.addStretch()
 
         self.btn_view_team = QPushButton("Team")
@@ -795,31 +1359,107 @@ class DashboardTab(QWidget):
         root.setContentsMargins(20, 18, 20, 22)
         root.setSpacing(18)
 
-        # ── Filters ────────────────────────────────────────────────────
-        fb = QGroupBox("Filters")
-        flay = QGridLayout(fb)
-        flay.setContentsMargins(16, 14, 16, 14)
-        flay.setHorizontalSpacing(8)
-        flay.setVerticalSpacing(8)
+        # ── Filters card (Fluent dark) ─────────────────────────────────
+        try:
+            from .widgets import _icon_url as _icu_pf
+            _chev_pf = _icu_pf("tabler_chevron_down.svg")
+        except Exception:
+            _chev_pf = ""
+        fb = QFrame()
+        fb.setObjectName("personalFilters")
+        fb.setStyleSheet(
+            "#personalFilters { background: #0D1117;"
+            "  border: 1px solid #21262D; border-radius: 12px; }"
+            "QLabel { background: transparent; color: #C9D1D9;"
+            " font-size: 11px; font-weight: 600; }"
+            "QLineEdit, QDateEdit, QComboBox { background: #161B22;"
+            " border: 1px solid #30363D; border-radius: 6px;"
+            " padding: 4px 26px 4px 8px; color: #E6EDF3; font-size: 11px;"
+            " min-height: 26px; }"
+            "QDateEdit::drop-down, QComboBox::drop-down {"
+            " subcontrol-origin: padding; subcontrol-position: right center;"
+            " width: 22px; border: none; }"
+            f"QDateEdit::down-arrow, QComboBox::down-arrow {{"
+            f" image: url({_chev_pf}); width: 12px; height: 12px; }}"
+        )
+        flay = QVBoxLayout(fb)
+        flay.setContentsMargins(16, 12, 16, 12)
+        flay.setSpacing(10)
 
-        self.date_from = QDateEdit(QDate.currentDate().addDays(-30))
+        # ── Header row: filter icon + "Filters" ──
+        hdr_row = QHBoxLayout(); hdr_row.setSpacing(6)
+        try:
+            from .tabler_icons import TablerIcon as _TI_pf
+            _ic_lbl = QLabel(); _ic_lbl.setFixedSize(14, 14)
+            _ic_lbl.setPixmap(
+                _TI_pf("tabler_filter.svg").icon(color=QColor("#58A6FF")).pixmap(14, 14)
+            )
+            hdr_row.addWidget(_ic_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        except Exception:
+            pass
+        _h_title = QLabel("Filters")
+        _h_title.setStyleSheet(
+            "color: #58A6FF; font-size: 12px; font-weight: 800;"
+        )
+        hdr_row.addWidget(_h_title)
+        hdr_row.addStretch(1)
+        flay.addLayout(hdr_row)
+
+        # ── Body: left grid (inputs) + right Quick column ──
+        body = QHBoxLayout(); body.setSpacing(20)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+
+        try:
+            from .widgets import DateEditWithShortcut as _DateEdP
+        except Exception:
+            _DateEdP = QDateEdit
+        self.date_from = _DateEdP()
+        self.date_from.setDate(QDate.currentDate().addDays(-30))
         self.date_from.setCalendarPopup(True)
         self.date_from.setDisplayFormat("yyyy-MM-dd")
-        self.date_from.setMinimumWidth(118)
-
-        self.date_to = QDateEdit(QDate.currentDate())
+        self.date_from.setFixedWidth(150)
+        self.date_from.setFixedHeight(28)
+        self.date_to = _DateEdP()
+        self.date_to.setDate(QDate.currentDate())
         self.date_to.setCalendarPopup(True)
         self.date_to.setDisplayFormat("yyyy-MM-dd")
-        self.date_to.setMinimumWidth(118)
+        self.date_to.setFixedWidth(150)
+        self.date_to.setFixedHeight(28)
+
+        # Calendar icon leading on each date input.
+        try:
+            from .tabler_icons import TablerIcon as _TI_cal
+            from PySide6.QtGui import QAction as _QA_cal
+            from PySide6.QtWidgets import QLineEdit as _QLE_cal
+            for _de in (self.date_from, self.date_to):
+                _le = _de.lineEdit() if hasattr(_de, "lineEdit") else None
+                if _le is not None:
+                    _act = _QA_cal(
+                        _TI_cal("tabler_calendar.svg").icon(color=QColor("#8B949E")),
+                        "", _le,
+                    )
+                    _le.addAction(_act, _QLE_cal.ActionPosition.LeadingPosition)
+        except Exception:
+            pass
+
+        # Auto-refresh when any filter changes — Refresh button stays as
+        # a manual fallback.
+        self.date_from.dateChanged.connect(lambda _d: self.refresh())
+        self.date_to.dateChanged.connect(lambda _d: self.refresh())
 
         self.cmb_region = QComboBox()
-        self.cmb_region.setMinimumWidth(140)
+        self.cmb_region.setMinimumWidth(160)
+        self.cmb_region.setFixedHeight(28)
         self.cmb_region.addItem("All Regions", None)
         for r in sorted(self._standards.keys()):
             self.cmb_region.addItem(r, r)
+        self.cmb_region.currentIndexChanged.connect(lambda _i: self.refresh())
 
         self.cmb_type = QComboBox()
-        self.cmb_type.setMinimumWidth(130)
+        self.cmb_type.setFixedWidth(150)
+        self.cmb_type.setFixedHeight(28)
         self.cmb_type.addItem("All Types", None)
         all_types: set = set()
         for reg_data in self._standards.values():
@@ -830,137 +1470,274 @@ class DashboardTab(QWidget):
         for t in sorted(all_types):
             self.cmb_type.addItem(t, t)
 
+        self.cmb_type.currentIndexChanged.connect(lambda _i: self.refresh())
+
         self.cmb_source = QComboBox()
-        self.cmb_source.setMinimumWidth(110)
+        self.cmb_source.setFixedWidth(150)
+        self.cmb_source.setFixedHeight(28)
         for label, val in [("REG + OT", "both"), ("REG only", "reg"), ("OT only", "ot")]:
             self.cmb_source.addItem(label, val)
+        self.cmb_source.currentIndexChanged.connect(lambda _i: self.refresh())
 
-        btn_refresh = QPushButton("Refresh")
-        btn_refresh.setMinimumWidth(90)
-        btn_refresh.clicked.connect(self.refresh)
+        # Reset button — restores every filter to its default value.
+        # Auto-refresh handles re-rendering on change.
+        btn_refresh = QPushButton("  Reset")
+        btn_refresh.setCursor(Qt.PointingHandCursor)
+        btn_refresh.setMinimumWidth(110)
+        btn_refresh.setFixedHeight(28)
+        try:
+            from .tabler_icons import TablerIcon as _TI_rf
+            from PySide6.QtCore import QSize as _QSrf
+            btn_refresh.setIcon(_TI_rf("tabler_refresh.svg").icon(color=QColor("#C9D1D9")))
+            btn_refresh.setIconSize(_QSrf(14, 14))
+        except Exception:
+            pass
+        btn_refresh.setStyleSheet(
+            "QPushButton { background: transparent; border: 1px solid #30363D;"
+            "  color: #C9D1D9; border-radius: 6px; padding: 4px 14px;"
+            "  font-size: 11px; font-weight: 700; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.05); }"
+        )
+        btn_refresh.clicked.connect(self._reset_filters)
 
-        lbl_from = QLabel("From:")
-        lbl_to = QLabel("To:")
-        lbl_region = QLabel("Region:")
-        lbl_type = QLabel("Type:")
-        lbl_source = QLabel("Source:")
-        for lbl in (lbl_from, lbl_to, lbl_region, lbl_type, lbl_source):
-            lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        def _lbl(text, w=48):
+            l = QLabel(text)
+            l.setStyleSheet(
+                "color: #C9D1D9; font-size: 11px; font-weight: 600;"
+                " background: transparent;"
+            )
+            l.setMinimumWidth(w)
+            l.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            )
+            return l
 
-        # Row 0: From | To
-        flay.addWidget(lbl_from, 0, 0)
-        flay.addWidget(self.date_from, 0, 1)
-        flay.addWidget(lbl_to, 0, 2)
-        flay.addWidget(self.date_to, 0, 3)
+        # Row 0: From / To / Region.
+        grid.addWidget(_lbl("From"),   0, 0)
+        grid.addWidget(self.date_from, 0, 1)
+        grid.addWidget(_lbl("To"),     0, 2)
+        grid.addWidget(self.date_to,   0, 3)
+        grid.addWidget(_lbl("Region"), 0, 4)
+        grid.addWidget(self.cmb_region, 0, 5)
 
-        # Row 1: Region full width
-        flay.addWidget(lbl_region, 1, 0)
-        flay.addWidget(self.cmb_region, 1, 1, 1, 5)
+        # Row 1: Type / Source / Reset (below All Regions).
+        grid.addWidget(_lbl("Type"),    1, 0)
+        grid.addWidget(self.cmb_type,   1, 1)
+        grid.addWidget(_lbl("Source"),  1, 2)
+        grid.addWidget(self.cmb_source, 1, 3)
+        grid.addWidget(btn_refresh,     1, 5, Qt.AlignmentFlag.AlignLeft)
 
-        # Row 2: Type | Source | Refresh
-        flay.addWidget(lbl_type, 2, 0)
-        flay.addWidget(self.cmb_type, 2, 1)
-        flay.addWidget(lbl_source, 2, 2)
-        flay.addWidget(self.cmb_source, 2, 3)
-        flay.addWidget(btn_refresh, 2, 4, 1, 2, Qt.AlignmentFlag.AlignLeft)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        grid.setColumnStretch(5, 1)
+        body.addLayout(grid, 1)
 
-        flay.setColumnStretch(1, 1)
-        flay.setColumnStretch(3, 1)
-        flay.setColumnStretch(5, 2)
+        # Vertical divider between the grid and the Quick column.
+        _div = QFrame()
+        _div.setFixedWidth(1)
+        _div.setStyleSheet("background: #21262D; border: none;")
+        _div.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        body.addWidget(_div)
 
-        # Row 3: Date preset shortcuts
-        presets_lbl = QLabel("Quick:")
-        presets_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-        flay.addWidget(presets_lbl, 3, 0)
+        # ── Quick column on the right (vertically centered) ──
+        quick_col = QVBoxLayout(); quick_col.setSpacing(2)
+        quick_col.setContentsMargins(0, 0, 0, 0)
+        quick_col.addStretch(1)
+        quick_lbl = QLabel("Quick")
+        quick_lbl.setStyleSheet(
+            "color: #8B949E; font-size: 10px; font-weight: 700;"
+            " letter-spacing: 0.5px; background: transparent;"
+        )
+        quick_col.addWidget(quick_lbl)
+        quick_btns = QHBoxLayout(); quick_btns.setSpacing(6)
 
-        presets_bar = QWidget()
-        presets_layout = QHBoxLayout(presets_bar)
-        presets_layout.setContentsMargins(0, 0, 0, 0)
-        presets_layout.setSpacing(6)
+        def _quick_btn(text):
+            b = QPushButton(text)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(28)
+            b.setMinimumWidth(78)
+            b.setCheckable(True)
+            b.setStyleSheet(
+                "QPushButton { background: transparent; border: 1px solid #30363D;"
+                "  color: #C9D1D9; border-radius: 6px; padding: 4px 12px;"
+                "  font-size: 11px; font-weight: 700; }"
+                "QPushButton:hover { background: rgba(255,255,255,0.05); }"
+                "QPushButton:checked { background: #1e63e4;"
+                "  border: 1px solid #1e63e4; color: white; }"
+            )
+            return b
 
-        btn_today = QPushButton("Today")
-        btn_today.setMaximumWidth(70)
-        btn_week  = QPushButton("This Week")
-        btn_week.setMaximumWidth(80)
-        btn_month = QPushButton("This Month")
-        btn_month.setMaximumWidth(90)
+        btn_today = _quick_btn("Today")
+        btn_week  = _quick_btn("This Week")
+        btn_month = _quick_btn("This Month")
 
         def _set_today():
             today = QDate.currentDate()
             self.date_from.setDate(today)
             self.date_to.setDate(today)
+            btn_today.setChecked(True)
+            btn_week.setChecked(False); btn_month.setChecked(False)
             self.refresh()
 
         def _set_week():
             today = QDate.currentDate()
-            self.date_from.setDate(today.addDays(-today.dayOfWeek() + 1))  # Monday
+            self.date_from.setDate(today.addDays(-today.dayOfWeek() + 1))
             self.date_to.setDate(today)
+            btn_week.setChecked(True)
+            btn_today.setChecked(False); btn_month.setChecked(False)
             self.refresh()
 
         def _set_month():
             today = QDate.currentDate()
             self.date_from.setDate(QDate(today.year(), today.month(), 1))
             self.date_to.setDate(today)
+            btn_month.setChecked(True)
+            btn_today.setChecked(False); btn_week.setChecked(False)
             self.refresh()
 
         btn_today.clicked.connect(_set_today)
         btn_week.clicked.connect(_set_week)
         btn_month.clicked.connect(_set_month)
 
-        presets_layout.addWidget(btn_today)
-        presets_layout.addWidget(btn_week)
-        presets_layout.addWidget(btn_month)
-        presets_layout.addStretch()
+        quick_btns.addWidget(btn_today)
+        quick_btns.addWidget(btn_week)
+        quick_btns.addWidget(btn_month)
+        # Today checked by default to match the target screenshot.
+        btn_today.setChecked(True)
+        quick_col.addLayout(quick_btns)
+        quick_col.addStretch(1)
+        body.addLayout(quick_col, 0)
 
-        flay.addWidget(presets_bar, 3, 1, 1, 5)
-
+        flay.addLayout(body)
         root.addWidget(fb)
 
-        # ── KPI cards (3 + 2 grid so they wrap before squishing) ───────
-        card_grid = QGridLayout()
-        card_grid.setSpacing(14)
-        self.kpi_reg  = _Card("REG Cases", accent="#388BFD")
-        self.kpi_ot   = _Card("OT Cases",  accent="#F0883E")
-        self.kpi_ue   = _Card("Total UE",  accent="#3FB950")
-        self.kpi_eff  = _Card("Avg Eff %", accent="#A371F7")
-        self.kpi_down = _Card("Downtime",  accent="#F85149")
-        for i, card in enumerate(
-            (self.kpi_reg, self.kpi_ot, self.kpi_ue, self.kpi_eff, self.kpi_down)
-        ):
-            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            card_grid.addWidget(card, i // 3, i % 3)
-        for c in range(3):
-            card_grid.setColumnStretch(c, 1)
-        root.addLayout(card_grid)
+        # ── KPI tiles row — 5 cards (REG / OT / Avg Eff / Total UE / Downtime) ──
+        self.kpi_reg  = _PersonalKpiTile("REG Cases",  "Regular cases", "tabler_clipboard_text.svg", "#58A6FF")
+        self.kpi_ot   = _PersonalKpiTile("OT Cases",   "Overtime cases", "tabler_clock.svg", "#F0883E")
+        self.kpi_eff  = _PersonalKpiTile("Avg Eff %",  "Average efficiency", "tabler_percentage_30.svg", "#A371F7")
+        self.kpi_ue   = _PersonalKpiTile("Total UE",   "Equivalent units", "tabler_congruent_to.svg", "#E89720")
+        self.kpi_down = _PersonalKpiTile("Downtime",   "Total minutes",   "tabler_clock_off.svg",     "#F85149")
 
-        # ── Period Summary (Today / Week / Month / Q / YTD + picker) ───
-        period_grp = QGroupBox("Period Summary")
+        kpi_row = QHBoxLayout(); kpi_row.setSpacing(10)
+        for c in (self.kpi_reg, self.kpi_ot, self.kpi_eff, self.kpi_ue, self.kpi_down):
+            kpi_row.addWidget(c, 1)
+        root.addLayout(kpi_row)
+
+        # ── Period Summary — Fluent card with header + table ───
+        period_grp = QFrame()
+        period_grp.setObjectName("periodCard")
+        try:
+            from .widgets import _icon_url as _icu_pp
+            _chev_pp = _icu_pp("tabler_chevron_down.svg")
+        except Exception:
+            _chev_pp = ""
+        period_grp.setStyleSheet(
+            "#periodCard { background: #0D1117;"
+            "  border: 1px solid #21262D; border-radius: 12px; }"
+            "QLabel { background: transparent; color: #C9D1D9; }"
+            "QComboBox { background: #161B22; border: 1px solid #30363D;"
+            "  border-radius: 6px; padding: 4px 22px 4px 8px; color: #E6EDF3;"
+            "  font-size: 11px; min-height: 26px; }"
+            "QComboBox::drop-down { subcontrol-origin: padding;"
+            "  subcontrol-position: right center; width: 22px; border: none; }"
+            f"QComboBox::down-arrow {{ image: url({_chev_pp});"
+            "  width: 12px; height: 12px; }"
+            "QTableWidget { background: transparent;"
+            "  border: none; gridline-color: transparent;"
+            "  color: #E6EDF3; outline: none; font-size: 10px; }"
+            "QTableWidget::item { padding: 5px 6px; border: none;"
+            "  border-bottom: 1px solid #161B22; }"
+            "QTableWidget::item:selected { background: rgba(56,139,253,0.14);"
+            "  color: #E6EDF3; }"
+            "QHeaderView { background: transparent; border: none; }"
+            "QHeaderView::section { background: #161B22; color: #8B949E;"
+            "  padding: 6px 6px; border: none;"
+            "  border-bottom: 1px solid #21262D;"
+            "  font-weight: 700; font-size: 9px; letter-spacing: 0.5px; }"
+        )
         pl = QVBoxLayout(period_grp)
-        pl.setContentsMargins(8, 10, 8, 10)
-        pl.setSpacing(6)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(0)
 
-        picker_row = QHBoxLayout()
-        picker_row.setContentsMargins(0, 0, 0, 0)
-        picker_row.setSpacing(6)
-        picker_row.addWidget(QLabel("Pick week:"))
+        # Header row: 📊 PERIOD SUMMARY + week-picker on the right.
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(14, 10, 14, 10)
+        hdr.setSpacing(8)
+        try:
+            from .tabler_icons import TablerIcon as _TI_ph
+            _ic = QLabel(); _ic.setFixedSize(14, 14)
+            _ic.setPixmap(
+                _TI_ph("tabler_chart_bar.svg").icon(color=QColor("#58A6FF")).pixmap(14, 14)
+            )
+            hdr.addWidget(_ic, 0, Qt.AlignmentFlag.AlignVCenter)
+        except Exception:
+            pass
+        _h_t = QLabel("PERIOD SUMMARY")
+        _h_t.setStyleSheet(
+            "color: #58A6FF; font-size: 11px; font-weight: 800;"
+            " letter-spacing: 0.6px;"
+        )
+        hdr.addWidget(_h_t)
+        hdr.addStretch(1)
+        _pick_lbl = QLabel("Pick week")
+        _pick_lbl.setStyleSheet(
+            "color: #8B949E; font-size: 10px; font-weight: 700;"
+            " letter-spacing: 0.5px;"
+        )
+        hdr.addWidget(_pick_lbl)
         self.cmb_week = QComboBox()
-        self.cmb_week.setMinimumWidth(260)
+        self.cmb_week.setMinimumWidth(220)
+        self.cmb_week.setFixedHeight(28)
         self._populate_week_combo()
         self.cmb_week.currentIndexChanged.connect(self._on_pick_week)
-        picker_row.addWidget(self.cmb_week)
-        picker_row.addStretch()
-        pl.addLayout(picker_row)
+        hdr.addWidget(self.cmb_week)
+        pl.addLayout(hdr)
+
+        # Divider line between header and table.
+        _d = QFrame()
+        _d.setFixedHeight(1)
+        _d.setStyleSheet("background: #21262D; border: none;")
+        pl.addWidget(_d)
 
         self.tbl_period = _make_table([
-            "Period", "Range",
-            "UE no-DT", "UE w/DT",
-            "Avg/Day no-DT", "Avg/Day w/DT",
-            "Avg Eff %", "Cases",
+            "Period", "UE (REG)", "Total UE", "Downtime (m)", "Cases",
         ])
-        self.tbl_period.setMinimumHeight(220)
-        self.tbl_period.setMaximumHeight(280)
+        self.tbl_period.setMinimumHeight(240)
+        self.tbl_period.setMaximumHeight(320)
+        self.tbl_period.setAlternatingRowColors(False)
+        self.tbl_period.setShowGrid(False)
+        _th = self.tbl_period.horizontalHeader()
+        # Period + Cases stretch; UE columns + Downtime are fixed narrow.
+        _th.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        _th.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        _th.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        _th.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        _th.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.tbl_period.setColumnWidth(1, 64)   # UE (REG)
+        self.tbl_period.setColumnWidth(2, 64)   # Total UE
+        self.tbl_period.setColumnWidth(3, 88)   # Downtime (m)
+        _th.setStretchLastSection(False)
+        _th.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         pl.addWidget(self.tbl_period)
-        root.addWidget(period_grp)
+
+        # ── Donuts container on the right (50/50 split with Period) ──
+        self.donut_source = _DonutCard("UE by Source")
+        self.donut_type   = _DonutCard("UE by Case Type")
+        donuts_col = QHBoxLayout(); donuts_col.setSpacing(10)
+        donuts_col.addWidget(self.donut_source, 1)
+        donuts_col.addWidget(self.donut_type, 1)
+
+        period_donuts_row = QHBoxLayout(); period_donuts_row.setSpacing(12)
+        period_donuts_row.addWidget(period_grp, 1)
+        donuts_wrap = QWidget(); donuts_wrap.setLayout(donuts_col)
+        period_donuts_row.addWidget(donuts_wrap, 1)
+        # Lock both halves to identical max height so they line up.
+        _CARD_MAX_H = 460
+        period_grp.setMaximumHeight(_CARD_MAX_H)
+        self.donut_source.setMaximumHeight(_CARD_MAX_H)
+        self.donut_type.setMaximumHeight(_CARD_MAX_H)
+        donuts_wrap.setMaximumHeight(_CARD_MAX_H)
+        root.addLayout(period_donuts_row)
 
         # ── Charts row 1 ──────────────────────────────────────────────
         self._ch1 = QHBoxLayout()
@@ -971,8 +1748,39 @@ class DashboardTab(QWidget):
         self._line.setMinimumSize(220, 220)
         self._bar_grp  = _chart_group("Daily UE — REG vs OT", self._bar)
         self._line_grp = _chart_group("Efficiency % Trend",   self._line)
-        self._bar_grp.setMinimumHeight(260)
-        self._line_grp.setMinimumHeight(260)
+        self._bar_grp.setMinimumHeight(280)
+        self._line_grp.setMinimumHeight(280)
+
+        # Day-by-day sliders for both charts (rolling 14-day window).
+        from PySide6.QtWidgets import QSlider as _QSld
+        slider_css = (
+            "QSlider::groove:horizontal { background: #21262D;"
+            "  height: 4px; border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: #1F6FEB;"
+            "  border-radius: 2px; }"
+            "QSlider::handle:horizontal { background: #C9D1D9;"
+            "  width: 12px; height: 12px; margin: -4px 0;"
+            "  border-radius: 6px; }"
+            "QSlider::handle:horizontal:hover { background: #FFFFFF; }"
+        )
+        self._bar_slider = _QSld(Qt.Orientation.Horizontal)
+        self._bar_slider.setStyleSheet(slider_css)
+        self._bar_slider.setVisible(False)
+        self._bar_slider.valueChanged.connect(self._apply_bar_window)
+        self._bar_grp.layout().addWidget(self._bar_slider)
+
+        self._line_slider = _QSld(Qt.Orientation.Horizontal)
+        self._line_slider.setStyleSheet(slider_css)
+        self._line_slider.setVisible(False)
+        self._line_slider.valueChanged.connect(self._apply_line_window)
+        self._line_grp.layout().addWidget(self._line_slider)
+
+        # Full data cached for slider pagination.
+        self._bar_window_size = 14
+        self._bar_full: tuple[list, list, list] = ([], [], [])
+        self._line_window_size = 14
+        self._line_full: tuple[list, list] = ([], [])
+
         self._ch1.addWidget(self._bar_grp)
         self._ch1.addWidget(self._line_grp)
         root.addLayout(self._ch1)
@@ -986,43 +1794,120 @@ class DashboardTab(QWidget):
         self._donut.setMinimumSize(220, 240)
         self._pie_grp   = _chart_group("UE by Region",    self._pie)
         self._donut_grp = _chart_group("UE by Case Type", self._donut)
-        self._pie_grp.setMinimumHeight(280)
-        self._donut_grp.setMinimumHeight(280)
+        self._pie_grp.setMinimumHeight(340)
+        self._donut_grp.setMinimumHeight(340)
+        self._pie_grp.setMaximumHeight(380)
+        self._donut_grp.setMaximumHeight(380)
         self._ch2.addWidget(self._pie_grp)
         self._ch2.addWidget(self._donut_grp)
         root.addLayout(self._ch2)
 
-        # ── Insights panel ────────────────────────────────────────────
-        self._advice_box = QGroupBox("Insights & Suggestions")
-        self._advice_layout = QVBoxLayout(self._advice_box)
-        self._advice_layout.setContentsMargins(14, 12, 14, 12)
-        self._advice_layout.setSpacing(8)
-        root.addWidget(self._advice_box)
-
-        # ── Tables ────────────────────────────────────────────────────
-        self._tbl_row = QHBoxLayout()
-        self._tbl_row.setSpacing(16)
-
-        daily_grp = QGroupBox("Daily Summary")
-        dl = QVBoxLayout(daily_grp)
-        dl.setContentsMargins(8, 10, 8, 10)
-        self.tbl_daily = _make_table(
-            ["Date", "REG", "OT", "UE (REG)", "UE (OT)", "Avg Eff %", "Downtime (m)"]
+        # ── Insights panel (50% width) ────────────────────────────────
+        self._advice_box = QFrame()
+        self._advice_box.setObjectName("insightsCard")
+        self._advice_box.setStyleSheet(
+            "#insightsCard { background: #0D1117;"
+            "  border: 1px solid #21262D; border-radius: 12px; }"
+            "QLabel { background: transparent; }"
         )
-        self.tbl_daily.setMinimumHeight(180)
-        dl.addWidget(self.tbl_daily)
+        _ins_v = QVBoxLayout(self._advice_box)
+        _ins_v.setContentsMargins(14, 12, 14, 12)
+        _ins_v.setSpacing(8)
+        _ins_hdr = QLabel("INSIGHTS & SUGGESTIONS")
+        _ins_hdr.setStyleSheet(
+            "color: #1F6FEB; font-size: 11px; font-weight: 800;"
+            " letter-spacing: 0.5px;"
+        )
+        _ins_v.addWidget(_ins_hdr)
+        from PySide6.QtWidgets import QScrollArea as _QSA
+        self._advice_scroll = _QSA()
+        self._advice_scroll.setWidgetResizable(True)
+        self._advice_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._advice_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._advice_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: transparent; width: 8px;"
+            "  margin: 0; border: none; }"
+            "QScrollBar::handle:vertical { background: #30363D;"
+            "  border-radius: 4px; min-height: 24px; }"
+            "QScrollBar::handle:vertical:hover { background: #484F58; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+            "  height: 0; background: none; border: none; }"
+        )
+        _advice_holder = QWidget()
+        _advice_holder.setStyleSheet("background: transparent;")
+        self._advice_layout = QVBoxLayout(_advice_holder)
+        self._advice_layout.setContentsMargins(0, 0, 4, 0)
+        self._advice_layout.setSpacing(8)
+        self._advice_layout.addStretch(1)
+        self._advice_scroll.setWidget(_advice_holder)
+        self._advice_box.setMaximumHeight(360)
+        _ins_v.addWidget(self._advice_scroll, 1)
 
-        region_grp = QGroupBox("Region Breakdown")
-        rl = QVBoxLayout(region_grp)
-        rl.setContentsMargins(8, 10, 8, 10)
+        # ── Region Breakdown card built first so it sits beside Insights ──
         self.tbl_region = _make_table(
             ["Region", "REG Cases", "OT Cases", "Total UE", "Avg Eff %"]
         )
         self.tbl_region.setMinimumHeight(180)
-        rl.addWidget(self.tbl_region)
+        region_grp = _chart_group("Region Breakdown", self.tbl_region)
+        region_grp.setMaximumHeight(360)
 
-        self._tbl_row.addWidget(daily_grp, 3)
-        self._tbl_row.addWidget(region_grp, 2)
+        _ins_row = QHBoxLayout(); _ins_row.setSpacing(12)
+        _ins_row.addWidget(self._advice_box, 1)
+        _ins_row.addWidget(region_grp, 1)
+        root.addLayout(_ins_row)
+
+        # ── Daily Summary table (60% width) ───────────────────────────
+        self._tbl_row = QHBoxLayout()
+        self._tbl_row.setSpacing(16)
+
+        self.tbl_daily = _make_table(
+            ["Date", "REG", "OT", "UE (REG)", "UE (OT)", "Avg Eff %", "Downtime (m)"]
+        )
+        self.tbl_daily.setMinimumHeight(180)
+        daily_grp = _chart_group("Daily Summary", self.tbl_daily)
+
+        # ── "Coming soon" placeholder card (40% beside Daily Summary) ──
+        coming = QFrame()
+        coming.setObjectName("comingCard")
+        coming.setStyleSheet(
+            "#comingCard { background: #0D1117;"
+            "  border: 1px dashed #30363D; border-radius: 12px; }"
+            "QLabel { background: transparent; }"
+        )
+        cv = QVBoxLayout(coming)
+        cv.setContentsMargins(18, 18, 18, 18)
+        cv.setSpacing(6)
+        cv.addStretch(1)
+        try:
+            from .tabler_icons import TablerIcon
+            from PySide6.QtCore import QSize as _QSz
+            icon_lbl = QLabel()
+            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pm = TablerIcon("tabler_sparkles.svg").icon(
+                color=QColor("#1F6FEB")
+            ).pixmap(36, 36)
+            icon_lbl.setPixmap(pm)
+            cv.addWidget(icon_lbl)
+        except Exception:
+            pass
+        t = QLabel("Coming soon")
+        t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t.setStyleSheet(
+            "color: #C9D1D9; font-size: 14px; font-weight: 700;"
+        )
+        s = QLabel("New improvements and metrics on the way.")
+        s.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        s.setStyleSheet("color: #8B949E; font-size: 11px;")
+        cv.addWidget(t)
+        cv.addWidget(s)
+        cv.addStretch(1)
+        coming.setMaximumHeight(360)
+
+        self._tbl_row.addWidget(daily_grp, 6)
+        self._tbl_row.addWidget(coming, 4)
         root.addLayout(self._tbl_row)
 
     # ------------------------------------------------------------------
@@ -1057,30 +1942,88 @@ class DashboardTab(QWidget):
         v.setSpacing(14)
 
         header_row = QHBoxLayout()
-        self.team_date_picker = QDateEdit(QDate.currentDate())
+        try:
+            from .widgets import DateEditWithShortcut as _DateEd_d
+        except Exception:
+            _DateEd_d = QDateEdit
+        self.team_date_picker = _DateEd_d()
+        self.team_date_picker.setDate(QDate.currentDate())
         self.team_date_picker.setCalendarPopup(True)
         self.team_date_picker.setDisplayFormat("yyyy-MM-dd")
-        self.team_date_picker.setMinimumWidth(120)
+        self.team_date_picker.setMinimumWidth(180)
+        self.team_date_picker.setFixedHeight(30)
+        # Calendar icon leading + chevron dropdown on the right so the
+        # popup can be opened via the chevron.
+        try:
+            from .widgets import _icon_url as _icu_dd
+            _chev_dd = _icu_dd("tabler_chevron_down.svg")
+        except Exception:
+            _chev_dd = ""
+        self.team_date_picker.setStyleSheet(
+            "QDateEdit { background: #161B22; border: 1px solid #30363D;"
+            "  border-radius: 6px; padding: 4px 26px 4px 8px; color: #E6EDF3;"
+            "  font-size: 12px; }"
+            "QDateEdit::drop-down { subcontrol-origin: padding;"
+            "  subcontrol-position: right center; width: 22px; border: none; }"
+            f"QDateEdit::down-arrow {{ image: url({_chev_dd});"
+            "  width: 12px; height: 12px; }"
+        )
+        try:
+            from .tabler_icons import TablerIcon as _TI_dd
+            from PySide6.QtGui import QAction as _QA_dd, QColor as _QC_dd
+            le = (self.team_date_picker.lineEdit()
+                  if hasattr(self.team_date_picker, "lineEdit") else None)
+            if le is not None:
+                act = _QA_dd(
+                    _TI_dd("tabler_calendar.svg").icon(color=_QC_dd("#8B949E")),
+                    "", le,
+                )
+                le.addAction(act, QLineEdit.ActionPosition.LeadingPosition)
+        except Exception:
+            pass
         self.team_date_picker.dateChanged.connect(lambda _d: self._refresh_team_view())
         header_row.addWidget(QLabel("Date:"))
         header_row.addWidget(self.team_date_picker)
         header_row.addStretch()
+
+        # Last-update chip: clock icon + muted text in a rounded pill.
+        try:
+            from .tabler_icons import TablerIcon as _TI_lh
+            _clock_lbl = QLabel()
+            _clock_lbl.setFixedSize(14, 14)
+            _clock_lbl.setPixmap(
+                _TI_lh("tabler_clock.svg").icon(color=QColor("#8B949E")).pixmap(12, 12)
+            )
+            header_row.addWidget(_clock_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        except Exception:
+            pass
         self.team_freshness_label = QLabel("Loading…")
         self.team_freshness_label.setStyleSheet(
-            "color: #8B949E; font-size: 11px;"
+            "color: #8B949E; font-size: 11px; background: transparent;"
         )
         header_row.addWidget(self.team_freshness_label)
+        header_row.addSpacing(12)
 
-        self.btn_team_download = QPushButton("Download full data")
+        self.btn_team_download = QPushButton("  Download full data")
         self.btn_team_download.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_team_download.setFixedHeight(30)
         self.btn_team_download.setToolTip(
             "Save an Excel with every designer's case detail for the selected date."
         )
+        try:
+            from .tabler_icons import TablerIcon as _TI_dl
+            from PySide6.QtCore import QSize as _QS_dl
+            self.btn_team_download.setIcon(
+                _TI_dl("tabler_download.svg").icon(color=QColor("#FFFFFF"))
+            )
+            self.btn_team_download.setIconSize(_QS_dl(14, 14))
+        except Exception:
+            pass
         self.btn_team_download.setStyleSheet(
-            "QPushButton { background-color: #1F6FEB; color: white; "
-            "border: none; border-radius: 4px; padding: 5px 14px; "
-            "font-weight: 600; font-size: 12px; } "
-            "QPushButton:hover { background-color: #388BFD; }"
+            "QPushButton { background-color: #1e63e4; color: white;"
+            "  border: 1px solid #1e63e4; border-radius: 6px;"
+            "  padding: 4px 14px; font-weight: 700; font-size: 11px; }"
+            "QPushButton:hover { background-color: #2a73f3; }"
         )
         self.btn_team_download.clicked.connect(self._download_team_full)
         header_row.addWidget(self.btn_team_download)
@@ -1099,11 +2042,43 @@ class DashboardTab(QWidget):
         v.addLayout(kpi_row)
 
         # People table
-        self.tbl_team = _make_table(["Designer", "Production %", "UE", "Cases"])
+        self.tbl_team = _make_table(["#", "Designer", "Production %", "UE", "Cases"])
         self.tbl_team.setMinimumHeight(360)
         self.tbl_team.setSortingEnabled(False)  # we sort manually by % desc
         self.tbl_team.setCursor(Qt.CursorShape.PointingHandCursor)
         self.tbl_team.cellDoubleClicked.connect(self._open_designer_detail)
+        # Borderless rows, no grid, no zebra, no selection tint.
+        self.tbl_team.setAlternatingRowColors(False)
+        self.tbl_team.setShowGrid(False)
+        from PySide6.QtWidgets import QAbstractItemView as _QAIV
+        self.tbl_team.setSelectionMode(_QAIV.SelectionMode.NoSelection)
+        self.tbl_team.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.tbl_team.setStyleSheet(
+            "QTableWidget { background-color: #0D1117;"
+            "  border: 1px solid #21262D; border-radius: 10px;"
+            "  gridline-color: transparent; outline: none; }"
+            "QTableWidget::item { padding: 6px 8px; border: none;"
+            "  color: #E6EDF3; }"
+            "QTableWidget::item:selected { background-color: transparent;"
+            "  color: #E6EDF3; }"
+            "QHeaderView { background: transparent; border: none; }"
+            "QHeaderView::section { background-color: #161B22;"
+            "  color: #8B949E; padding: 8px 8px; border: none;"
+            "  border-bottom: 1px solid #21262D;"
+            "  font-weight: 700; font-size: 10px; }"
+            "QHeaderView::section:first { border-top-left-radius: 10px; }"
+            "QHeaderView::section:last { border-top-right-radius: 10px; }"
+        )
+        # Tight # column; designer/production stretch; UE/Cases small.
+        _th = self.tbl_team.horizontalHeader()
+        _th.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        _th.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        _th.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        _th.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        _th.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.tbl_team.setColumnWidth(0, 44)
+        self.tbl_team.setColumnWidth(3, 64)
+        self.tbl_team.setColumnWidth(4, 56)
         v.addWidget(self.tbl_team, 1)
 
         hint = QLabel("Double-click a designer to see their cases.")
@@ -1151,7 +2126,7 @@ class DashboardTab(QWidget):
 
     def _apply_view_button_styles(self):
         sel = (
-            "QPushButton { background-color: #1F6FEB; color: white; "
+            "QPushButton { background-color: #1757D4; color: white; "
             "border: none; border-radius: 4px; padding: 5px 14px; "
             "font-weight: 600; font-size: 12px; }"
         )
@@ -1163,6 +2138,115 @@ class DashboardTab(QWidget):
         )
         self.btn_view_team.setStyleSheet(sel if self.btn_view_team.isChecked() else unsel)
         self.btn_view_personal.setStyleSheet(sel if self.btn_view_personal.isChecked() else unsel)
+
+    def _build_pct_bar_widget(self, pct: float):
+        """Production % cell: percentage label (left) + thin colored
+        progress bar (right). Tier colour applied to both."""
+        if pct >= 100:
+            color = "#3FB950"
+        elif pct >= 85:
+            color = "#D29922"
+        else:
+            color = "#F85149"
+        # Clamp visual fill so > target doesn't blow out the bar.
+        fill_pct = max(0.0, min(150.0, pct)) / 150.0 * 100.0
+
+        wrap = QWidget()
+        wrap.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(wrap)
+        h.setContentsMargins(8, 0, 8, 0)
+        h.setSpacing(10)
+
+        lbl = QLabel(f"{pct:.1f}%")
+        lbl.setStyleSheet(
+            f"color: {color}; font-size: 11px; font-weight: 700;"
+            " background: transparent;"
+        )
+        lbl.setMinimumWidth(58)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(lbl, 0)
+
+        # Custom 4px-tall bar — QProgressBar's native sizeHint forces
+        # ~16px even with setFixedHeight, so we paint the track + fill
+        # ourselves on two stacked QFrames.
+        bar_wrap = QWidget()
+        bar_wrap.setFixedHeight(4)
+        bar_wrap.setStyleSheet(
+            "background: rgba(255,255,255,0.08); border-radius: 2px;"
+        )
+        bar_inner = QFrame(bar_wrap)
+        bar_inner.setStyleSheet(
+            f"background: {color}; border-radius: 2px;"
+        )
+        bar_inner.setGeometry(0, 0, 1, 4)
+        bar_wrap._fill_pct = fill_pct  # type: ignore[attr-defined]
+        bar_wrap._inner = bar_inner    # type: ignore[attr-defined]
+
+        def _resize(ev, _w=bar_wrap):
+            w = _w.width()
+            _w._inner.setGeometry(
+                0, 0, max(0, int(w * _w._fill_pct / 100.0)), 4,
+            )
+        bar_wrap.resizeEvent = _resize  # type: ignore[assignment]
+        h.addWidget(bar_wrap, 1, Qt.AlignmentFlag.AlignVCenter)
+        return wrap
+
+    def _build_designer_cell(self, name: str):
+        """Cell widget for the Designer column: avatar circle with
+        first-name + last-name initials + the name itself."""
+        full = (name or "").strip()
+        # Stored format is "Lastname, Firstname" — derive initials in
+        # First-Last order (e.g. "Tapia, Cesar" → "CT").
+        first_initial = ""
+        last_initial = ""
+        if "," in full:
+            last, _, first = full.partition(",")
+            last = last.strip()
+            first = first.strip()
+            first_initial = first[:1].upper() if first else ""
+            last_initial = last[:1].upper() if last else ""
+        else:
+            parts = full.split()
+            if len(parts) >= 2:
+                first_initial = parts[0][:1].upper()
+                last_initial = parts[-1][:1].upper()
+            elif parts:
+                first_initial = parts[0][:1].upper()
+        initials = (first_initial + last_initial) or "?"
+
+        # Uniform neutral avatar — colour adapts to the active theme.
+        try:
+            from qfluentwidgets.common.style_sheet import isDarkTheme
+            from .theme_palette import palette as _av_pal
+            _ap = _av_pal(not isDarkTheme())
+            color = _ap["raised"]
+            fg_color = _ap["text_2"]
+        except Exception:
+            color = "#313842"
+            fg_color = "#C9D1D9"
+
+        wrap = QWidget()
+        wrap.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(wrap)
+        h.setContentsMargins(8, 0, 8, 0)
+        h.setSpacing(8)
+
+        avatar = QLabel(initials)
+        avatar.setFixedSize(24, 24)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(
+            f"QLabel {{ background: {color}; color: {fg_color};"
+            f"  font-size: 10px; font-weight: 700; border-radius: 12px;"
+            f"  border: none; }}"
+        )
+        h.addWidget(avatar, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        name_lbl = QLabel(full)
+        name_lbl.setStyleSheet(
+            "color: #E6EDF3; font-size: 12px; background: transparent;"
+        )
+        h.addWidget(name_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
+        return wrap
 
     def _refresh_team_view(self):
         """Read the shared folder, repopulate KPIs + table. Silent on failure."""
@@ -1191,23 +2275,38 @@ class DashboardTab(QWidget):
         # Table — only people with any activity today, sorted by % desc.
         visible = sorted(active_rows, key=lambda r: r["pct"], reverse=True)
         self.tbl_team.setRowCount(len(visible))
+        self.tbl_team.verticalHeader().setDefaultSectionSize(40)
         for i, r in enumerate(visible):
-            it_name = QTableWidgetItem(r["designer"])
-            it_pct  = QTableWidgetItem(f"{r['pct']:.1f}%")
+            rank = i + 1
+            it_rank = QTableWidgetItem(str(rank))
+            it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Highlight top 3 with bold + medal-ish colours.
+            rank_color = {1: "#E6B800", 2: "#C0C0C0", 3: "#CD7F32"}.get(rank)
+            if rank_color:
+                f = QFont(); f.setBold(True)
+                it_rank.setFont(f)
+                it_rank.setForeground(QBrush(QColor(rank_color)))
+
+            # Empty item — Designer column rendered via cellWidget below.
+            it_name = QTableWidgetItem("")
+            it_name.setData(Qt.ItemDataRole.UserRole, r["designer"])
             it_ue   = QTableWidgetItem(f"{r['ue']:.2f}")
             it_cs   = QTableWidgetItem(str(r["cases"]))
-            it_pct.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             it_ue.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             it_cs.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            # Soft colour cue on the % cell
-            if r["pct"] >= 100:
-                it_pct.setForeground(QBrush(QColor("#3FB950")))
-            elif r["pct"] >= 85:
-                it_pct.setForeground(QBrush(QColor("#D29922")))
-            else:
-                it_pct.setForeground(QBrush(QColor("#F85149")))
-            for col, item in enumerate((it_name, it_pct, it_ue, it_cs)):
-                self.tbl_team.setItem(i, col, item)
+
+            self.tbl_team.setItem(i, 0, it_rank)
+            self.tbl_team.setItem(i, 1, it_name)
+            self.tbl_team.setCellWidget(
+                i, 1, self._build_designer_cell(r["designer"]),
+            )
+            # Production % cell as a custom widget: horizontal progress
+            # bar + percentage label coloured by tier.
+            self.tbl_team.setCellWidget(
+                i, 2, self._build_pct_bar_widget(r["pct"]),
+            )
+            self.tbl_team.setItem(i, 3, it_ue)
+            self.tbl_team.setItem(i, 4, it_cs)
 
         import time as _time
         self._team_last_load_ts = _time.time()
@@ -1246,10 +2345,16 @@ class DashboardTab(QWidget):
         return productions_dir if os.path.isdir(productions_dir) else None
 
     def _open_designer_detail(self, row: int, _col: int):
-        item = self.tbl_team.item(row, 0)
-        if item is None:
+        # Designer name lives in column 1 now (col 0 is the rank), and
+        # its display is rendered via cellWidget so the QTableWidgetItem
+        # text is empty. The full name is stashed in UserRole.
+        item = self.tbl_team.item(row, 1)
+        designer = ""
+        if item is not None:
+            ud = item.data(Qt.ItemDataRole.UserRole)
+            designer = (str(ud) if ud else item.text()).strip()
+        if not designer:
             return
-        designer = item.text().strip()
         target_date = self.team_date_picker.date().toString("yyyy-MM-dd")
         productions_dir = self._productions_dir()
         if not productions_dir:
@@ -1370,12 +2475,51 @@ class DashboardTab(QWidget):
     # Refresh (Personal view)
     # ------------------------------------------------------------------
 
+    def _reset_filters(self):
+        """Reset every filter to its default value. Auto-refresh runs
+        once at the end via the last signal."""
+        today = QDate.currentDate()
+        # Block signals while bulk-setting so refresh() only fires once.
+        for w in (self.date_from, self.date_to,
+                  self.cmb_region, self.cmb_type, self.cmb_source):
+            try:
+                w.blockSignals(True)
+            except Exception:
+                pass
+        try:
+            self.date_from.setDate(today.addDays(-30))
+            self.date_to.setDate(today)
+            self.cmb_region.setCurrentIndex(0)
+            self.cmb_type.setCurrentIndex(0)
+            self.cmb_source.setCurrentIndex(0)
+        finally:
+            for w in (self.date_from, self.date_to,
+                      self.cmb_region, self.cmb_type, self.cmb_source):
+                try:
+                    w.blockSignals(False)
+                except Exception:
+                    pass
+        self.refresh()
+
     def refresh(self):
         d_from  = self.date_from.date().toString("yyyy-MM-dd")
         d_to    = self.date_to.date().toString("yyyy-MM-dd")
         region  = self.cmb_region.currentData()
         tipo    = self.cmb_type.currentData()
         source  = self.cmb_source.currentData()
+
+        # Cache: re-running the full refresh with identical filters is the
+        # common case (case_saved → refresh, plus several other signals fire
+        # in quick succession). Skip the heavy chart/table rebuilds when the
+        # underlying data hasn't changed since the last refresh.
+        cache_key = (d_from, d_to, region, tipo, source)
+        last_key = getattr(self, "_last_refresh_key", None)
+        last_ts = getattr(self, "_last_refresh_ts", 0.0)
+        import time as _t
+        now = _t.time()
+        if (last_key == cache_key) and (now - last_ts) < 1.5:
+            # Same filters within 1.5 s — collapse the burst into one refresh.
+            return
 
         reg_rows = self._query_cases("cases",    d_from, d_to, region, tipo) \
                    if source in ("both", "reg") else []
@@ -1390,6 +2534,9 @@ class DashboardTab(QWidget):
         self._update_region_table(reg_rows, ot_rows)
         self._update_advice(reg_rows, ot_rows, down_map, d_from, d_to)
 
+        self._last_refresh_key = cache_key
+        self._last_refresh_ts = now
+
     # ------------------------------------------------------------------
     # DB queries
     # ------------------------------------------------------------------
@@ -1399,7 +2546,8 @@ class DashboardTab(QWidget):
         region, tipo
     ) -> list[dict]:
         params = [d_from, d_to]
-        where  = "fecha BETWEEN ? AND ?"
+        # Exclude NC (no-count-for-production) rows from every dashboard KPI.
+        where  = "fecha BETWEEN ? AND ? AND COALESCE(count_production, 1) = 1"
         if region:
             where += " AND region = ?"
             params.append(region)
@@ -1483,9 +2631,93 @@ class DashboardTab(QWidget):
         h, m = divmod(int(total_down), 60)
         self.kpi_down.set_value(f"{int(total_down)}m" if h == 0 else f"{h}h {m}m")
 
+        # Donut: UE by Source (REG / OT).
+        ue_reg = sum(r["ue"] for r in reg_rows)
+        ue_ot = sum(r["ue"] for r in ot_rows)
+        self.donut_source.set_data(
+            [("REG", ue_reg, "#1F6FEB"), ("OT", ue_ot, "#F0883E")],
+            subtitle=f"% of {ue_reg + ue_ot:.2f} total UE",
+        )
+
+        # Donut: UE by Case Type (groups all rows by tipo_caso → sums UE).
+        by_type: dict[str, float] = {}
+        for r in (reg_rows + ot_rows):
+            t = (r.get("tipo") or r.get("type") or "Other") or "Other"
+            by_type[t] = by_type.get(t, 0.0) + r["ue"]
+        # Palette by type — stable per name.
+        palette = [
+            "#1F6FEB", "#F0883E", "#3FB950", "#A371F7", "#D29922",
+            "#E84393", "#00B5D8", "#7C4DFF", "#9CCC65", "#FF6B61",
+        ]
+        type_slices = [
+            (k, v, palette[sum(ord(c) for c in k) % len(palette)])
+            for k, v in sorted(by_type.items(), key=lambda x: -x[1])
+        ]
+        self.donut_type.set_data(
+            type_slices,
+            subtitle=f"% of {sum(by_type.values()):.2f} total UE",
+        )
+
     # ------------------------------------------------------------------
     # Charts update
     # ------------------------------------------------------------------
+
+    def _sync_chart_sliders(self):
+        """Show/hide + size the bar/line sliders based on total days and
+        push the current window slice into the chart widgets."""
+        # Bar
+        n = len(self._bar_full[0])
+        w = self._bar_window_size
+        if n > w:
+            self._bar_slider.blockSignals(True)
+            self._bar_slider.setRange(0, n - w)
+            # Default: latest window.
+            self._bar_slider.setValue(n - w)
+            self._bar_slider.blockSignals(False)
+            self._bar_slider.setVisible(True)
+        else:
+            self._bar_slider.setVisible(False)
+        self._apply_bar_window()
+
+        # Line
+        n2 = len(self._line_full[0])
+        if n2 > self._line_window_size:
+            self._line_slider.blockSignals(True)
+            self._line_slider.setRange(0, n2 - self._line_window_size)
+            self._line_slider.setValue(n2 - self._line_window_size)
+            self._line_slider.blockSignals(False)
+            self._line_slider.setVisible(True)
+        else:
+            self._line_slider.setVisible(False)
+        self._apply_line_window()
+
+    def _apply_bar_window(self):
+        labels, ue_reg, ue_ot = self._bar_full
+        if not labels:
+            self._bar.set_data([], [("REG", _BLUE, []), ("OT", _ORANGE, [])])
+            return
+        n = len(labels)
+        w = min(self._bar_window_size, n)
+        start = self._bar_slider.value() if self._bar_slider.isVisible() else 0
+        start = max(0, min(start, max(0, n - w)))
+        end = start + w
+        self._bar.set_data(
+            labels[start:end],
+            [("REG", _BLUE, ue_reg[start:end]),
+             ("OT",  _ORANGE, ue_ot[start:end])],
+        )
+
+    def _apply_line_window(self):
+        labels, vals = self._line_full
+        if not labels:
+            self._line.set_data([], [], ref_line=100.0)
+            return
+        n = len(labels)
+        w = min(self._line_window_size, n)
+        start = self._line_slider.value() if self._line_slider.isVisible() else 0
+        start = max(0, min(start, max(0, n - w)))
+        end = start + w
+        self._line.set_data(labels[start:end], vals[start:end], ref_line=100.0)
 
     def _update_charts(self, reg_rows, ot_rows):
         daily: dict[str, dict] = defaultdict(
@@ -1516,8 +2748,12 @@ class DashboardTab(QWidget):
             for d in dates
         ]
 
-        self._bar.set_data(short, [("REG", _BLUE, ue_reg), ("OT", _ORANGE, ue_ot)])
-        self._line.set_data(short, avg_eff, ref_line=100.0)
+        # Cache the full series so the sliders can paginate without
+        # touching the DB again. The slider is only visible when the
+        # window-size threshold is exceeded.
+        self._bar_full = (short, ue_reg, ue_ot)
+        self._line_full = (short, avg_eff)
+        self._sync_chart_sliders()
 
         by_region: dict[str, float] = defaultdict(float)
         by_type:   dict[str, float] = defaultdict(float)
@@ -1590,6 +2826,8 @@ class DashboardTab(QWidget):
         sum_eff = 0.0
         eff_count = 0
         cases_ue = 0.0
+        ue_reg = 0.0
+        ue_ot = 0.0
         dt_min = 0.0
         active_days: set = set()
         try:
@@ -1602,24 +2840,28 @@ class DashboardTab(QWidget):
                     f"SUM(CASE WHEN efficiency BETWEEN 0 AND 1000 THEN 1 ELSE 0 END), "
                     f"SUM(case_value) "
                     f"FROM {table} WHERE fecha BETWEEN ? AND ? "
+                    f"AND COALESCE(count_production, 1) = 1 "
                     f"GROUP BY fecha, region, tipo_caso",
                     [d_from, d_to],
                 )
                 for fecha, reg, tipo_c, cnt, s_eff, c_eff, sum_cv in cur.fetchall():
                     cnt = cnt or 0
-                    if is_ot:
-                        ot_cases += cnt
-                    else:
-                        reg_cases += cnt
-                    sum_eff += s_eff or 0.0
-                    eff_count += c_eff or 0
-                    cases_ue += calculate_equivalent_units(
+                    bucket_ue = calculate_equivalent_units(
                         units_eq,
                         reg or "",
                         tipo_c or "",
                         (sum_cv or 0.0),
                         count=cnt,
                     )
+                    cases_ue += bucket_ue
+                    if is_ot:
+                        ot_cases += cnt
+                        ue_ot += bucket_ue
+                    else:
+                        reg_cases += cnt
+                        ue_reg += bucket_ue
+                    sum_eff += s_eff or 0.0
+                    eff_count += c_eff or 0
                     if fecha and cnt > 0:
                         active_days.add(fecha)
 
@@ -1648,7 +2890,10 @@ class DashboardTab(QWidget):
             "total_cases": reg_cases + ot_cases,
             "ue_no_dt": cases_ue,
             "ue_with_dt": ue_with_dt,
+            "ue_reg": ue_reg,
+            "ue_ot": ue_ot,
             "dt_min": dt_min,
+            "downtime_min": dt_min,
             "avg_eff": avg_eff,
             "active_days": len(active_days),
         }
@@ -1737,22 +2982,24 @@ class DashboardTab(QWidget):
             mon, sun = self._iso_week_range(y, w)
             ranges.append((f"Week {w} {y}", mon.isoformat(), sun.isoformat()))
 
+        # New table shape: Period | UE (REG) | Total UE | Downtime (m) | Cases
         self.tbl_period.setRowCount(len(ranges))
+        self.tbl_period.verticalHeader().setDefaultSectionSize(30)
         for row, (label, d_from, d_to) in enumerate(ranges):
             m = self._query_period_metrics(d_from, d_to)
-            active = m["active_days"]
-            avg_no_dt = m["ue_no_dt"]   / active if active else 0.0
-            avg_w_dt  = m["ue_with_dt"] / active if active else 0.0
-            range_str = d_from if d_from == d_to else f"{d_from} → {d_to}"
+            reg_ue = m.get("ue_reg")
+            ot_ue = m.get("ue_ot") or 0.0
+            if reg_ue is None:
+                reg_ue = m.get("ue_no_dt", 0.0)
+            total_ue = reg_ue + ot_ue
+            downtime_min = m.get("downtime_min", 0)
+            cases_label = f"{m['total_cases']} ({m['reg_cases']}R/{m['ot_cases']}OT)"
             _fill_row(self.tbl_period, row, [
                 label,
-                range_str,
-                f"{m['ue_no_dt']:.2f}",
-                f"{m['ue_with_dt']:.2f}",
-                f"{avg_no_dt:.2f}",
-                f"{avg_w_dt:.2f}",
-                f"{m['avg_eff']:.1f}%",
-                f"{m['total_cases']} ({m['reg_cases']}R/{m['ot_cases']}OT)",
+                f"{reg_ue:.2f}",
+                f"{total_ue:.2f}",
+                f"{int(downtime_min)}",
+                cases_label,
             ])
 
     def _query_top_doctor(self, d_from: str, d_to: str):
@@ -1789,11 +3036,15 @@ class DashboardTab(QWidget):
             return 0
 
     def _update_advice(self, reg_rows, ot_rows, down_map, d_from: str, d_to: str):
-        # Clear previous items
+        # Clear previous items but keep the trailing stretch alive.
         while self._advice_layout.count():
             item = self._advice_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            if item is None:
+                break
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._advice_layout.addStretch(1)
 
         advice: list[tuple[str, str]] = []
 
@@ -1970,13 +3221,17 @@ class DashboardTab(QWidget):
         if total_all == 0:
             advice.append(("info", "No cases found for the selected filters and date range."))
 
+        def _insert(item):
+            # Insert above the trailing stretch.
+            self._advice_layout.insertWidget(
+                self._advice_layout.count() - 1, item,
+            )
+
         for kind, text in advice:
-            self._advice_layout.addWidget(_AdviceItem(kind, text))
+            _insert(_AdviceItem(kind, text))
 
         if not advice:
-            self._advice_layout.addWidget(
-                _AdviceItem("good", "Everything looks normal for the selected period.")
-            )
+            _insert(_AdviceItem("good", "Everything looks normal for the selected period."))
 
     # ------------------------------------------------------------------
     # Daily table update

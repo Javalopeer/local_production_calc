@@ -108,6 +108,194 @@ def load_standards_data(force: bool = False) -> Dict[str, dict]:
     return _standards_cache
 
 
+# ── Versioned standards (effective-from) ─────────────────────────────
+
+_standards_snapshot_cache: Dict[str, Dict[str, dict]] = {}
+
+
+def _seed_standards_history_if_empty():
+    """If the standards_history table is empty, snapshot the current
+    standards.json + units_eq.json under effective_date='2000-01-01' so
+    every historical case has a baseline to look up against."""
+    from db.database import get_connection
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM standards_history")
+        if (cur.fetchone() or [0])[0] > 0:
+            return  # already seeded
+        std = load_standards_data() or {}
+        ue = load_units_eq_data() or {}
+        now = ""
+        try:
+            from datetime import datetime as _dt
+            now = _dt.now().isoformat(timespec="seconds")
+        except Exception:
+            pass
+        rows = []
+        for region, data in std.items():
+            aligners = (data or {}).get("Aligners", {}) or {}
+            for tipo, std_time in aligners.items():
+                ue_val = None
+                reg_ue = ue.get(region, {}) or {}
+                if isinstance(reg_ue, dict):
+                    v = reg_ue.get(tipo)
+                    if isinstance(v, (int, float)):
+                        ue_val = float(v)
+                rows.append((
+                    "2000-01-01", region, tipo,
+                    float(std_time) if std_time is not None else None,
+                    ue_val, now,
+                ))
+        if rows:
+            cur.executemany(
+                "INSERT INTO standards_history"
+                " (effective_date, region, tipo_caso, std_time, ue_value, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+            print(f"[utils] Seeded standards_history with {len(rows)} baseline rows.")
+        conn.close()
+    except Exception as exc:
+        print(f"[utils] _seed_standards_history_if_empty failed: {exc}")
+
+
+def get_standards_snapshot_for_date(fecha: str) -> Dict[str, Dict[str, float]]:
+    """Return the standards dict that was effective on ``fecha`` (ISO
+    date string). The result looks the same as load_standards_data
+    output but mirrors the snapshot row active on that date.
+
+    Cached per-date so repeated lookups in a single render pass are
+    cheap. Call invalidate_standards_snapshot_cache() after import.
+    """
+    if not fecha:
+        return load_standards_data() or {}
+    cached = _standards_snapshot_cache.get(fecha)
+    if cached is not None:
+        return cached
+
+    from db.database import get_connection
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        # For each (region, tipo) pick the most recent row with
+        # effective_date <= fecha.
+        cur.execute(
+            "SELECT region, tipo_caso, std_time, MAX(effective_date)"
+            " FROM standards_history"
+            " WHERE effective_date <= ?"
+            " GROUP BY region, tipo_caso",
+            (fecha,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as exc:
+        print(f"[utils] get_standards_snapshot_for_date({fecha}) failed: {exc}")
+        return load_standards_data() or {}
+
+    snap: Dict[str, Dict[str, dict]] = {}
+    for region, tipo, std_time, _eff in rows:
+        if std_time is None:
+            continue
+        snap.setdefault(region, {}).setdefault("Aligners", {})[tipo] = float(std_time)
+    if not snap:
+        snap = load_standards_data() or {}
+    _standards_snapshot_cache[fecha] = snap
+    return snap
+
+
+def get_ue_snapshot_for_date(fecha: str) -> Dict[str, Dict[str, float]]:
+    """Same idea as get_standards_snapshot_for_date but for UE values."""
+    if not fecha:
+        return load_units_eq_data() or {}
+    from db.database import get_connection
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT region, tipo_caso, ue_value, MAX(effective_date)"
+            " FROM standards_history"
+            " WHERE effective_date <= ? AND ue_value IS NOT NULL"
+            " GROUP BY region, tipo_caso",
+            (fecha,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as exc:
+        print(f"[utils] get_ue_snapshot_for_date({fecha}) failed: {exc}")
+        return load_units_eq_data() or {}
+    out: Dict[str, Dict[str, float]] = {}
+    for region, tipo, ue_val, _eff in rows:
+        out.setdefault(region, {})[tipo] = float(ue_val)
+    if not out:
+        out = load_units_eq_data() or {}
+    return out
+
+
+def invalidate_standards_snapshot_cache():
+    """Clear the per-date snapshot cache. Call after a new import has
+    added a row to standards_history."""
+    _standards_snapshot_cache.clear()
+
+
+def append_standards_snapshot(effective_date: str, standards: dict, units_eq: dict):
+    """Insert a brand-new snapshot of (standards, units_eq) effective
+    from ``effective_date`` (YYYY-MM-DD). The previous snapshot keeps
+    serving cases dated before that day."""
+    from db.database import get_connection
+    from datetime import datetime as _dt
+    now = _dt.now().isoformat(timespec="seconds")
+    rows = []
+    for region, data in (standards or {}).items():
+        aligners = (data or {}).get("Aligners", {}) or {}
+        for tipo, std_time in aligners.items():
+            ue_val = None
+            reg_ue = (units_eq or {}).get(region, {}) or {}
+            if isinstance(reg_ue, dict):
+                v = reg_ue.get(tipo)
+                if isinstance(v, (int, float)):
+                    ue_val = float(v)
+            rows.append((
+                effective_date, region, tipo,
+                float(std_time) if std_time is not None else None,
+                ue_val, now,
+            ))
+    if not rows:
+        return 0
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.executemany(
+        "INSERT INTO standards_history"
+        " (effective_date, region, tipo_caso, std_time, ue_value, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    invalidate_standards_snapshot_cache()
+    return len(rows)
+
+
+def list_standards_snapshots():
+    """Return [(effective_date, row_count, created_at), …] for the UI list."""
+    from db.database import get_connection
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT effective_date, COUNT(*), MIN(created_at)"
+            " FROM standards_history"
+            " GROUP BY effective_date"
+            " ORDER BY effective_date DESC"
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
 def _norm(s: str) -> str:
     """Normalise a region name for fuzzy matching (lower-case, alphanum only)."""
     return re.sub(r"[^a-z0-9]", "", s.lower()) if s else ""

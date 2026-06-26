@@ -187,7 +187,7 @@ def create_presentation():
     _add_text_box(slide, Inches(1), Inches(5.5), Inches(5), Inches(0.4),
                   "Desarrollado por: Gerardo", font_size=16, color=LIGHT_BLUE)
     _add_text_box(slide, Inches(1), Inches(5.9), Inches(5), Inches(0.4),
-                  "Versión 1.1.4  •  Marzo 2026", font_size=14,
+                  "Versión 1.1.5  •  Marzo 2026", font_size=14,
                   color=RGBColor(0x88, 0x99, 0xBB))
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -580,7 +580,7 @@ def create_presentation():
                   alignment=PP_ALIGN.CENTER)
 
     _add_text_box(slide, Inches(1), Inches(3.6), Inches(11.33), Inches(0.6),
-                  "ProductionCalcApp v1.1.4", font_size=22, color=LIGHT_BLUE,
+                  "ProductionCalcApp v1.1.5", font_size=22, color=LIGHT_BLUE,
                   alignment=PP_ALIGN.CENTER)
 
     _add_text_box(slide, Inches(1), Inches(4.3), Inches(11.33), Inches(0.6),

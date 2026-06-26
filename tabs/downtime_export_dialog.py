@@ -59,7 +59,7 @@ class DowntimeExportDialog(QDialog):
         open_btn.setStyleSheet(
             "QPushButton { background: #388BFD; color: white; font-weight: 600; "
             "padding: 6px 12px; border-radius: 4px; border: none; }"
-            "QPushButton:hover { background: #1F6FEB; }"
+            "QPushButton:hover { background: #1757D4; }"
         )
         open_btn.clicked.connect(self._open_url)
         layout.addWidget(open_btn)

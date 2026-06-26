@@ -2585,7 +2585,18 @@ def audit_dashboard_vs_summaries(productions_dir: str | None = None
 
     rows_by_date = _collect_summary_rows(productions_dir)
 
+    # Designers whose summary file exists ANYWHERE (any date). Used below to
+    # distinguish "stale snapshot" issues from "this designer never synced
+    # their summary back to the shared folder".
+    all_summary_designers: set[str] = set()
+    for _date_rows in rows_by_date.values():
+        all_summary_designers.update(_date_rows.keys())
+
     issues: dict[str, dict] = {}
+    # Designers seen in some snapshot whose summary file isn't anywhere —
+    # almost always a OneDrive sync issue on their machine, not a data bug.
+    # Collected once and surfaced at the top of the report.
+    not_synced_designers: set[str] = set()
     # Dashboard sheet columns: 1 Designer, 2 Cases%, 3 DT%, 4 Total%,
     # 5 UE(Cases), 6 UE(Total), 7 RegCases, ...
     # Summary row cols (newest schema, 32): 1 Date, 2 Week, 3 Cases%, 4 DT%,
@@ -2640,7 +2651,11 @@ def audit_dashboard_vs_summaries(productions_dir: str | None = None
             if not row or not row[0]:
                 continue
             name = str(row[0]).strip()
-            if name.lower() in ("designer", "team total", "total"):
+            low = name.lower()
+            # Aggregate / header rows that never have a matching summary row.
+            if low in ("designer", "team total", "total"):
+                continue
+            if low.startswith("team avg"):
                 continue
             snap_designers[name] = row
         wb.close()
@@ -2650,7 +2665,18 @@ def audit_dashboard_vs_summaries(productions_dir: str | None = None
         sum_names = set(summary_map.keys())
 
         missing_in_snap = sorted(sum_names - snap_names)
-        missing_in_sum = sorted(snap_names - sum_names)
+        # Split "missing in summary" into two buckets:
+        #   - stale: designer has a summary somewhere, just not for THIS date
+        #     (real data issue — summary may be older than snapshot)
+        #   - not_synced: designer's summary file isn't anywhere → most
+        #     likely OneDrive sync broken on their PC, not our problem to
+        #     flag per-date. Tracked once globally.
+        missing_in_sum = []
+        for n in sorted(snap_names - sum_names):
+            if n in all_summary_designers:
+                missing_in_sum.append(n)
+            else:
+                not_synced_designers.add(n)
 
         mismatches: list[tuple] = []
         for name in sorted(snap_names & sum_names):
@@ -2670,13 +2696,32 @@ def audit_dashboard_vs_summaries(productions_dir: str | None = None
             }
 
     # Build report text
-    if not issues:
-        return issues, (
-            f"Audit OK — checked {len(snapshot_files)} snapshot(s). "
-            f"No discrepancies found."
+    header_lines: list[str] = []
+    if not_synced_designers:
+        header_lines.append(
+            f"Designers whose _Summary.xlsx was not found in the shared "
+            f"folder (likely OneDrive sync issue on their PC — not a data "
+            f"bug):"
         )
+        for n in sorted(not_synced_designers):
+            header_lines.append(f"  - {n}")
+        header_lines.append("")
 
-    lines = [f"Audit found issues in {len(issues)} of {len(snapshot_files)} snapshot(s):"]
+    if not issues:
+        msg = f"Audit OK — checked {len(snapshot_files)} snapshot(s). "
+        if not_synced_designers:
+            msg += (
+                f"{len(not_synced_designers)} designer(s) missing their "
+                "summary file (see report)."
+            )
+            return {"_not_synced": sorted(not_synced_designers)}, \
+                   "\n".join(header_lines) + "\n" + msg
+        return issues, msg + "No discrepancies found."
+
+    lines = list(header_lines)
+    lines.append(
+        f"Audit found issues in {len(issues)} of {len(snapshot_files)} snapshot(s):"
+    )
     for d in sorted(issues.keys()):
         info = issues[d]
         lines.append(f"\n[{d}]")
