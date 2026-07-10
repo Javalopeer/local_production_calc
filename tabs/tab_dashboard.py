@@ -1700,22 +1700,24 @@ class DashboardTab(QWidget):
         pl.addWidget(_d)
 
         self.tbl_period = _make_table([
-            "Period", "UE (REG)", "Total UE", "Downtime (m)", "Cases",
+            "Period",
+            "Avg UE (REG)",
+            "Avg DT (m)",
+            "Cases",
         ])
         self.tbl_period.setMinimumHeight(240)
         self.tbl_period.setMaximumHeight(320)
         self.tbl_period.setAlternatingRowColors(False)
         self.tbl_period.setShowGrid(False)
         _th = self.tbl_period.horizontalHeader()
-        # Period + Cases stretch; UE columns + Downtime are fixed narrow.
+        # Period + Cases stretch; UE + Downtime are fixed narrow. OT excluded
+        # from UE — OT is tracked entirely separately.
         _th.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         _th.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         _th.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        _th.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        _th.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.tbl_period.setColumnWidth(1, 64)   # UE (REG)
-        self.tbl_period.setColumnWidth(2, 64)   # Total UE
-        self.tbl_period.setColumnWidth(3, 88)   # Downtime (m)
+        _th.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.tbl_period.setColumnWidth(1, 104)  # UE (REG)
+        self.tbl_period.setColumnWidth(2, 96)   # Downtime (m)
         _th.setStretchLastSection(False)
         _th.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         pl.addWidget(self.tbl_period)
@@ -2441,7 +2443,15 @@ class DashboardTab(QWidget):
                     if not row or row[0] != target_date:
                         continue
                     pct = self._parse_pct(row[4]) if len(row) > 4 else 0.0
-                    ue = float(row[7] or 0) if len(row) > 7 else 0.0
+                    # Per-designer _Summary.xlsx columns (1-indexed):
+                    #   1 Date · 2 Week · 3 Cases% · 4 Downtime% · 5 Total%
+                    #   6 Reg Cases · 7 OT Cases · 8 UE (Total) · 9 UE (Cases)
+                    # We surface UE (Cases) — pure case UE without the
+                    # downtime credit — so the Team dashboard reflects
+                    # work output only.
+                    ue = float(row[8] or 0) if len(row) > 8 else (
+                        float(row[7] or 0) if len(row) > 7 else 0.0
+                    )
                     reg_cases = int(row[5] or 0) if len(row) > 5 else 0
                     ot_cases = int(row[6] or 0) if len(row) > 6 else 0
                     cases = reg_cases + ot_cases
@@ -2830,6 +2840,7 @@ class DashboardTab(QWidget):
         ue_ot = 0.0
         dt_min = 0.0
         active_days: set = set()
+        reg_days: set = set()   # distinct dates with REG cases — the worked days
         try:
             conn = get_connection()
             cur = conn.cursor()
@@ -2864,6 +2875,8 @@ class DashboardTab(QWidget):
                     eff_count += c_eff or 0
                     if fecha and cnt > 0:
                         active_days.add(fecha)
+                        if not is_ot:
+                            reg_days.add(fecha)
 
             # Approved downtime in range (matches daily_performance.py filter)
             cur.execute(
@@ -2896,6 +2909,7 @@ class DashboardTab(QWidget):
             "downtime_min": dt_min,
             "avg_eff": avg_eff,
             "active_days": len(active_days),
+            "reg_days": len(reg_days),
         }
 
     @staticmethod
@@ -2982,23 +2996,29 @@ class DashboardTab(QWidget):
             mon, sun = self._iso_week_range(y, w)
             ranges.append((f"Week {w} {y}", mon.isoformat(), sun.isoformat()))
 
-        # New table shape: Period | UE (REG) | Total UE | Downtime (m) | Cases
+        # New table shape: Period | UE (REG) | Downtime (m) | Cases
+        # Each numeric column is an AVERAGE per active workday — matches the
+        # weekly reports the team receives so the user can validate that
+        # local data lines up with the shared dashboard.
         self.tbl_period.setRowCount(len(ranges))
         self.tbl_period.verticalHeader().setDefaultSectionSize(30)
         for row, (label, d_from, d_to) in enumerate(ranges):
             m = self._query_period_metrics(d_from, d_to)
             reg_ue = m.get("ue_reg")
-            ot_ue = m.get("ue_ot") or 0.0
             if reg_ue is None:
                 reg_ue = m.get("ue_no_dt", 0.0)
-            total_ue = reg_ue + ot_ue
             downtime_min = m.get("downtime_min", 0)
+            active = max(1, int(m.get("active_days", 0) or 0))
+            # UE average: divide by worked days = days with REG cases only
+            # (Mon–Fri; Saturday is an OT-only day and must not dilute REG).
+            reg_worked = max(1, int(m.get("reg_days", 0) or 0))
+            avg_reg_ue = reg_ue / reg_worked
+            avg_downtime = downtime_min / active
             cases_label = f"{m['total_cases']} ({m['reg_cases']}R/{m['ot_cases']}OT)"
             _fill_row(self.tbl_period, row, [
                 label,
-                f"{reg_ue:.2f}",
-                f"{total_ue:.2f}",
-                f"{int(downtime_min)}",
+                f"{avg_reg_ue:.2f}",
+                f"{int(round(avg_downtime))}",
                 cases_label,
             ])
 

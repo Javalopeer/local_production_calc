@@ -667,6 +667,32 @@ def _run_schema_migrations(conn) -> int:
     # Category classification (Software Issue / Doctor Inquiry / Other).
     _ensure_column(cursor, "cases_review", "category", "category TEXT DEFAULT ''")
 
+    # Case time segments — one row per work session for a case. Lets us
+    # accumulate real time when a case is sent to reprocess / a doctor for
+    # review and then comes back: each return adds a new segment, total
+    # time = SUM(end - start) across segments. Cases that never re-enter
+    # the workflow have at most one segment (created implicitly on save)
+    # so the existing hora_inicio/hora_fin columns remain authoritative
+    # for them.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS case_segments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_db_id INTEGER NOT NULL,
+            table_name TEXT NOT NULL,
+            fecha TEXT NOT NULL,
+            hora_inicio TEXT NOT NULL,
+            hora_fin TEXT NOT NULL,
+            note TEXT DEFAULT '',
+            created_at TEXT DEFAULT ''
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_case_segments_lookup"
+        " ON case_segments(table_name, case_db_id)"
+    )
+
     return version
 
 
@@ -788,3 +814,145 @@ def init_db():
         conn.close()
 
     print(f"Database initialized - Schema version: {final_version}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case time-segment helpers
+#
+# A "segment" is one start/end window of actual work on a case. Most cases
+# only ever have one segment (the original save). When a case gets sent
+# back internally (NC + reprocess / doctor review / etc.) and later
+# returns, the user adds a new segment per re-entry. Total accumulated
+# real time = SUM(end - start) across all segments.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _hhmm_to_minutes(hhmm: str) -> int:
+    """Convert 'HH:MM' to minutes since midnight. Returns 0 on bad input."""
+    try:
+        h, m = hhmm.split(":")[:2]
+        return int(h) * 60 + int(m)
+    except Exception:
+        return 0
+
+
+def _segment_duration_minutes(start: str, end: str) -> int:
+    """Minute count between two 'HH:MM' values. Same-day only (no wrap)."""
+    s = _hhmm_to_minutes(start)
+    e = _hhmm_to_minutes(end)
+    return max(0, e - s)
+
+
+def list_case_segments(case_db_id: int, table_name: str) -> list:
+    """Return all segments for a case, oldest first. Each element is a
+    dict {id, fecha, hora_inicio, hora_fin, note, created_at}."""
+    if not case_db_id or table_name not in ("cases", "ot_cases"):
+        return []
+    rows: list = []
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, fecha, hora_inicio, hora_fin, note, created_at "
+            "FROM case_segments "
+            "WHERE case_db_id = ? AND table_name = ? "
+            "ORDER BY fecha, hora_inicio, id",
+            (case_db_id, table_name),
+        )
+        for r in cur.fetchall():
+            rows.append({
+                "id": r[0], "fecha": r[1],
+                "hora_inicio": r[2], "hora_fin": r[3],
+                "note": r[4] or "", "created_at": r[5] or "",
+            })
+        conn.close()
+    except Exception as exc:
+        log_event("db", f"list_case_segments: {exc}", level="WARN")
+    return rows
+
+
+def add_case_segment(case_db_id: int, table_name: str, fecha: str,
+                      hora_inicio: str, hora_fin: str, note: str = "") -> int:
+    """Insert one segment row. Returns the new row's id, or 0 on failure."""
+    if not case_db_id or table_name not in ("cases", "ot_cases"):
+        return 0
+    from datetime import datetime as _dtnow
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO case_segments "
+            "(case_db_id, table_name, fecha, hora_inicio, hora_fin, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (case_db_id, table_name, fecha, hora_inicio, hora_fin,
+             note or "", _dtnow.now().isoformat(timespec="seconds")),
+        )
+        new_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return new_id or 0
+    except Exception as exc:
+        log_event("db", f"add_case_segment: {exc}", level="WARN")
+        return 0
+
+
+def update_case_segment(segment_id: int, *, fecha: str | None = None,
+                         hora_inicio: str | None = None,
+                         hora_fin: str | None = None,
+                         note: str | None = None) -> bool:
+    """Patch one or more fields of an existing segment."""
+    if not segment_id:
+        return False
+    fields = {}
+    if fecha is not None:        fields["fecha"] = fecha
+    if hora_inicio is not None:  fields["hora_inicio"] = hora_inicio
+    if hora_fin is not None:     fields["hora_fin"] = hora_fin
+    if note is not None:         fields["note"] = note
+    if not fields:
+        return True
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        cur.execute(
+            f"UPDATE case_segments SET {set_clause} WHERE id = ?",
+            (*fields.values(), segment_id),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as exc:
+        log_event("db", f"update_case_segment({segment_id}): {exc}", level="WARN")
+        return False
+
+
+def delete_case_segment(segment_id: int) -> bool:
+    """Remove a single segment row."""
+    if not segment_id:
+        return False
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM case_segments WHERE id = ?", (segment_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as exc:
+        log_event("db", f"delete_case_segment({segment_id}): {exc}", level="WARN")
+        return False
+
+
+def get_case_total_minutes(case_db_id: int, table_name: str,
+                            fallback_start: str = "",
+                            fallback_end: str = "") -> int:
+    """Return the accumulated work minutes for a case.
+
+    Sums the duration of every segment if any exist, otherwise falls back
+    to the case's own hora_inicio/hora_fin (so cases that never used the
+    multi-segment flow keep behaving exactly like before)."""
+    segs = list_case_segments(case_db_id, table_name)
+    if segs:
+        return sum(
+            _segment_duration_minutes(s["hora_inicio"], s["hora_fin"])
+            for s in segs
+        )
+    return _segment_duration_minutes(fallback_start or "", fallback_end or "")

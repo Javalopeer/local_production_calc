@@ -323,6 +323,48 @@ class RegisterTab(QWidget):
         _apply_count_lbl(False)
         toggle_row.addWidget(count_lbl)
         toggle_row.addStretch()
+        # Small icon button to view/edit work segments. Only enabled when
+        # editing an NC case that has 2+ accumulated segments — for a
+        # fresh form or a single-session case it's disabled placeholder.
+        from PySide6.QtWidgets import QToolButton as _QTB_seg
+        self._segments_btn = _QTB_seg()
+        self._segments_btn.setCursor(Qt.PointingHandCursor)
+        self._segments_btn.setFixedSize(28, 28)
+        self._segments_btn.setToolTip("View / edit work time segments")
+        self._segments_btn.setEnabled(False)
+        try:
+            from .tabler_icons import TablerIcon as _TI_seg
+            from PySide6.QtGui import QColor as _QC_seg
+            from PySide6.QtCore import QSize as _QS_seg
+            self._segments_btn.setIcon(
+                _TI_seg("tabler_clock.svg").icon(color=_QC_seg("#8B949E"))
+            )
+            self._segments_btn.setIconSize(_QS_seg(15, 15))
+        except Exception:
+            self._segments_btn.setText("⏱")
+
+        def _apply_seg_btn(is_light: bool, _b=self._segments_btn):
+            p = _pal_kpi(is_light)
+            try:
+                from .tabler_icons import TablerIcon as _TI_segp
+                from PySide6.QtGui import QColor as _QC_segp
+                _b.setIcon(
+                    _TI_segp("tabler_clock.svg").icon(color=_QC_segp(p["muted"]))
+                )
+            except Exception:
+                pass
+            hover = "rgba(0,0,0,0.06)" if is_light else "rgba(255,255,255,0.06)"
+            _b.setStyleSheet(
+                f"QToolButton {{ background: transparent;"
+                f"  border: 1px solid {p['border_strong']};"
+                f"  border-radius: 6px; padding: 0; }}"
+                f"QToolButton:hover:enabled {{ background: {hover}; }}"
+                f"QToolButton:disabled {{ border-color: {p['border']}; }}"
+            )
+        self._segments_btn.apply_palette = _apply_seg_btn
+        _apply_seg_btn(False)
+        self._segments_btn.clicked.connect(self._open_segments_dialog)
+        toggle_row.addWidget(self._segments_btn)
         toggle_row.addWidget(self.count_toggle)
         # Use the form's spanning row form (single widget, no separate label).
         form.addRow(toggle_holder)
@@ -2929,6 +2971,19 @@ class RegisterTab(QWidget):
         self._edit_banner_label.setText(f"Case  {row[0]}")
         self._show_edit_banner(is_ot=False)
         self._reset_result_kpi()
+        # NC cases coming back from reprocess get a follow-up prompt for
+        # an additional time segment. Single-segment cases stay simple.
+        self._editing_table_name = "cases"
+        # NC case coming back from reprocess → auto-stack the previous
+        # start/end into the segments table and reset the form to a
+        # fresh session window. The user keeps editing in Case
+        # Information; total real time accumulates in segments.
+        if not bool(count_prod):
+            self._auto_stack_prior_session(
+                db_id, "cases",
+                prior_fecha=row[4], prior_start=row[5], prior_end=row[6],
+            )
+        self._refresh_segments_btn_state()
 
     def load_ot_case_for_edit(self, db_id: int):
         """Load an OT case from ot_cases into the form for editing."""
@@ -2969,6 +3024,418 @@ class RegisterTab(QWidget):
         self._edit_banner_label.setText(f"Case  {row[0]}")
         self._show_edit_banner(is_ot=True)
         self._reset_result_kpi()
+        self._editing_table_name = "ot_cases"
+        if not bool(count_prod):
+            self._auto_stack_prior_session(
+                db_id, "ot_cases",
+                prior_fecha=row[4], prior_start=row[5], prior_end=row[6],
+            )
+        self._refresh_segments_btn_state()
+
+    # ──────────────────────────────────────────────────────────────────
+    # Multi-segment work time tracking (NC reprocess flow)
+    # ──────────────────────────────────────────────────────────────────
+
+    def _current_editing_table(self) -> str:
+        """Return 'cases' or 'ot_cases' for the active edit, or '' if none."""
+        return getattr(self, "_editing_table_name", "") or ""
+
+    def _refresh_segments_btn_state(self):
+        """Enable the clock-segments button when the case in edit mode has
+        at least one extra segment beyond the implicit start/end pair."""
+        btn = getattr(self, "_segments_btn", None)
+        if btn is None:
+            return
+        editing_id = getattr(self, "_editing_id", None)
+        table = self._current_editing_table()
+        if not editing_id or not table:
+            btn.setEnabled(False)
+            return
+        from db.database import list_case_segments
+        segs = list_case_segments(int(editing_id), table)
+        btn.setEnabled(len(segs) >= 1)
+
+    def _auto_stack_prior_session(self, case_db_id: int, table_name: str,
+                                    *, prior_fecha: str,
+                                    prior_start: str, prior_end: str):
+        """Push the case's existing hora_inicio/hora_fin into the segments
+        table and reset the Start/End form fields so the user can record
+        the current return session over a clean window."""
+        from db.database import (
+            list_case_segments, add_case_segment, _segment_duration_minutes,
+        )
+        # Skip when the row carries no useful range (defensive guard).
+        if not prior_start or not prior_end:
+            return
+        if _segment_duration_minutes(prior_start, prior_end) <= 0:
+            return
+        # Avoid duplicate stacking — only stack when the row's current
+        # values aren't already the latest segment row.
+        segs = list_case_segments(int(case_db_id), table_name)
+        already = bool(segs) and (
+            segs[-1].get("fecha") == prior_fecha
+            and segs[-1].get("hora_inicio") == prior_start
+            and segs[-1].get("hora_fin") == prior_end
+        )
+        if not already:
+            add_case_segment(
+                int(case_db_id), table_name,
+                prior_fecha or "", prior_start, prior_end,
+                note="auto-stacked on edit",
+            )
+        # Reset the visible Start/End so the user captures the new session.
+        try:
+            self.start_time.setTime(QTime.currentTime())
+            self.end_time.setTime(QTime(0, 0))
+        except Exception:
+            pass
+        # Friendly toast so the user sees the stacking happened.
+        try:
+            self._set_result_status(
+                f"Previous session ({prior_start} – {prior_end}) archived "
+                "in Work time segments. Log this return session in Start / End.",
+                "#58A6FF",
+            )
+        except Exception:
+            pass
+
+    def _maybe_prompt_new_segment(self):
+        """LEGACY — kept for backwards compatibility but no longer used.
+        Auto-stacking via :meth:`_auto_stack_prior_session` replaced the
+        explicit prompt."""
+        editing_id = getattr(self, "_editing_id", None)
+        table = self._current_editing_table()
+        if not editing_id or not table:
+            return
+        try:
+            from qfluentwidgets import MessageBoxBase
+        except Exception:
+            MessageBoxBase = None
+        if MessageBoxBase is None:
+            return
+        from PySide6.QtGui import QColor as _QC_seg
+        from PySide6.QtCore import QSize as _QS_seg
+        from PySide6.QtWidgets import QToolButton as _QTB_segp
+
+        class _AskNewSegmentSheet(MessageBoxBase):
+            def __init__(_s, h):
+                super().__init__(h.window())
+                try:
+                    _s.setMaskColor(_QC_seg(0, 0, 0, 170))
+                except Exception:
+                    pass
+                _s.widget.setObjectName("askSegCard")
+                apply_fluent_modal_palette(_s, "askSegCard")
+                _s.viewLayout.setContentsMargins(22, 18, 22, 12)
+                _s.viewLayout.setSpacing(10)
+                hdr = QHBoxLayout(); hdr.setSpacing(10)
+                try:
+                    from .tabler_icons import TablerIcon as _TI_s
+                    ic = _QTB_segp(); ic.setEnabled(False)
+                    ic.setIcon(_TI_s("tabler_clock.svg").icon(color=_QC_seg("#58A6FF")))
+                    ic.setIconSize(_QS_seg(22, 22))
+                    ic.setStyleSheet(
+                        "background: rgba(56,139,253,0.14); border: none;"
+                        " border-radius: 10px; padding: 6px;"
+                    )
+                    hdr.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
+                except Exception:
+                    pass
+                tc = QVBoxLayout(); tc.setSpacing(2)
+                t = QLabel("Add new work segment?")
+                t.setStyleSheet(
+                    "color: #E6EDF3; font-size: 15px; font-weight: 700;"
+                    " background: transparent;"
+                )
+                sub = QLabel(
+                    "This case is marked as not counting for production "
+                    "(internal reprocess / doctor review). Would you like to "
+                    "log a new work segment for this return session?"
+                )
+                sub.setWordWrap(True)
+                sub.setStyleSheet(
+                    "color: #8B949E; font-size: 11px; background: transparent;"
+                )
+                tc.addWidget(t); tc.addWidget(sub)
+                hdr.addLayout(tc, 1)
+                _s.viewLayout.addLayout(hdr)
+                _s.widget.setMinimumWidth(440)
+                _s.cancelButton.setText("Not now")
+                _s.yesButton.setText("Add segment")
+
+        dlg = _AskNewSegmentSheet(self)
+        if dlg.exec():
+            self._open_segments_dialog(start_in_add_mode=True)
+
+    def _open_segments_dialog(self, start_in_add_mode: bool = False):
+        """Modal that lists existing time segments for the case in edit and
+        lets the user add / edit / delete entries."""
+        editing_id = getattr(self, "_editing_id", None)
+        table = self._current_editing_table()
+        if not editing_id or not table:
+            return
+        try:
+            from qfluentwidgets import MessageBoxBase
+        except Exception:
+            return
+        from db.database import (
+            list_case_segments, add_case_segment, update_case_segment,
+            delete_case_segment, get_case_total_minutes,
+        )
+        from PySide6.QtGui import QColor as _QC_sm
+        from PySide6.QtCore import QSize as _QS_sm
+        from PySide6.QtWidgets import (
+            QToolButton as _QTB_sm, QTimeEdit as _QTE_sm,
+            QTableWidget as _QTW_sm, QTableWidgetItem as _QTI_sm,
+            QHeaderView as _QHV_sm,
+        )
+
+        tab = self  # outer reference for helpers below
+
+        class _SegSheet(MessageBoxBase):
+            def __init__(_s, h):
+                super().__init__(h.window())
+                try:
+                    _s.setMaskColor(_QC_sm(0, 0, 0, 170))
+                except Exception:
+                    pass
+                _s.widget.setObjectName("segCard")
+                apply_fluent_modal_palette(_s, "segCard")
+                _s.viewLayout.setContentsMargins(22, 18, 22, 8)
+                _s.viewLayout.setSpacing(8)
+
+                hdr = QHBoxLayout(); hdr.setSpacing(10)
+                try:
+                    from .tabler_icons import TablerIcon as _TI_sm
+                    ic = _QTB_sm(); ic.setEnabled(False)
+                    ic.setIcon(_TI_sm("tabler_clock.svg").icon(color=_QC_sm("#58A6FF")))
+                    ic.setIconSize(_QS_sm(22, 22))
+                    ic.setStyleSheet(
+                        "background: rgba(56,139,253,0.14); border: none;"
+                        " border-radius: 10px; padding: 6px;"
+                    )
+                    hdr.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
+                except Exception:
+                    pass
+                tc = QVBoxLayout(); tc.setSpacing(2)
+                t = QLabel("Work time segments")
+                t.setStyleSheet(
+                    "color: #E6EDF3; font-size: 15px; font-weight: 700;"
+                    " background: transparent;"
+                )
+                _s._total_lbl = QLabel("")
+                _s._total_lbl.setStyleSheet(
+                    "color: #8B949E; font-size: 11px; background: transparent;"
+                )
+                tc.addWidget(t); tc.addWidget(_s._total_lbl)
+                hdr.addLayout(tc, 1)
+                _s.viewLayout.addLayout(hdr)
+
+                # ── Add Segment section (first, with explanation) ──
+                add_card = QFrame()
+                add_card.setObjectName("addSegCard")
+                add_card.setStyleSheet(
+                    "#addSegCard { background: rgba(56,139,253,0.06);"
+                    "  border: 1px solid rgba(56,139,253,0.35);"
+                    "  border-radius: 10px; }"
+                    "QLabel { background: transparent; border: none; }"
+                )
+                av = QVBoxLayout(add_card)
+                av.setContentsMargins(14, 10, 14, 10)
+                av.setSpacing(6)
+                _add_title = QLabel("Add segment")
+                _add_title.setStyleSheet(
+                    "color: #58A6FF; font-size: 12px; font-weight: 800;"
+                    " letter-spacing: 0.5px;"
+                )
+                _add_help = QLabel(
+                    "Each segment records one return session for this case. "
+                    "Total work time = sum of every segment's start→end. Use "
+                    "this whenever the case comes back from reprocess / "
+                    "doctor review so the real effort is captured."
+                )
+                _add_help.setWordWrap(True)
+                _add_help.setStyleSheet(
+                    "color: #C9D1D9; font-size: 11px;"
+                )
+                av.addWidget(_add_title)
+                av.addWidget(_add_help)
+
+                # Build the add-segment inputs (Date+Start+End) inside the
+                # explanation card. DateEditWithShortcut already ships the
+                # chevron + calendar icon styling used by the Case card.
+                add_row = QHBoxLayout(); add_row.setSpacing(8)
+                _s._add_date = DateEditWithShortcut()
+                _s._add_date.setDate(QDate.currentDate())
+                _s._add_date.setMinimumHeight(30)
+                _s._add_start = TimeEditWithShortcut()
+                _s._add_start.setDisplayFormat("HH:mm")
+                _s._add_start.setTime(QTime.currentTime())
+                _s._add_start.setMinimumHeight(30)
+                _s._add_end = TimeEditWithShortcut()
+                _s._add_end.setDisplayFormat("HH:mm")
+                _s._add_end.setTime(QTime.currentTime())
+                _s._add_end.setMinimumHeight(30)
+                # Reuse the pro_card input styling for chevron + calendar
+                # icons so this modal matches the Case Information card.
+                try:
+                    from .widgets import _icon_url as _icu_seg
+                    _chev_seg = _icu_seg("tabler_chevron_down.svg")
+                    _cal_seg = _icu_seg("tabler_calendar.svg")
+                    _clk_seg = _icu_seg("tabler_clock.svg")
+                except Exception:
+                    _chev_seg = _cal_seg = _clk_seg = ""
+                _input_css_seg = (
+                    "QDateEdit, QTimeEdit {"
+                    "  background-color: #161B22; border: 1px solid #30363D;"
+                    "  border-radius: 6px; padding: 4px 22px 4px 10px;"
+                    "  color: #E6EDF3; font-size: 12px; min-height: 28px; }"
+                    "QDateEdit:focus, QTimeEdit:focus {"
+                    "  border-bottom: 2px solid #388BFD; }"
+                    "QDateEdit::drop-down, QTimeEdit::drop-down {"
+                    "  subcontrol-origin: padding;"
+                    "  subcontrol-position: right center;"
+                    "  width: 20px; border: none; }"
+                    f"QDateEdit::down-arrow, QTimeEdit::down-arrow {{"
+                    f"  image: url({_chev_seg});"
+                    "  width: 11px; height: 11px; }"
+                    "QDateEdit::up-button, QDateEdit::down-button,"
+                    "QTimeEdit::up-button, QTimeEdit::down-button {"
+                    "  width: 0; border: none; }"
+                )
+                for w in (_s._add_date, _s._add_start, _s._add_end):
+                    w.setStyleSheet(_input_css_seg)
+                # Guarantee the Date field can fit "yyyy-MM-dd" + chevron.
+                _s._add_date.setMinimumWidth(140)
+                _s._add_start.setMinimumWidth(90)
+                _s._add_end.setMinimumWidth(90)
+
+                for w, lbl, stretch in (
+                    (_s._add_date, "Date", 2),
+                    (_s._add_start, "Start", 1),
+                    (_s._add_end, "End", 1),
+                ):
+                    col = QVBoxLayout(); col.setSpacing(2)
+                    l = QLabel(lbl)
+                    l.setStyleSheet(
+                        "color: #8B949E; font-size: 10px; font-weight: 600;"
+                        " background: transparent;"
+                    )
+                    col.addWidget(l); col.addWidget(w)
+                    add_row.addLayout(col, stretch)
+
+                _add_btn = QPushButton("Add segment")
+                _add_btn.setCursor(Qt.PointingHandCursor)
+                _add_btn.setMinimumHeight(30)
+                _add_btn.setStyleSheet(
+                    "QPushButton { background: #1e63e4; color: white;"
+                    "  border: none; border-radius: 6px; padding: 6px 14px;"
+                    "  font-weight: 700; font-size: 11px; }"
+                    "QPushButton:hover { background: #2a73f3; }"
+                )
+                add_row.addWidget(_add_btn, 0, Qt.AlignmentFlag.AlignBottom)
+                av.addLayout(add_row)
+                _s.viewLayout.addWidget(add_card)
+
+                # ── Existing segments table ──
+                _s._tbl = _QTW_sm()
+                _s._tbl.setColumnCount(5)
+                _s._tbl.setHorizontalHeaderLabels(
+                    ["Date", "Start", "End", "Duration", ""]
+                )
+                _s._tbl.verticalHeader().setVisible(False)
+                _s._tbl.setEditTriggers(_QTW_sm.EditTrigger.NoEditTriggers)
+                _s._tbl.setSelectionBehavior(_QTW_sm.SelectionBehavior.SelectRows)
+                _s._tbl.setMinimumHeight(180)
+                _s._tbl.horizontalHeader().setSectionResizeMode(
+                    _QHV_sm.ResizeMode.Stretch
+                )
+                _s._tbl.horizontalHeader().setStretchLastSection(False)
+                _s._tbl.setColumnWidth(4, 48)
+                _s._tbl.horizontalHeader().setSectionResizeMode(
+                    4, _QHV_sm.ResizeMode.Fixed
+                )
+                _s._tbl.verticalHeader().setDefaultSectionSize(34)
+                _s.viewLayout.addWidget(_s._tbl)
+
+                def _refresh():
+                    segs = list_case_segments(int(editing_id), table)
+                    _s._tbl.setRowCount(len(segs))
+                    for i, seg in enumerate(segs):
+                        for col, key in enumerate(
+                            ("fecha", "hora_inicio", "hora_fin")
+                        ):
+                            it = _QTI_sm(str(seg.get(key) or ""))
+                            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                            it.setData(Qt.ItemDataRole.UserRole, seg["id"])
+                            _s._tbl.setItem(i, col, it)
+                        from db.database import _segment_duration_minutes as _dm
+                        dur = _dm(seg["hora_inicio"], seg["hora_fin"])
+                        h, m = divmod(int(dur), 60)
+                        it_dur = _QTI_sm(f"{h}h {m:02d}m" if h else f"{m} min")
+                        it_dur.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        _s._tbl.setItem(i, 3, it_dur)
+                        # Delete button per row.
+                        del_btn = _QTB_sm()
+                        del_btn.setCursor(Qt.PointingHandCursor)
+                        del_btn.setFixedSize(24, 24)
+                        try:
+                            from .tabler_icons import TablerIcon as _TI_d
+                            del_btn.setIcon(
+                                _TI_d("tabler_trash.svg").icon(color=_QC_sm("#F85149"))
+                            )
+                            del_btn.setIconSize(_QS_sm(13, 13))
+                        except Exception:
+                            del_btn.setText("X")
+                        del_btn.setStyleSheet(
+                            "QToolButton { background: transparent;"
+                            "  border: 1px solid #F85149; border-radius: 4px;"
+                            "  padding: 0; margin: 0; }"
+                            "QToolButton:hover { background: rgba(248,81,73,0.10); }"
+                        )
+                        del_btn.clicked.connect(
+                            lambda _=False, sid=seg["id"]: (
+                                delete_case_segment(sid), _refresh()
+                            )
+                        )
+                        _del_wrap = QWidget()
+                        _del_wrap.setStyleSheet("background: transparent;")
+                        _dwl = QHBoxLayout(_del_wrap)
+                        _dwl.setContentsMargins(0, 0, 0, 0)
+                        _dwl.setSpacing(0)
+                        _dwl.addStretch(1)
+                        _dwl.addWidget(del_btn, 0, Qt.AlignmentFlag.AlignCenter)
+                        _dwl.addStretch(1)
+                        _s._tbl.setCellWidget(i, 4, _del_wrap)
+                    total = get_case_total_minutes(int(editing_id), table)
+                    th, tm = divmod(int(total), 60)
+                    _s._total_lbl.setText(
+                        f"{len(segs)} segment(s) · Total: "
+                        f"{th}h {tm:02d}m" if th else
+                        f"{len(segs)} segment(s) · Total: {tm} min"
+                    )
+                    tab._refresh_segments_btn_state()
+
+                def _do_add():
+                    add_case_segment(
+                        int(editing_id), table,
+                        _s._add_date.date().toString("yyyy-MM-dd"),
+                        _s._add_start.time().toString("HH:mm"),
+                        _s._add_end.time().toString("HH:mm"),
+                    )
+                    _refresh()
+                _add_btn.clicked.connect(_do_add)
+                _refresh()
+                _s.widget.setMinimumWidth(620)
+
+                _s.cancelButton.hide()
+                _s.yesButton.setText("Close")
+
+                if start_in_add_mode:
+                    _s._add_start.setFocus()
+
+        dlg = _SegSheet(self)
+        dlg.exec()
 
     def _update_mode_ui(self):
         """Sync toggle label colors, save button, and right panel to self._mode."""
@@ -4310,6 +4777,36 @@ class RegisterTab(QWidget):
             return
 
         std_time = self._std_for_case(region, tipo)
+
+        # When finalising a case that previously cycled through reprocess
+        # (NC → return → NC → …), the segments table holds every prior
+        # work window. The "real" time for efficiency is the SUM of all
+        # those segments plus the current Start/End shown on the form.
+        count_production = 1 if self.count_toggle.isChecked() else 0
+        if self._editing_id and count_production == 1:
+            try:
+                from db.database import list_case_segments
+                _editing_table = "ot_cases" if self._mode == "overtime" else "cases"
+                _segs = list_case_segments(int(self._editing_id), _editing_table)
+                if _segs:
+                    _seg_mins = sum(
+                        max(0, (
+                            int(s["hora_fin"].split(":")[0]) * 60
+                            + int(s["hora_fin"].split(":")[1])
+                        ) - (
+                            int(s["hora_inicio"].split(":")[0]) * 60
+                            + int(s["hora_inicio"].split(":")[1])
+                        ))
+                        for s in _segs
+                    )
+                    tiempo_real += _seg_mins
+            except Exception as exc:
+                log_event(
+                    "register",
+                    f"segment-total accumulation failed: {exc}",
+                    level="WARN",
+                )
+
         efficiency = (std_time / tiempo_real) * 100
         estado = "OK" if efficiency >= 100 else "LOW"
         case_value = self.calculate_case_value(std_time)
@@ -4318,7 +4815,6 @@ class RegisterTab(QWidget):
         cursor = conn.cursor()
 
         # Get toggle and comments values
-        count_production = 1 if self.count_toggle.isChecked() else 0
         comments = self._comments_widget_for_mode(self._mode).toPlainText().strip()
 
         # Determine target table based on current mode

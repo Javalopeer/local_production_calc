@@ -194,10 +194,18 @@ def parse_clipboard(standards: dict, clipboard_text: str = "") -> dict:
     # ── Override: detect "new scans" / rollback notes anywhere in text.
     # Cases where the doctor requested new impressions get classified as
     # "New Impressions" regardless of the CR/label heuristic above.
+    # Match only phrases that indicate the doctor actually delivered new
+    # impressions. Plain "new scans" was too aggressive — it matched the
+    # boilerplate Ormco hold message ("If you will be adding new scans
+    # you can also do it through the Edit option...") that fires on every
+    # Incomplete-scan hold even when no rescan ever happens.
     _NEW_IMPRESSIONS_KEYWORDS = (
         "rollback complete",
         "scans available email",
-        "new scans",
+        "new scans uploaded",
+        "uploaded new scans",
+        "new impressions uploaded",
+        "uploaded new impressions",
         "new impressions",
         "replicate t2",
     )
